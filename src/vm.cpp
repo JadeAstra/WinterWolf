@@ -4512,15 +4512,17 @@ bool VM::construct(ObjClass* cls, int argc, bool packed, const Value* captures, 
         nameEntry(instance, cls->nextEntry, cls->nextOrdinal);
         cls->nextEntry = nullptr;
     }
-    // An initializer that only gives the header's fields their arguments: given here, with no
-    // frame for it, where each fits (objects plan part 4).
-    if (cls->headerOnly && !packed && fieldsFromHeader(instance, argc)) {
+    // Declared fields get their initial values before the initializer runs: here, with no call,
+    // where the fields' function only gives them constants and each fits (objects plan part 4).
+    if (!(cls->fieldsPlanned && fieldsFromPlan(instance, cls->fieldInits[0]->proto, cls->fieldsPlan, nullptr)))
+        for (size_t i = 0; i < cls->fieldInits.size(); i++) callWithReceiver(Value::object(instance), cls->fieldInits[i]);
+    // An initializer that only gives fields its arguments and constants: given here, with no
+    // frame for it, where each fits.
+    if (cls->initPlanned && !packed && argc == cls->init->proto->arity && fieldsFromPlan(instance, cls->init->proto, cls->initPlan, sp_ - argc)) {
         instance->constructing = false;
         sp_ -= argc;
         return false;
     }
-    // Declared fields get their initial values before the initializer runs.
-    for (size_t i = 0; i < cls->fieldInits.size(); i++) callWithReceiver(Value::object(instance), cls->fieldInits[i]);
     if (cls->init != nullptr) {
         callClosure(cls->init, argc, packed);
         return true;
@@ -4530,60 +4532,90 @@ bool VM::construct(ObjClass* cls, int argc, bool packed, const Value* captures, 
     return false;
 }
 
-// A class whose initializer is the one the compiler makes for a header of fields and nothing
-// else (objects plan part 4, 2026-11-20): GET_LOCAL 0, GET_LOCAL k, SET_OWN, POP for each
-// parameter in order, then GET_LOCAL 0, RETURN_INIT; no field of the body given a value first,
-// none required. Its objects are given their fields by construct, through the caches of those
-// SET_OWNs, with no frame for the initializer. Any other code in it (a default, an init block,
-// a check) and it is called as before.
-void VM::seeHeaderInit(ObjClass* cls) {
-    cls->headerOnly = false;
-    cls->headerCaches.clear();
-    if (cls->isValue || cls->isInterface || cls->isAbstract || cls->init == nullptr || !cls->fieldInits.empty() || cls->anyRequired) return;
-    const FunctionProto* const p = cls->init->proto;
-    if (p->caches == nullptr || p->quickArity != p->arity || p->quickFewest != p->arity) return;
+// Field values given with no frame (objects plan part 4, 2026-11-20). A function that gives a new
+// object's fields their values, as the compiler makes it, is a run of GET_LOCAL 0, a value,
+// SET_OWN, POP for each field, the value an argument (GET_LOCAL k) or a constant (CONST, TRUE,
+// FALSE, NULL); an initializer ends GET_LOCAL 0, RETURN_INIT and takes each argument once, a
+// fields' function ends NULL, RETURN and takes none. Such a function's work is done by construct
+// itself, through the caches of those SET_OWNs; any other code in it (a default, an init block,
+// a value worked out, a check) and it is called as before. False, nothing planned, where not.
+static bool planFieldsOf(VM& vm, const ObjClass* cls, const FunctionProto* p, bool isInit, std::vector<ObjClass::PlannedField>& out) {
+    out.clear();
+    if (p->caches == nullptr || p->quickArity != p->arity || p->quickFewest != p->arity || (!isInit && p->arity != 0)) return false;
     const std::vector<uint8_t>& c = p->code;
     auto opAtCode = [&](size_t i) { return i < c.size() ? static_cast<Op>(c[i]) : Op::Pop; };
     auto u16At = [&](size_t i) { return i + 1 < c.size() ? static_cast<int>(c[i] | (c[i + 1] << 8)) : -1; };
-    std::vector<uint16_t> caches;
-    std::vector<uint32_t> fields;
+    std::vector<bool> taken(static_cast<size_t>(p->arity) + 1, false);
     size_t at = 0;
-    for (int k = 1;; k++) {
-        if (opAtCode(at) != Op::GetLocal || u16At(at + 1) != 0) return;
+    for (;;) {
+        if (!isInit && opAtCode(at) == Op::Null && opAtCode(at + 1) == Op::Return && at + 2 == c.size()) break;
+        if (opAtCode(at) != Op::GetLocal || u16At(at + 1) != 0) return false;
         at += 3;
-        if (opAtCode(at) == Op::ReturnInit && at + 1 == c.size()) break;
-        if (opAtCode(at) != Op::GetLocal || u16At(at + 1) != k) return;
-        at += 3;
-        if (opAtCode(at) != Op::SetOwn) return;
+        if (isInit && opAtCode(at) == Op::ReturnInit && at + 1 == c.size()) break;
+        ObjClass::PlannedField planned;
+        const Op valueOp = opAtCode(at);
+        if (valueOp == Op::GetLocal) {
+            const int k = u16At(at + 1);
+            if (!isInit || k < 1 || k > p->arity || taken[static_cast<size_t>(k)]) return false;
+            taken[static_cast<size_t>(k)] = true;
+            planned.argument = k;
+            at += 3;
+        } else if (valueOp == Op::Const) {
+            const int k = u16At(at + 1);
+            if (k < 0 || static_cast<size_t>(k) >= p->constants.size()) return false;
+            const Value v = p->constants[static_cast<size_t>(k)];
+            // A constant the collector need not see: a number, a char, a byte, or a string kept for good.
+            if (!(v.isInt() || v.isFloat() || v.isChar() || v.isByte() || (v.isObjType(ObjType::String) && v.as.obj->immortal))) return false;
+            planned.constant = v;
+            at += 3;
+        } else if (valueOp == Op::True || valueOp == Op::False || valueOp == Op::Null) {
+            planned.constant = valueOp == Op::True ? Value::boolean(true) : valueOp == Op::False ? Value::boolean(false) : Value::null();
+            at += 1;
+        } else {
+            return false;
+        }
+        if (opAtCode(at) != Op::SetOwn) return false;
         const int name = u16At(at + 1);
         const int cache = u16At(at + 3);
         if (cache < 0 || static_cast<uint32_t>(cache) >= p->cacheCount || name < 0 || static_cast<size_t>(name) >= p->constants.size() ||
             !p->constants[static_cast<size_t>(name)].isObjType(ObjType::String))
-            return;
+            return false;
         const Value* const declared = cls->declaredIndex.find(asString(p->constants[static_cast<size_t>(name)]));
-        if (declared == nullptr) return;
+        if (declared == nullptr) return false;
         at += 5;
-        if (opAtCode(at) != Op::Pop) return;
+        if (opAtCode(at) != Op::Pop) return false;
         at += 1;
-        caches.push_back(static_cast<uint16_t>(cache));
-        fields.push_back(static_cast<uint32_t>(declared->as.i));
+        planned.cache = static_cast<uint16_t>(cache);
+        planned.field = static_cast<uint32_t>(declared->as.i);
+        out.push_back(planned);
     }
-    if (static_cast<int>(caches.size()) != p->arity) return;
-    cls->headerCaches = std::move(caches);
-    cls->headerFields = std::move(fields);
-    cls->headerOnly = true;}
+    for (int k = 1; k <= p->arity; k++)
+        if (!taken[static_cast<size_t>(k)]) return false;  // an argument given to no field: used otherwise
+    (void)vm;
+    return true;
+}
 
-bool VM::fieldsFromHeader(ObjInstance* instance, int argc) {
+void VM::seeHeaderInit(ObjClass* cls) {
+    cls->initPlanned = cls->fieldsPlanned = false;
+    cls->initPlan.clear();
+    cls->fieldsPlan.clear();
+    if (cls->isValue || cls->isInterface || cls->isAbstract) return;
+    // The fields' function, where there is one alone (a subclass's inherited ones as well: called as before).
+    if (cls->fieldInits.size() == 1 && planFieldsOf(*this, cls, cls->fieldInits[0]->proto, false, cls->fieldsPlan)) cls->fieldsPlanned = true;
+    // The initializer, where it has no required fields to check at its end.
+    if (cls->init != nullptr && !cls->anyRequired && planFieldsOf(*this, cls, cls->init->proto, true, cls->initPlan)) cls->initPlanned = true;
+}
+
+bool VM::fieldsFromPlan(ObjInstance* instance, const FunctionProto* fn, const std::vector<ObjClass::PlannedField>& plan, const Value* args) {
+    if (instance->core != coreId_) return false;
+    const std::atomic<uint64_t>* const caches = fn->caches.get();
     const ObjClass* const cls = instance->cls;
-    if (static_cast<size_t>(argc) != cls->headerCaches.size() || instance->core != coreId_) return false;
-    const std::atomic<uint64_t>* const caches = cls->init->proto->caches.get();
-    const Value* const args = sp_ - argc;
-    // Every argument first: one that does not fit as its SET_OWN's cache says (no cache yet, an
-    // object of another layout, a value of another kind, a type quickly told and not this one,
-    // a Ref or a value kept in the value itself) and the initializer gives them all instead.
-    for (int k = 0; k < argc; k++) {
-        const uint64_t seen = caches[cls->headerCaches[static_cast<size_t>(k)]].load(std::memory_order_relaxed);
-        const Value& value = args[k];
+    // Every value first: one that does not fit as its SET_OWN's cache says (no cache yet, an
+    // object of another layout, a value of another kind, a type not this one, a Ref or a value
+    // kept in the value itself) and the function gives them all instead.
+    for (const ObjClass::PlannedField& planned : plan) {
+        const uint64_t seen = caches[planned.cache].load(std::memory_order_relaxed);
+        const Value& value = planned.argument > 0 ? args[planned.argument - 1] : planned.constant;
         if (seen == 0 || static_cast<uint32_t>(seen >> 32) != instance->shape || value.kind == ValueKind::Ref ||
             value.kind == ValueKind::Small || value.kind == ValueKind::Undefined)
             return false;
@@ -4592,8 +4624,8 @@ bool VM::fieldsFromHeader(ObjInstance* instance, int argc) {
         } else {
             if ((seen & 2) != 0) return false;  // a value kept inside the object: its own way
             // Its declared type, as SET_OWN's rare way checks it (checkFieldAssignment): a class's
-            // found by the initializer the first time, before which the initializer does it.
-            const FieldDecl& d = cls->declared[cls->headerFields[static_cast<size_t>(k)]];
+            // found by the function the first time, before which the function does it.
+            const FieldDecl& d = cls->declared[planned.field];
             const uint8_t type = d.type;
             if (type != 0 && !(value.isNull() && (type & kTypeNullable) != 0)) {
                 if ((type & kTypeMask) == kTypeInstance && d.typeClass == nullptr) return false;
@@ -4603,9 +4635,9 @@ bool VM::fieldsFromHeader(ObjInstance* instance, int argc) {
     }
     // Then each written as SET_OWN's quick way writes it: a new object's vals have no value yet.
     uint8_t* const data = instance->payloadData();
-    for (int k = 0; k < argc; k++) {
-        const uint64_t seen = caches[cls->headerCaches[static_cast<size_t>(k)]].load(std::memory_order_relaxed);
-        const Value& value = args[k];
+    for (const ObjClass::PlannedField& planned : plan) {
+        const uint64_t seen = caches[planned.cache].load(std::memory_order_relaxed);
+        const Value& value = planned.argument > 0 ? args[planned.argument - 1] : planned.constant;
         uint8_t* const field = reinterpret_cast<uint8_t*>(instance) + ((seen >> 16) & 0xFFFF);
         if ((seen & 0x80) != 0) {
             const int64_t bits = value.kind == ValueKind::Bool ? (value.as.b ? 1 : 0) : value.as.i;
@@ -4620,6 +4652,7 @@ bool VM::fieldsFromHeader(ObjInstance* instance, int argc) {
     }
     return true;
 }
+
 
 ObjUpvalue* VM::capturedOf(Value receiver, int k) {
     if (!receiver.isObjType(ObjType::Instance) || k >= asInstance(receiver)->captureCount)

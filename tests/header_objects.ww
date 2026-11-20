@@ -57,3 +57,49 @@ try { nodeOf("not a node") } catch (e : ClassCastException) { print(e.message) }
 fun kindsOf(x : any) : Kinds => Kinds(x as int, 1.0, true, "", 'z')
 try { kindsOf("five") } catch (e : ClassCastException) { print(e.message) }
 // expect: cannot cast a value of type string to int
+
+// Fields of the body given constants: by the fields' function, or inside a generated initializer
+// after the header's arguments; a class with an initializer of its own (its fields' function's
+// work done here, the initializer still called); a value worked out (the function as before).
+class Defaults {
+  var i = 7
+  var f = 2.5
+  var b = true
+  var s = "text"
+  var n : Defaults? = null
+  var c = 'q'
+  var neg = -3
+}
+class Mixed(val h : int) {
+  var count = 0
+  val label = "m"
+}
+class OwnInit {
+  var ready = false
+  var size = 4
+  fun init(extra : int) {
+    size += extra
+    ready = true
+  }
+}
+class Worked {
+  var square = 6 * 7
+  var listed = [1, 2]
+}
+var total = 0
+var shown = ""
+for round in 0..<300 {
+  val d = Defaults()
+  d.i += round
+  total += d.i + (d.b ? 1 : 0) + d.s.size + d.c.code + d.neg + (d.n == null ? 1 : 0)
+  val m = Mixed(round)
+  m.count += 2
+  total += m.h + m.count + m.label.size
+  val o = OwnInit(round)
+  total += o.size + (o.ready ? 1 : 0)
+  val w = Worked()
+  total += w.square + w.listed.size
+  shown = "${d.f} ${d.s} ${m.label} ${o.ready}"
+}
+print(total, shown)
+// expect: 187050 2.5 text m true

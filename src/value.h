@@ -1297,13 +1297,22 @@ struct ObjClass final : Obj {
         return nullptr;
     }
 
-    // An initializer that only gives the header's fields their arguments, in order (objects plan
-    // part 4, VM::seeHeaderInit): for each parameter, the cache of its SET_OWN in the
-    // initializer, which an object made with no frame for it is given its fields through
-    // (VM::construct). Last in the class, past what native code reads at fixed places (layout.h).
-    bool headerOnly = false;
-    std::vector<uint16_t> headerCaches;
-    std::vector<uint32_t> headerFields;  // and each one's field, in `declared`, for its type
+    // Fields given their values with no frame (objects plan part 4, VM::planFields): an initializer
+    // that only gives fields its arguments and constants, and a fields' function (fieldInits[0])
+    // that only gives them constants, as the compiler makes them. For each field, its SET_OWN's
+    // cache in that function, its place in `declared` (for its type), and its value: argument k
+    // (from 1), or with 0 the constant (a number, a bool, a char, null or an interned string,
+    // none the collector need see). Last in the class, past what native code reads (layout.h).
+    struct PlannedField {
+        uint16_t cache = 0;
+        uint32_t field = 0;
+        int32_t argument = 0;
+        Value constant = Value::null();
+    };
+    bool initPlanned = false;
+    std::vector<PlannedField> initPlan;
+    bool fieldsPlanned = false;
+    std::vector<PlannedField> fieldsPlan;
 };
 
 // A type as the program has it when it runs (M6.6 part 1): what a list or a map was made to
