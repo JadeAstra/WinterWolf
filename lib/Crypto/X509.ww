@@ -672,7 +672,10 @@ class __PathSearch(val anchors : Map<DistinguishedName, List<Certificate>>, val 
         path.removeLast()
       }
     }
-    if (reason == null) { reason = "no issuer of ${child.subject} (${child.issuer}) is trusted or given" }
+    if (reason == null) {
+      reason = child.isSelfIssued and path.size > 1 ? "the root ${child.subject} is not one trusted here" :
+               "no issuer of ${child.subject} (${child.issuer}) is trusted or given"
+    }
     return null
   }
 }

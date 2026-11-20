@@ -1,0 +1,203 @@
+// A fuzz run over import Crypto's TLS reading (networking plan, part 5's gate): real handshake
+// bytes captured, then changed at random and fed to a ww server (a ClientHello) and a ww client (a
+// server's flight, TLS 1.3 and 1.2), each round on a fresh connection over the loopback. Each must
+// end in a refusal with an alert (or the connection's end), never an internal error and never a
+// hang. Anything else is written to fuzz-<n>.bin to replay.
+//
+//   ww tools/crypto/tls_fuzz.ww [rounds per kind, 3000] [seed, 1] [folder for fuzz-<n>.bin, .]
+// From the repository's root (it reads tests/data/certs/tls).
+import Crypto.*
+
+val rounds = Program.arguments.size > 0 ? Program.arguments[0].toInt() : 3000
+Math.seed(Program.arguments.size > 1 ? Program.arguments[1].toInt() : 1)
+val dir = "tests/data/certs/tls"
+val identity = TlsIdentity.of(Pkcs12.read(FilePath("$dir/ec.p12").readBytes(), "pw")[0])
+val roots = TrustStore.fromPem(FilePath("$dir/root.pem").readText())
+val serverOptions = TlsServerOptions(identity)
+val listener = ServerSocket(0, bindAddress = "127.0.0.1")
+val port = listener.localPort
+
+fun clientOptions(max : TlsVersion) : TlsClientOptions => TlsClientOptions(trust = roots, sessions = null, maximumVersion = max)
+
+// A connection to the listener; where the system has run out of ports for a while (tens of
+// thousands of short connections wait out TIME_WAIT), waits and tries again.
+suspend fun dial() : Socket {
+  var tries = 0
+  while (true) {
+    try {
+      return Socket("127.0.0.1", port)
+    } catch (e : IOException) {
+      tries++
+      if (tries > 120) { throw e }
+      delay(1.seconds)
+    }
+  }
+}
+
+// Everything that comes on `socket` until it ends or is quiet for a while.
+fun readAll(socket : Socket) : Bytes {
+  socket.readTimeout = 500.milliseconds
+  var all = Bytes(0)
+  try {
+    while (true) {
+      val b = socket.reader.read()
+      if (b == null) { break }
+      val next = Bytes(all.size + b!!.size)
+      next.copyFrom(all, 0, 1, 0, 1, all.size)
+      next.copyFrom(b!!, 0, 1, all.size, 1, b!!.size)
+      all = next
+    }
+  } catch (e : IOException) { }
+  return all
+}
+
+// A ClientHello our client sends.
+suspend fun captureHello(max : TlsVersion) : Bytes {
+  val side = thread {
+    val s = listener.accept()
+    s.readTimeout = 2.seconds
+    val b = s.reader.read()
+    s.close()
+    b!!
+  }
+  try { TlsSocket.client(dial(), "server.test", clientOptions(max)) } catch (e : IOException) { }
+  return side.get()
+}
+
+// What our server answers to a ClientHello, up to where it waits for the client.
+suspend fun captureFlight(hello : Bytes) : Bytes {
+  val side = thread {
+    val s = listener.accept()
+    try { TlsSocket.server(s, serverOptions) } catch (e : IOException) { }
+    s.close()
+  }
+  val raw = dial()
+  raw.writer.write(hello)
+  val flight = readAll(raw)
+  raw.close()
+  side.get()
+  return flight
+}
+
+// `b` changed: bytes set at random, cut short, a length or type changed, a part repeated.
+fun mutate(b : Bytes) : Bytes {
+  val kind = Math.randomInt(0, 4)
+  if (kind == 1 and b.size > 2) { return b[0..<Math.randomInt(1, b.size - 1)] }
+  val out = b[0..]
+  if (kind == 0) {
+    for (k in 0..<Math.randomInt(1, 6)) { out[Math.randomInt(0, out.size - 1)] = Math.randomInt(0, 255).toByteWrapped() }
+  } else if (kind == 2) {
+    // A length near the start: the record's, or the first message's.
+    out[[3, 4, 6, 7, 8][Math.randomInt(0, 4)]] = Math.randomInt(0, 255).toByteWrapped()
+  } else if (kind == 3) {
+    // Within the first message's body, where the structures are.
+    val at = Math.randomInt(9, Math.min(out.size - 1, 200))
+    out[at] = (out[at].toInt() ^ (1 << Math.randomInt(0, 7))).toByteWrapped()
+  } else {
+    // A run repeated, as a message twice or a vector longer than it says.
+    val from = Math.randomInt(5, out.size - 2)
+    val n = Math.randomInt(1, Math.min(64, out.size - from))
+    val longer = Bytes(out.size + n)
+    longer.copyFrom(out, 0, 1, 0, 1, from + n)
+    longer.copyFrom(out, from, 1, from + n, 1, out.size - from)
+    return longer
+  }
+  return out
+}
+
+var problems = 0
+val outcomes : open Map<string, int> = {:}
+fun note(outcome : string, input : Bytes) {
+  val key = outcome.substringAfterLast("(").substringBefore(" sent)").substringBefore(")")
+  outcomes[key] = (outcomes[key] ?: 0) + 1
+  if (outcome.startsWith("an internal error") or outcome.startsWith("HANG")) {
+    problems++
+    val file = "${Program.arguments.size > 2 ? Program.arguments[2] : "."}/fuzz-$problems.bin"
+    FilePath(file).writeBytes(input)
+    print("PROBLEM: $outcome (input in $file)")
+  }
+}
+
+// The server, given changed ClientHellos.
+suspend fun fuzzServer(hello : Bytes) {
+  for (round in 0..<rounds) {
+    val input = mutate(hello)
+    val side = thread {
+      val s = listener.accept()
+      s.readTimeout = 5.seconds
+      try {
+        TlsSocket.server(s, serverOptions).close()
+        "taken"
+      } catch (e : SocketTimeoutException) {
+        "HANG: the server waited"
+      } catch (e : TlsException) {
+        e.message ?: ""
+      } catch (e : IOException) {
+        "io"
+      }
+    }
+    val raw = dial()
+    raw.writer.write(input)
+    raw.shutdownOutput()
+    readAll(raw)
+    raw.close()
+    note(side.get(), input)
+  }
+}
+
+// The client, given a server's flight changed.
+suspend fun fuzzClient(flight : Bytes, max : TlsVersion) {
+  for (round in 0..<rounds) {
+    val input = mutate(flight)
+    val side = thread {
+      val s = listener.accept()
+      s.readTimeout = 2.seconds
+      var sent = input
+      try {
+        // The client's session id echoed where the ServerHello has it (at 43, after the record's
+        // header, the message's, the version and the random), so that a flight left whole gets
+        // past it, to the sealed records.
+        val hello = s.reader.read()
+        if (hello != null and hello!!.size > 76 and input.size > 76 and input[43].toInt() == 32 and hello!![43].toInt() == 32) {
+          sent = input[0..]
+          sent.copyFrom(hello!!, 44, 1, 44, 1, 32)
+        }
+      } catch (e : IOException) { }
+      try {
+        s.writer.write(sent)
+        s.shutdownOutput()
+        readAll(s)
+      } catch (e : IOException) { }
+      s.close()
+    }
+    var outcome = ""
+    val socket = dial()
+    socket.readTimeout = 5.seconds
+    try {
+      TlsSocket.client(socket, "server.test", clientOptions(max)).close()
+      outcome = "taken"
+    } catch (e : SocketTimeoutException) {
+      outcome = "HANG: the client waited"
+    } catch (e : TlsException) {
+      outcome = e.message ?: ""
+    } catch (e : IOException) {
+      outcome = "io"
+    }
+    socket.close()
+    side.get()
+    note(outcome, input)
+  }
+}
+
+val t = clock()
+val hello = captureHello(TlsVersion.tls13)
+fuzzServer(hello)
+print("server, ClientHellos changed: $rounds rounds")
+fuzzClient(captureFlight(hello), TlsVersion.tls13)
+print("client, TLS 1.3 flights changed: $rounds rounds")
+fuzzClient(captureFlight(captureHello(TlsVersion.tls12)), TlsVersion.tls12)
+print("client, TLS 1.2 flights changed: $rounds rounds")
+listener.close()
+val shown = outcomes.keys.toList().sortedByDescending { outcomes[it]!! }.map { "$it ${outcomes[it]}" }
+print("outcomes: ${shown.join(", ")}")
+print("${3 * rounds} rounds in ${(clock() - t).toInt()} s: ${problems == 0 ? "no internal error, no hang" : "$problems PROBLEMS"}")

@@ -1,0 +1,77 @@
+// One end of a TLS connection for tools/crypto/tls_interop.sh, against OpenSSL and curl:
+//
+//   ww tls_peer.ww client HOST PORT NAME ROOTS [options]    connects, sends --send, prints what comes back
+//   ww tls_peer.ww server PORT P12 PASSWORD [options]       serves --count connections as a tiny HTTP server
+//
+// Options: --name NAME --roots PEM (a client's, in place of the arguments)  --alpn a,b  --tls12 (1.2 only)  --tls13 (1.3 only)  --identity P12 PASSWORD (a client's)
+//          --client-auth required|requested ROOTS (a server's)  --send TEXT  --repeat N (client: N connections,
+//          resuming)  --count N (server)  --update (client: updateKeys before sending)
+// Each connection prints one line: version, suite, group, ALPN, whether resumed, peer certificates.
+import Crypto.*
+
+val args = Program.arguments
+fun option(name : string) : string? {
+  val i = args.indexOf(name)
+  return i < 0 or i + 1 >= args.size ? null : args[i + 1]
+}
+fun flag(name : string) : bool => args.contains(name)
+val alpn = option("--alpn")?.split(",") ?: []
+val minimum = flag("--tls13") ? TlsVersion.tls13 : TlsVersion.tls12
+val maximum = flag("--tls12") ? TlsVersion.tls12 : TlsVersion.tls13
+fun describe(t : TlsSocket) : string =>
+  "${t.version} ${t.cipherSuite} ${t.group} alpn=${t.applicationProtocol} resumed=${t.isResumed} peer=${t.peerCertificates.size}"
+fun identity(path : string, password : string) : TlsIdentity => TlsIdentity.of(Pkcs12.read(FilePath(path).readBytes(), password)[0])
+
+if (args[0] == "client") {
+  val host = args[1]
+  val port = args[2].toInt()
+  val name = option("--name") ?: args[3]
+  val roots = TrustStore.fromPem(FilePath(option("--roots") ?: args[4]).readText())
+  val idPath = option("--identity")
+  val id = idPath == null ? null : identity(idPath!!, args[args.indexOf("--identity") + 2])
+  val options = TlsClientOptions(trust = roots, alpn = alpn, identity = id, minimumVersion = minimum, maximumVersion = maximum)
+  val repeat = (option("--repeat") ?: "1").toInt()
+  for (i in 0..<repeat) {
+    try {
+      val tls = TlsSocket.client(Socket(host, port), name, options)
+      val described = describe(tls)
+      if (flag("--update")) { tls.updateKeys() }
+      val send = option("--send")
+      if (send != null) { tls.writer.write(send!!.replace("\\r", "\r").replace("\\n", "\n")) }
+      val reply = tls.reader.readText()
+      print("$described || ${reply.lines().take(3).join(" | ")}")
+      tls.close()
+    } catch (e : IOException) {
+      print("REFUSED: ${e.message}")
+    }
+  }
+} else {
+  val port = args[1].toInt()
+  val id = identity(args[2], args[3])
+  val authOption = option("--client-auth")
+  val auth = authOption == "required" ? TlsClientAuthentication.required : authOption == "requested" ? TlsClientAuthentication.requested : TlsClientAuthentication.none
+  val clientTrust = authOption == null ? null : TrustStore.fromPem(FilePath(args[args.indexOf("--client-auth") + 2]).readText())
+  val options = TlsServerOptions(id, alpn = alpn, clientAuthentication = auth, clientTrust = clientTrust, minimumVersion = minimum, maximumVersion = maximum)
+  val listener = ServerSocket(port, bindAddress = "127.0.0.1")
+  print("listening on $port")
+  val count = (option("--count") ?: "1").toInt()
+  for (i in 0..<count) {
+    val socket = listener.accept()
+    try {
+      val tls = TlsSocket.server(socket, options)
+      val line = tls.reader.readLine()
+      // The rest of the request, to its empty line.
+      while (true) {
+        val more = tls.reader.readLine()
+        if (more == null or more == "") { break }
+      }
+      val body = "${describe(tls)} request=$line\n"
+      tls.writer.write("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.toBytes().size}\r\n\r\n$body")
+      print(describe(tls))
+      tls.close()
+    } catch (e : IOException) {
+      print("REFUSED: ${e.message}")
+    }
+  }
+  listener.close()
+}

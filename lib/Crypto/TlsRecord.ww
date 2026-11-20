@@ -1,0 +1,226 @@
+// ---- TLS records: read whole, opened and sealed in place (networking plan, part 5) ----
+
+// One direction's protection: the cipher, its IV, and the count of records it has sealed or
+// opened (RFC 8446 5.3: the nonce is the IV with the count XORed into its end).
+class __TlsCipher {
+  val aead : Aead
+  private val iv : Bytes
+  // TLS 1.2's AES-GCM: an explicit nonce of 8 bytes in each record (RFC 5288), the IV 4 bytes.
+  val explicitNonce : bool
+  var sequence = 0
+  private val nonce = Bytes(12)
+
+  fun init(aead : Aead, iv : Bytes, explicitNonce : bool = false) {
+    this.aead = aead
+    this.iv = iv
+    this.explicitNonce = explicitNonce
+  }
+
+  // The nonce for the record numbered `sequence`; `explicit` the 8 bytes a TLS 1.2 AES-GCM
+  // record carries, where it does.
+  fun nonceFor(explicit : Bytes? = null) : Bytes {
+    if (explicit != null) {
+      nonce.copyFrom(iv, 0, 1, 0, 1, 4)
+      nonce.copyFrom(explicit!!, 0, 1, 4, 1, 8)
+      return nonce
+    }
+    nonce.copyFrom(iv, 0, 1, 0, 1, 12)
+    var s = sequence
+    for (i in 11 downTo 4) {
+      nonce[i] = (nonce[i].toInt() ^ (s & 0xFF)).toByteWrapped()
+      s = s >> 8
+    }
+    return nonce
+  }
+}
+
+// The records of one connection over a Socket: whole records read into a buffer of its own and
+// opened there, records written sealed from one.
+class __TlsRecords {
+  private val reader : Reader
+  private val writer : Writer
+  private var input = Bytes(2 * (5 + __Tls.maxPlaintext + __Tls.maxSealedExtra))
+  private var start = 0
+  private var end = 0
+  private val output = Bytes(5 + __Tls.maxPlaintext + __Tls.maxSealedExtra)
+  private val header = Bytes(5)
+  private val aad12 = Bytes(13)
+
+  var readCipher : __TlsCipher? = null
+  var writeCipher : __TlsCipher? = null
+  // TLS 1.3 hides each record's type inside it; TLS 1.2 does not.
+  var tls13 = true
+  // The version written in records' headers: 0x0301 for the first ClientHello's, as RFC 8446
+  // asks, then 0x0303.
+  var recordVersion = 0x0303
+
+  // Records held to be written together (a handshake's flight, in one write), or null.
+  private var held : __TlsWriter? = null
+
+  // Holds what is written until flush(): a flight goes in one write, before the peer can answer
+  // part of it.
+  fun hold() {
+    if (held == null) { held = __TlsWriter() }
+  }
+  fun flush() throws IOException {
+    val h = held
+    held = null
+    if (h != null and h!!.size > 0) { writer.write(h!!.toBytes()) }
+  }
+
+  // The record last read: its type, and its plaintext's place in `data`.
+  var type = 0
+  var data : Bytes = Bytes(0)
+  var at = 0
+  var size = 0
+
+  fun init(socket : Socket) {
+    this.reader = socket.reader
+    this.writer = socket.writer
+  }
+
+  // Bytes until at least `n` are waiting from `start`; false where the connection ends first.
+  private fun fill(n : int) : bool throws IOException {
+    if (end - start >= n) { return true }
+    if (start > 0 and start + n > input.size) {
+      input.copyFrom(input, start, 1, 0, 1, end - start)
+      end -= start
+      start = 0
+    }
+    while (end - start < n) {
+      val got = reader.read(input.size - end)
+      if (got == null) { return false }
+      input.copyFrom(got!!, 0, 1, end, 1, got!!.size)
+      end += got!!.size
+    }
+    return true
+  }
+
+  // Reads the next record and opens it: its type and plaintext are then in type, data, at and
+  // size. False at the connection's end between records.
+  fun read() : bool throws IOException {
+    if (!fill(5)) {
+      if (end > start) { __fault(__Tls.decodeError, "the connection ended inside a record's header") }
+      return false
+    }
+    val t = input[start].toInt()
+    val major = input[start + 1].toInt()
+    val length = (input[start + 3].toInt() << 8) | input[start + 4].toInt()
+    if (t < __Tls.changeCipherSpec or t > __Tls.applicationData) { __fault(__Tls.unexpectedMessage, "a record of type $t, which TLS has not") }
+    if (major != 3) { __fault(__Tls.protocolVersion, "a record of version $major.${input[start + 2].toInt()}") }
+    val cipher = readCipher
+    val limit = cipher == null or t == __Tls.changeCipherSpec ? __Tls.maxPlaintext : __Tls.maxPlaintext + __Tls.maxSealedExtra
+    if (length > limit) { __fault(__Tls.recordOverflow, "a record of $length bytes") }
+    if (!fill(5 + length)) { __fault(__Tls.decodeError, "the connection ended inside a record") }
+    val body = start + 5
+    start = body + length
+    data = input
+    if (cipher == null or t == __Tls.changeCipherSpec) {
+      type = t
+      at = body
+      size = length
+      return true
+    }
+    if (tls13) {
+      if (t != __Tls.applicationData) { __fault(__Tls.unexpectedMessage, "a record not sealed where it should be") }
+      header.copyFrom(input, body - 5, 1, 0, 1, 5)
+      val opened = cipher.aead.openInto(input, body, input, body, length, cipher.nonceFor(), header)
+      if (opened < 0) { __fault(__Tls.badRecordMac, "a record that does not open (changed, or sealed with another key)") }
+      cipher.sequence += 1
+      var last = body + opened - 1
+      while (last >= body and input[last].toInt() == 0) { last -= 1 }
+      if (last < body) { __fault(__Tls.unexpectedMessage, "a sealed record with no type") }
+      if (last - body > __Tls.maxPlaintext) { __fault(__Tls.recordOverflow, "a record of ${last - body} bytes inside") }
+      type = input[last].toInt()
+      at = body
+      size = last - body
+      return true
+    }
+    // TLS 1.2: AES-GCM with its explicit nonce in front, or ChaCha20-Poly1305 with none; the
+    // sequence number, type, version and plaintext's length checked with it.
+    val explicit = cipher.explicitNonce ? 8 : 0
+    if (length < explicit + 16) { __fault(__Tls.badRecordMac, "a sealed record too short to be one") }
+    val plain = length - explicit - 16
+    __put64(aad12, 0, cipher.sequence)
+    aad12[8] = t.toByteWrapped()
+    aad12[9] = input[body - 4]
+    aad12[10] = input[body - 3]
+    aad12[11] = (plain >> 8).toByteWrapped()
+    aad12[12] = plain.toByteWrapped()
+    val nonce = explicit == 0 ? cipher.nonceFor() : cipher.nonceFor(input[body..<body + 8])
+    val opened = cipher.aead.openInto(input, body + explicit, input, body + explicit, length - explicit, nonce, aad12)
+    if (opened < 0) { __fault(__Tls.badRecordMac, "a record that does not open (changed, or sealed with another key)") }
+    cipher.sequence += 1
+    type = t
+    at = body + explicit
+    size = opened
+    return true
+  }
+
+  // Writes `count` bytes of `bytes` from `offset` as records of `recordType`, sealed where there
+  // is a cipher, each 16 KB at most.
+  fun write(recordType : int, bytes : Bytes, offset : int = 0, count : int = bytes.size - offset) throws IOException {
+    var done = 0
+    while (done < count or count == 0) {
+      val n = Math.min(__Tls.maxPlaintext, count - done)
+      writeOne(recordType, bytes, offset + done, n)
+      done += n
+      if (count == 0) { break }
+    }
+  }
+
+  private fun writeOne(recordType : int, bytes : Bytes, offset : int, n : int) throws IOException {
+    val cipher = writeCipher
+    output[1] = (recordVersion >> 8).toByteWrapped()
+    output[2] = recordVersion.toByteWrapped()
+    var total = n
+    if (cipher == null or recordType == __Tls.changeCipherSpec) {
+      output[0] = recordType.toByteWrapped()
+      output.copyFrom(bytes, offset, 1, 5, 1, n)
+    } else if (tls13) {
+      // The type after the plaintext, sealed with it; the header says application data.
+      output[0] = __Tls.applicationData.toByteWrapped()
+      output.copyFrom(bytes, offset, 1, 5, 1, n)
+      output[5 + n] = recordType.toByteWrapped()
+      total = n + 1 + 16
+      output[3] = (total >> 8).toByteWrapped()
+      output[4] = total.toByteWrapped()
+      header.copyFrom(output, 0, 1, 0, 1, 5)
+      cipher.aead.sealInto(output, 5, output, 5, n + 1, cipher.nonceFor(), header)
+      cipher.sequence += 1
+    } else {
+      output[0] = recordType.toByteWrapped()
+      val explicit = cipher.explicitNonce ? 8 : 0
+      __put64(aad12, 0, cipher.sequence)
+      aad12[8] = recordType.toByteWrapped()
+      aad12[9] = output[1]
+      aad12[10] = output[2]
+      aad12[11] = (n >> 8).toByteWrapped()
+      aad12[12] = n.toByteWrapped()
+      // The explicit nonce is the sequence number: never repeated under one key.
+      if (explicit > 0) { __put64(output, 5, cipher.sequence) }
+      output.copyFrom(bytes, offset, 1, 5 + explicit, 1, n)
+      val nonce = explicit == 0 ? cipher.nonceFor() : cipher.nonceFor(output[5..<13])
+      cipher.aead.sealInto(output, 5 + explicit, output, 5 + explicit, n, nonce, aad12)
+      cipher.sequence += 1
+      total = explicit + n + 16
+    }
+    output[3] = (total >> 8).toByteWrapped()
+    output[4] = total.toByteWrapped()
+    val h = held
+    if (h != null) { h!!.bytes(output, 0, 5 + total) } else { writer.write(output[0..<5 + total]) }
+  }
+
+  // Whether bytes of a record not yet read are waiting.
+  val hasWaiting : bool
+    get() => end > start
+}
+
+// `v` as 8 bytes, big-endian, at `at`.
+fun __put64(b : Bytes, at : int, v : int) {
+  var x = v
+  for (i in 7 downTo 0) {
+    b[at + i] = (x & 0xFF).toByteWrapped()
+    x = x >> 8
+  }
+}

@@ -1,0 +1,67 @@
+// TLS over the loopback, a ww client and a ww server in one program (networking plan, part 5):
+// handshakes a second (TLS 1.3 whole and resumed, TLS 1.2), and bulk data a second for each
+// AEAD. Run from the repository's root:  ww bench/tls.ww
+import Crypto.*
+
+val dir = "tests/data/certs/tls"
+val identity = TlsIdentity.of(Pkcs12.read(FilePath("$dir/ec.p12").readBytes(), "pw")[0])
+val roots = TrustStore.fromPem(FilePath("$dir/root.pem").readText())
+val listener = ServerSocket(0, bindAddress = "127.0.0.1")
+val port = listener.localPort
+
+// `count` handshakes; each side closes at once.
+suspend fun handshakes(count : int, server : TlsServerOptions, client : TlsClientOptions) : float {
+  val side = thread {
+    for (i in 0..<count) {
+      val s = listener.accept()
+      try { TlsSocket.server(s, server).close() } catch (e : IOException) { s.close() }
+    }
+  }
+  val t = clock()
+  for (i in 0..<count) {
+    val tls = TlsSocket.client(Socket("127.0.0.1", port), "server.test", client)
+    tls.reader.read()   // the ticket, then the server's close_notify
+    tls.close()
+  }
+  val seconds = clock() - t
+  side.get()
+  return count / seconds
+}
+
+// `megabytes` from the client to the server in writes of 64 KB.
+suspend fun bulk(megabytes : int, suite : string, max : TlsVersion) : float {
+  val side = thread {
+    val s = listener.accept()
+    val tls = TlsSocket.server(s, TlsServerOptions(identity))
+    var got = 0
+    while (true) {
+      val b = tls.reader.read()
+      if (b == null) { break }
+      got += b!!.size
+    }
+    tls.close()
+    got
+  }
+  val tls = TlsSocket.client(Socket("127.0.0.1", port), "server.test",
+                             TlsClientOptions(trust = roots, sessions = null, cipherSuites = [suite], maximumVersion = max))
+  val chunk = Bytes(65536)
+  val t = clock()
+  for (i in 0..<megabytes * 16) { tls.writer.write(chunk) }
+  tls.close()
+  val got = side.get()
+  val seconds = clock() - t
+  if (got != megabytes * 1048576) { print("lost data: $got") }
+  return megabytes / seconds
+}
+
+val server = TlsServerOptions(identity)
+val noTickets = TlsServerOptions(identity, tickets = false)
+handshakes(20, server, TlsClientOptions(trust = roots, sessions = null))   // warm up
+print("handshakes a second: TLS 1.3 whole ${handshakes(200, noTickets, TlsClientOptions(trust = roots, sessions = null)).toInt()}, " +
+      "resumed ${handshakes(200, server, TlsClientOptions(trust = roots, sessions = TlsSessionCache())).toInt()}, " +
+      "TLS 1.2 ${handshakes(200, noTickets, TlsClientOptions(trust = roots, sessions = null, maximumVersion = TlsVersion.tls12)).toInt()}")
+for (s in ["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"]) {
+  print("$s: ${bulk(256, s, TlsVersion.tls13).toInt()} MB/s")
+}
+print("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: ${bulk(256, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", TlsVersion.tls12).toInt()} MB/s")
+listener.close()

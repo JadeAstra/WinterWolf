@@ -1,0 +1,628 @@
+// ---- TLS (networking plan, part 5, 2026-11-20) ----
+//
+//   val tls = TlsSocket.connect("example.com", 443, TlsClientOptions(alpn = ["http/1.1"]))
+//   tls.writer.write("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+//   print(tls.reader.readText())
+//   tls.close()
+//
+//   val options = TlsServerOptions(TlsIdentity(key, chain))      // or TlsIdentity.of(Pkcs12Entry)
+//   val server = ServerSocket(8443)
+//   while (true) {
+//     val client = server.accept()
+//     thread { TlsSocket.server(client, options).use { serve(it) } }
+//   }
+//
+// TLS 1.3 (RFC 8446), and 1.2 (RFC 5246) with ECDHE and AEAD ciphers only, as a client or a
+// server: the server's name sent (SNI) and its certificate checked by a TrustStore (the system's
+// unless given), the application protocol agreed (ALPN), client certificates asked for and
+// checked, sessions resumed from tickets (no 0-RTT data), keys updated. A TlsSocket's reader and
+// writer are a Socket's (a Reader and a Writer over it), so what reads lines from a Socket
+// reads them from a TlsSocket. Over a Socket already open (STARTTLS): TlsSocket.client and
+// TlsSocket.server. Every failure of the protocol is a TlsException saying why, with the alert
+// sent or received; a failure of the socket itself stays an IOException. Reading ends (null) at
+// the peer's close_notify, and also where the connection ends without one, as many HTTP servers
+// end theirs: closedCleanly tells the two apart. Not here: 0-RTT data, renegotiation, TLS 1.2
+// sessions resumed, compression, and every cipher without forward secrecy or AEAD.
+
+// A TLS connection that failed: the handshake refused, a record that did not open, an alert from
+// the peer. `alert` is the alert sent (or received, where `fromPeer`), null where there was none.
+class TlsException(message : string, val alert : int? = null, val fromPeer : bool = false) : IOException(message) {
+  // The alert's name as RFC 8446 writes it ("handshake_failure"), or null.
+  val alertName : string?
+    get() => alert == null ? null : __alertName(alert!!)
+}
+
+enum TlsVersion { tls12, tls13 }
+
+// Whether a server asks clients for a certificate: not at all, asks and takes a connection with
+// none, or asks and refuses one with none.
+enum TlsClientAuthentication { none, requested, required }
+
+// A private key and its certificate chain (its own certificate first), which a server shows, or a
+// client asked for one. An IllegalArgumentException where the first certificate is not the key's.
+class TlsIdentity {
+  val key : PrivateKey
+  val certificates : List<Certificate>
+
+  fun init(key : PrivateKey, certificates : List<Certificate>) {
+    if (certificates.isEmpty()) { throw IllegalArgumentException("an identity has its certificate") }
+    if (PublicKeys.toDer(__publicOf(key)) != certificates[0].publicKeyDer) {
+      throw IllegalArgumentException("the first certificate is not the key's (its public key differs)")
+    }
+    this.key = key
+    this.certificates = certificates
+  }
+
+  static {
+    // The key and chain of a PKCS#12 file's entry.
+    fun of(entry : Pkcs12Entry) : TlsIdentity {
+      val key = entry.key
+      if (key == null) { throw IllegalArgumentException("the entry has no private key") }
+      return TlsIdentity(key!!, entry.certificates)
+    }
+  }
+}
+
+// How a client connects. `trust` checks the server's certificate (the system's roots where it is
+// null); `alpn` offers application protocols, most wanted first ("h2", "http/1.1"); `identity`
+// is shown where the server asks for a certificate; `sessions` keeps tickets to resume with
+// (null: none kept); `at` is the moment certificates are checked at (now where null).
+// `cipherSuites` and `groups` keep to some of those there are, by IANA's names
+// ("TLS_AES_256_GCM_SHA384", "secp256r1"); null for all, in the order chosen here.
+class TlsClientOptions(val trust : TrustStore? = null, val alpn : List<string> = [], val identity : TlsIdentity? = null,
+                       val sessions : TlsSessionCache? = TlsSessionCache.shared,
+                       val minimumVersion : TlsVersion = TlsVersion.tls12, val maximumVersion : TlsVersion = TlsVersion.tls13,
+                       val at : Instant? = null, val cipherSuites : List<string>? = null, val groups : List<string>? = null) {
+  init {
+    __checkNames(cipherSuites, groups)
+  }
+}
+
+// How a server takes connections. `identities` are the keys and chains it shows, the one whose
+// certificate is for the name the client asks for (SNI) where there are several; `alpn` the
+// application protocols it takes, most wanted first; `clientAuthentication` and `clientTrust`
+// whether it asks for client certificates and what checks them; `tickets` whether clients get
+// tickets to resume with. `cipherSuites` and `groups` as a client's.
+class TlsServerOptions {
+  val identities : List<TlsIdentity>
+  val alpn : List<string>
+  val clientAuthentication : TlsClientAuthentication
+  val clientTrust : TrustStore?
+  val tickets : bool
+  val minimumVersion : TlsVersion
+  val maximumVersion : TlsVersion
+  val cipherSuites : List<string>?
+  val groups : List<string>?
+  // The key tickets are sealed with: new for each TlsServerOptions, so a ticket resumes only with
+  // the options that issued it.
+  internal val ticketCipher = AesGcm(SecureRandom.bytes(32))
+
+  fun init(identities : TlsIdentity | List<TlsIdentity>, alpn : List<string> = [],
+           clientAuthentication : TlsClientAuthentication = TlsClientAuthentication.none, clientTrust : TrustStore? = null,
+           tickets : bool = true, minimumVersion : TlsVersion = TlsVersion.tls12, maximumVersion : TlsVersion = TlsVersion.tls13,
+           cipherSuites : List<string>? = null, groups : List<string>? = null) {
+    __checkNames(cipherSuites, groups)
+    this.cipherSuites = cipherSuites
+    this.groups = groups
+    this.identities = identities is TlsIdentity ? [identities as TlsIdentity] : identities as List<TlsIdentity>
+    if (this.identities.isEmpty()) { throw IllegalArgumentException("a server has an identity") }
+    if (clientAuthentication != TlsClientAuthentication.none and clientTrust == null) {
+      throw IllegalArgumentException("asking for client certificates needs a clientTrust to check them")
+    }
+    this.alpn = alpn
+    this.clientAuthentication = clientAuthentication
+    this.clientTrust = clientTrust
+    this.tickets = tickets
+    this.minimumVersion = minimumVersion
+    this.maximumVersion = maximumVersion
+  }
+}
+
+// An IllegalArgumentException for a suite or group not known here, or none at all.
+fun __checkNames(suites : List<string>?, groups : List<string>?) {
+  if (suites != null) {
+    val known = (__suites13() + __suites12()).map { __suiteName(it) }
+    for (s in suites!!) {
+      if (!known.contains(s)) { throw IllegalArgumentException("cipher suite '$s' is not one here: ${known.join(", ")}") }
+    }
+    if (suites!!.isEmpty()) { throw IllegalArgumentException("no cipher suites") }
+  }
+  if (groups != null) {
+    for (g in groups!!) {
+      if (!__groupsOffered.map { __groupName(it) }.contains(g)) { throw IllegalArgumentException("group '$g' is not one here: x25519, secp256r1, secp384r1") }
+    }
+    if (groups!!.isEmpty()) { throw IllegalArgumentException("no groups") }
+  }
+}
+
+// The suites or groups of `all` that `names` keeps (all of them where it is null).
+fun __kept(all : List<int>, names : List<string>?, name : (int) -> string) : List<int> => names == null ? all : all.filter { names!!.contains(name(it)) }
+
+// Tickets kept by a client to resume sessions with, by server and port; each is used once.
+// TlsSessionCache.shared is the one clients use unless told otherwise.
+class TlsSessionCache(val capacity : int = 256) {
+  private val lock = Lock()
+  private val byServer : open Map<string, open List<__TlsTicket>> = {:}
+  private val order : open List<string> = []
+
+  static {
+    val shared = TlsSessionCache()
+  }
+
+  internal fun put(key : string, ticket : __TlsTicket) {
+    lock.useKey {
+      val list = byServer[key]
+      if (list == null) {
+        byServer[key] = [ticket]
+        order.add(key)
+        if (order.size > capacity) { byServer.remove(order.removeAt(0)) }
+      } else {
+        list!!.add(ticket)
+        if (list!!.size > 4) { list!!.removeAt(0) }
+      }
+    }
+  }
+
+  // The newest ticket for `key` that has not run out, taken out of the cache; null for none.
+  internal fun take(key : string, nowMillis : int) : __TlsTicket? {
+    return lock.useKey {
+      var found : __TlsTicket? = null
+      val list = byServer[key]
+      if (list != null) {
+        while (!list!!.isEmpty() and found == null) {
+          val t = list!!.removeLast()
+          if (nowMillis - t.received < t.lifetime * 1000) { found = t }
+        }
+      }
+      found
+    }
+  }
+
+  // Forgets every ticket.
+  fun clear() {
+    lock.useKey {
+      byServer.clear()
+      order.clear()
+    }
+  }
+}
+
+// A ticket a client keeps: what the server gave, and what resuming with it needs.
+class __TlsTicket(val ticket : Bytes, val psk : Bytes, val suite : int, val received : int, val lifetime : int, val ageAdd : int,
+                  val peerCertificates : List<Certificate>, val version : int)
+
+// A TLS connection over a Socket. Its reader and writer read and write as a Socket's do;
+// close() tells the other side (close_notify) and closes the socket.
+class TlsSocket : ByteChannel, AutoCloseable {
+  internal val connection : __TlsConnection
+  // The socket it runs over.
+  val socket : Socket
+  // What comes from the other side, decrypted; what goes to it, encrypted.
+  val reader : Reader
+  val writer : Writer
+
+  internal fun init(socket : Socket, connection : __TlsConnection) {
+    this.socket = socket
+    this.connection = connection
+    this.reader = Reader(this)
+    this.writer = Writer(this)
+  }
+
+  static {
+    // Connects to `host` at `port` and makes the handshake as a client, checking that the
+    // server's certificate is for `host`. With a time limit, gives up when it runs out (the
+    // connection and the handshake together).
+    fun connect(host : string, port : int, options : TlsClientOptions = TlsClientOptions(), timeout : Duration? = null) : TlsSocket throws IOException {
+      val socket = Socket()
+      if (timeout != null) { socket.readTimeout = timeout }
+      socket.connect(host, port, timeout)
+      try {
+        val tls = client(socket, host, options)
+        if (timeout != null) { socket.readTimeout = null }
+        return tls
+      } catch (e : IOException) {
+        socket.close()
+        throw e
+      }
+    }
+    // The handshake as a client over a socket already open (STARTTLS), for the server `host`
+    // (sent as SNI, and what its certificate is checked to be for).
+    fun client(socket : Socket, host : string, options : TlsClientOptions = TlsClientOptions()) : TlsSocket throws IOException {
+      val c = __TlsConnection(socket, true)
+      c.run { __clientHandshake(c, host, "$host:${socket.port}", options) }
+      return TlsSocket(socket, c)
+    }
+    // The handshake as a server over a socket accept() gave.
+    fun server(socket : Socket, options : TlsServerOptions) : TlsSocket throws IOException {
+      val c = __TlsConnection(socket, false)
+      c.run { __serverHandshake(c, options) }
+      return TlsSocket(socket, c)
+    }
+  }
+
+  // TLS 1.3 or 1.2.
+  val version : TlsVersion
+    get() => connection.version == __Tls.tls13 ? TlsVersion.tls13 : TlsVersion.tls12
+  // The cipher suite, as IANA names it ("TLS_AES_128_GCM_SHA256").
+  val cipherSuite : string
+    get() => __suiteName(connection.suite)
+  // The key exchange's group ("x25519", "secp256r1", "secp384r1").
+  val group : string
+    get() => __groupName(connection.group)
+  // The application protocol agreed by ALPN, or null where there was none.
+  val applicationProtocol : string?
+    get() => connection.alpn
+  // The server's name the client sent (SNI), or null.
+  val serverName : string?
+    get() => connection.serverName
+  // The other side's certificate chain as it sent it (its own first); empty where it sent none.
+  // On a resumed session, the chain of the session it resumed.
+  val peerCertificates : List<Certificate>
+    get() => connection.peerCertificates
+  // Whether reading ended with the peer's close_notify, as TLS says it should; false where it has
+  // not ended, or the connection was cut with none (as many HTTP servers do: what was read may then
+  // be cut short, where the protocol does not say itself where its data ends).
+  val closedCleanly : bool
+    get() => connection.receivedClose and !connection.cutShort
+  // Whether the session was resumed from a ticket, with no certificates.
+  val isResumed : bool
+    get() => connection.resumed
+
+  // How long a read waits, as the socket's readTimeout.
+  var readTimeout : Duration?
+    get() => socket.readTimeout
+    set(limit) { socket.readTimeout = limit }
+
+  // Asks for new keys both ways (TLS 1.3's KeyUpdate); TLS 1.2 has none to ask for.
+  fun updateKeys() throws IOException {
+    connection.run { connection.updateKeys(true) }
+  }
+
+  override fun receive(count : int) : Bytes? throws IOException => connection.receive(count)
+  override fun send(data : Bytes) throws IOException {
+    connection.send(data)
+  }
+  override fun closeChannel() {
+    close()
+  }
+  override val isChannelOpen : bool
+    get() => !connection.closed
+
+  // Says that nothing more will be written (close_notify); reading goes on.
+  fun shutdownOutput() throws IOException {
+    connection.closeOutput()
+    socket.shutdownOutput()
+  }
+
+  // Sends close_notify where it has not been sent, and closes the socket; closing it again does
+  // nothing.
+  override fun close() {
+    connection.close()
+  }
+}
+
+// A handshake message: its type, body, and the whole as it came (for the transcript). A TLS 1.2
+// ChangeCipherSpec, where one is looked for, has type -1.
+class __TlsMessage(val type : int, val body : Bytes, val raw : Bytes)
+
+// What both sides share: the records, handshake messages put together from them, application
+// data, alerts, and the state after the handshake.
+class __TlsConnection(val socket : Socket, val isClient : bool) {
+  val records = __TlsRecords(socket)
+  private val writing = Lock()
+  private val reading = Lock()
+  // Handshake bytes not yet made into messages.
+  private var pending = Bytes(0)
+  private var pendingAt = 0
+  // Application data read and not yet given.
+  private var appData : Bytes? = null
+  private var appAt = 0
+  var failure : TlsException? = null
+  var handshakeDone = false
+  var sentClose = false
+  var receivedClose = false
+  var cutShort = false
+  var closed = false
+
+  var version = 0
+  var suite = 0
+  var group = 0
+  var alpn : string? = null
+  var serverName : string? = null
+  var peerCertificates : List<Certificate> = []
+  var resumed = false
+  // TLS 1.3: the key schedule and the current traffic secrets, for KeyUpdate; the resumption
+  // secret, for tickets.
+  var keys : __TlsKeys? = null
+  var readSecret : Bytes? = null
+  var writeSecret : Bytes? = null
+  var resumptionSecret : Bytes? = null
+  // A client's: where its tickets go. A server's: its options, for tickets.
+  var sessions : TlsSessionCache? = null
+  var sessionKey : string = ""
+  var serverOptions : TlsServerOptions? = null
+  var ticketsSent = 0
+  var pskIndex = 0
+  // The groups this side takes, most wanted first.
+  var groups : List<int> = __groupsOffered
+
+  // Runs `work`, turning what goes wrong into a TlsException: the alert sent where this side
+  // found the fault, the connection closed.
+  fun run(work : () -> unit) throws IOException {
+    val failed = failure
+    if (failed != null) { throw failed!! }
+    try {
+      work()
+    } catch (f : __TlsFault) {
+      throw fail(f.alert, f.message ?: "", false)
+    } catch (e : TlsException) {
+      failure = e
+      close()
+      throw e
+    } catch (e : IOException) {
+      // The socket failed: nothing can be sent on it.
+      closed = true
+      socket.close()
+      throw e
+    } catch (e : RuntimeException) {
+      // A fault of this code's, not the peer's: the connection ends as for any other.
+      throw fail(__Tls.internalError, "an internal error: $e", false)
+    }
+  }
+
+  // Sends the alert (where the peer did not send it), closes, and gives the exception to throw.
+  fun fail(alert : int, message : string, fromPeer : bool) : TlsException {
+    val e = TlsException(fromPeer ? message : "$message (${__alertName(alert)} sent)", alert, fromPeer)
+    failure = e
+    if (!fromPeer and !closed) {
+      try {
+        sendAlert(alert)
+        linger()
+      } catch (x : IOException) { }
+    }
+    closed = true
+    socket.close()
+    return e
+  }
+
+  fun sendAlert(code : int) throws IOException {
+    val b = Bytes(2)
+    b[0] = (code == __Tls.closeNotify or code == __Tls.userCanceled ? 1 : 2).toByteWrapped()
+    b[1] = code.toByteWrapped()
+    writing.useKey { records.write(__Tls.alert, b) }
+  }
+
+  // Runs `block` with what it writes held, then writes it at once: a flight in one write.
+  fun flight(block : () -> unit throws IOException) throws IOException {
+    writing.useKey {
+      records.hold()
+      try {
+        block()
+      } finally {
+        records.flush()
+      }
+    }
+  }
+
+  // Handshake messages, sent together (in as few records as they fit).
+  fun sendHandshake(messages : Bytes) throws IOException {
+    writing.useKey { records.write(__Tls.handshake, messages) }
+  }
+
+  fun sendChangeCipherSpec() throws IOException {
+    val b = Bytes(1)
+    b[0] = 1.toByteWrapped()
+    writing.useKey { records.write(__Tls.changeCipherSpec, b) }
+  }
+
+  // New keys for reading: no handshake message may run across them.
+  fun setReadCipher(cipher : __TlsCipher) {
+    if (pendingAt < pending.size) { __fault(__Tls.unexpectedMessage, "a handshake message runs across a change of keys") }
+    records.readCipher = cipher
+  }
+  fun setWriteCipher(cipher : __TlsCipher) {
+    writing.useKey { records.writeCipher = cipher }
+  }
+
+  // The next handshake message, reading records as it needs. During a TLS 1.3 handshake a
+  // ChangeCipherSpec is passed over (RFC 8446 D.4); where `changeCipherSpec` is set (TLS 1.2)
+  // one is given as a message of type -1.
+  fun nextHandshake(changeCipherSpec : bool = false) : __TlsMessage throws IOException {
+    while (true) {
+      val left = pending.size - pendingAt
+      if (left >= 4) {
+        val length = (pending[pendingAt + 1].toInt() << 16) | (pending[pendingAt + 2].toInt() << 8) | pending[pendingAt + 3].toInt()
+        if (length > 262144) { __fault(__Tls.decodeError, "a handshake message of $length bytes") }
+        if (left >= 4 + length) {
+          val raw = pending[pendingAt..<pendingAt + 4 + length]
+          pendingAt += 4 + length
+          if (pendingAt == pending.size) {
+            pending = Bytes(0)
+            pendingAt = 0
+          }
+          return __TlsMessage(raw[0].toInt(), raw[4..], raw)
+        }
+      }
+      if (!records.read()) { __fault(__Tls.decodeError, "the connection ended during the handshake") }
+      when (records.type) {
+        __Tls.handshake -> {
+          if (records.size == 0) { __fault(__Tls.unexpectedMessage, "an empty handshake record") }
+          pending = __joined(pending, pendingAt, records.data[records.at..<records.at + records.size])
+          pendingAt = 0
+        }
+        __Tls.changeCipherSpec -> {
+          if (records.size != 1 or records.data[records.at].toInt() != 1) { __fault(__Tls.unexpectedMessage, "a ChangeCipherSpec that is not one") }
+          if (changeCipherSpec) {
+            if (pendingAt < pending.size) { __fault(__Tls.unexpectedMessage, "a handshake message runs across ChangeCipherSpec") }
+            return __TlsMessage(-1, Bytes(0), Bytes(0))
+          }
+          if (version != __Tls.tls13 and version != 0) { __fault(__Tls.unexpectedMessage, "a ChangeCipherSpec out of place") }
+        }
+        __Tls.alert -> receiveAlert(true)
+        else -> __fault(__Tls.unexpectedMessage, "application data during the handshake")
+      }
+    }
+  }
+
+  // An alert just read: close_notify ends reading; a fatal one ends the connection.
+  private fun receiveAlert(inHandshake : bool) throws IOException {
+    if (records.size != 2) { __fault(__Tls.decodeError, "an alert of ${records.size} bytes") }
+    val level = records.data[records.at].toInt()
+    val code = records.data[records.at + 1].toInt()
+    if (code == __Tls.closeNotify and !inHandshake) {
+      receivedClose = true
+      return
+    }
+    // TLS 1.2 may send warnings; anything else (and every alert of TLS 1.3 but close_notify and
+    // user_canceled) ends the connection.
+    if (level == 1 and code != __Tls.closeNotify and (version == __Tls.tls12 or code == __Tls.userCanceled)) { return }
+    throw fail(code, "the ${isClient ? "server" : "client"} sent ${__alertName(code)}${inHandshake ? " during the handshake" : ""}", true)
+  }
+
+  // Up to `count` bytes of application data; null after close_notify.
+  fun receive(count : int) : Bytes? throws IOException {
+    var result : Bytes? = null
+    reading.useKey {
+      run { result = receiveHeld(count) }
+    }
+    return result
+  }
+
+  private fun receiveHeld(count : int) : Bytes? throws IOException {
+    while (true) {
+      val held = appData
+      if (held != null) {
+        val n = Math.min(count, held!!.size - appAt)
+        val part = n == held!!.size and appAt == 0 ? held!! : held!![appAt..<appAt + n]
+        appAt += n
+        if (appAt == held!!.size) { appData = null }
+        return part
+      }
+      if (receivedClose) { return null }
+      if (!records.read()) {
+        // The connection ended with no close_notify: the end, as curl and browsers take it (HTTP
+        // has its own framing), but not a clean one (closedCleanly).
+        receivedClose = true
+        cutShort = true
+        return null
+      }
+      when (records.type) {
+        __Tls.applicationData -> {
+          if (records.size > 0) {
+            appData = records.data[records.at..<records.at + records.size]
+            appAt = 0
+          }
+        }
+        __Tls.handshake -> {
+          pending = __joined(pending, pendingAt, records.data[records.at..<records.at + records.size])
+          pendingAt = 0
+          afterHandshakeMessages()
+        }
+        __Tls.alert -> receiveAlert(false)
+        else -> __fault(__Tls.unexpectedMessage, "a ChangeCipherSpec after the handshake")
+      }
+    }
+  }
+
+  // Handshake messages after the handshake: tickets, KeyUpdate; TLS 1.2's HelloRequest is
+  // answered no_renegotiation.
+  private fun afterHandshakeMessages() throws IOException {
+    while (true) {
+      val left = pending.size - pendingAt
+      if (left < 4) { return }
+      val length = (pending[pendingAt + 1].toInt() << 16) | (pending[pendingAt + 2].toInt() << 8) | pending[pendingAt + 3].toInt()
+      if (length > 65536) { __fault(__Tls.decodeError, "a handshake message of $length bytes after the handshake") }
+      if (left < 4 + length) { return }
+      val type = pending[pendingAt].toInt()
+      val body = pending[pendingAt + 4..<pendingAt + 4 + length]
+      pendingAt += 4 + length
+      if (pendingAt == pending.size) {
+        pending = Bytes(0)
+        pendingAt = 0
+      }
+      if (version == __Tls.tls13 and type == __Tls.newSessionTicket and isClient) {
+        __receiveTicket(this, body)
+      } else if (version == __Tls.tls13 and type == __Tls.keyUpdate) {
+        val r = __TlsReader(body)
+        val request = r.u8()
+        r.done()
+        if (request > 1) { __fault(__Tls.illegalParameter, "a KeyUpdate of $request") }
+        if (pendingAt < pending.size) { __fault(__Tls.unexpectedMessage, "a handshake message runs across a change of keys") }
+        val k = keys!!
+        readSecret = k.nextSecret(readSecret!!)
+        records.readCipher = k.cipher(readSecret!!)
+        if (request == 1) { updateKeys(false) }
+      } else if (version == __Tls.tls12 and type == 0 and isClient) {
+        sendAlertWarning(__Tls.noRenegotiation)
+      } else {
+        __fault(__Tls.unexpectedMessage, "handshake message $type after the handshake")
+      }
+    }
+  }
+
+  private fun sendAlertWarning(code : int) throws IOException {
+    val b = Bytes(2)
+    b[0] = 1.toByteWrapped()
+    b[1] = code.toByteWrapped()
+    writing.useKey { records.write(__Tls.alert, b) }
+  }
+
+  // TLS 1.3: new keys for writing, telling the peer (and asking it for new ones too where
+  // `request`).
+  fun updateKeys(request : bool) throws IOException {
+    if (version != __Tls.tls13) { return }
+    writing.useKey {
+      val k = keys!!
+      records.write(__Tls.handshake, __handshakeMessage(__Tls.keyUpdate) { it.u8(request ? 1 : 0) })
+      writeSecret = k.nextSecret(writeSecret!!)
+      records.writeCipher = k.cipher(writeSecret!!)
+    }
+  }
+
+  // Application data, in records of 16 KB at most.
+  fun send(data : Bytes) throws IOException {
+    run {
+      if (sentClose or closed) { throw IOException("the TLS connection is closed for writing") }
+      // AES-GCM's limit per key (RFC 8446 5.5): new keys well before it.
+      val cipher = records.writeCipher
+      if (version == __Tls.tls13 and cipher != null and cipher!!.sequence > 16000000) { updateKeys(false) }
+      writing.useKey { records.write(__Tls.applicationData, data) }
+    }
+  }
+
+  // close_notify, once.
+  fun closeOutput() throws IOException {
+    if (sentClose or closed) { return }
+    sentClose = true
+    sendAlert(__Tls.closeNotify)
+  }
+
+  fun close() {
+    if (closed) { return }
+    try {
+      if (handshakeDone and failure == null and !sentClose) {
+        closeOutput()
+        if (!receivedClose) { linger() }
+      }
+    } catch (e : IOException) { }
+    closed = true
+    socket.close()
+  }
+
+  // A lingering close: closing a socket with what the peer sent still unread (a ticket never
+  // read, say) resets the connection, and on Linux the reset throws away what this side sent and
+  // the peer has not read yet: the end of the data, or an alert. So: the end sent (FIN), what
+  // comes read and dropped until the peer's end, a quarter of a second, or 64 KB.
+  private fun linger() throws IOException {
+    socket.shutdownOutput()
+    socket.readTimeout = 250.milliseconds
+    var drained = 0
+    try {
+      while (drained < 65536) {
+        val b = socket.reader.read()
+        if (b == null) { break }
+        drained += b!!.size
+      }
+    } catch (e : IOException) { }
+  }
+}

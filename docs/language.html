@@ -484,6 +484,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#BitReader"><code>BitReader</code></a> (9)</li>
 <li><a href="#BlendMode"><code>BlendMode</code></a> (1)</li>
 <li><a href="#BlobRef"><code>BlobRef</code></a> (1)</li>
+<li><a href="#ByteChannel"><code>ByteChannel</code></a> (5)</li>
 <li><a href="#ByteSource"><code>ByteSource</code></a> (6)</li>
 <li><a href="#Bytes.toHex"><code>Bytes</code></a> (36)</li>
 <li><a href="#CType"><code>CType</code></a> (1)</li>
@@ -4195,8 +4196,23 @@ image.writePixels(out, 54, &quot;BGR&quot;, stride, bottomUp = true)
 <p>What text is read and written in. WinterWolf's own text is UTF-8, the default everywhere; the others are for files, programs and protocols that use them (mail's Latin-1 and Windows-1252, Windows' UTF-16). A character the set has no place for is written as '?', and bytes that spell no character are read as U+FFFD. utf16 is Java's &quot;UTF-16&quot;: read in the order a byte order mark says, big-endian where there is none, and written big-endian after a mark; utf16le and utf16be take no mark. latin9 is ISO-8859-15, Latin-1 with the euro.</p>
 </div>
 <h3>Reader and Writer</h3>
+<div class="entry" id="ByteChannel"><code class="sig">interface ByteChannel</code><a class="anchor" href="#ByteChannel">#</a>
+<p>A connection that WinterWolf code carries rather than the system: a TLS connection of import Crypto is one (networking plan, part 5). A Reader or Writer made over one reads and writes it as it would a socket, so code that reads lines from a Socket's reader reads them from a TlsSocket's the same way.</p>
+</div>
+<div class="entry member" id="ByteChannel.receive"><code class="sig">fun receive(count : int) : Bytes? throws IOException</code><a class="anchor" href="#ByteChannel.receive">#</a>
+<p>Up to <code>count</code> bytes (one or more), waiting until there are some; null at the end.</p>
+</div>
+<div class="entry member" id="ByteChannel.send"><code class="sig">fun send(data : Bytes) throws IOException</code><a class="anchor" href="#ByteChannel.send">#</a>
+<p>All of <code>data</code>, returning when it has been handed on.</p>
+</div>
+<div class="entry member" id="ByteChannel.closeChannel"><code class="sig">fun closeChannel()</code><a class="anchor" href="#ByteChannel.closeChannel">#</a>
+<p>Closes it; closing it again does nothing.</p>
+</div>
+<div class="entry member" id="ByteChannel.isChannelOpen"><code class="sig">val isChannelOpen : bool</code><a class="anchor" href="#ByteChannel.isChannelOpen">#</a>
+<p>Whether it has not been closed yet.</p>
+</div>
 <div class="entry" id="Reader"><code class="sig">class Reader : AutoCloseable</code><a class="anchor" href="#Reader">#</a>
-<p>Something to read from, bytes or text: a file, what a program writes, a socket. It reads ahead into a buffer of its own, so there is nothing to wrap it in.</p>
+<p>Something to read from, bytes or text: a file, what a program writes, a socket, a ByteChannel. It reads ahead into a buffer of its own, so there is nothing to wrap it in.</p>
 </div>
 <div class="entry member" id="Reader.charset"><code class="sig">var charset : Charset</code><a class="anchor" href="#Reader.charset">#</a>
 <p>What text is read in; a change takes effect from the next read.</p>
@@ -4232,7 +4248,7 @@ image.writePixels(out, 54, &quot;BGR&quot;, stride, bottomUp = true)
 <p>Whether it has not been closed yet.</p>
 </div>
 <div class="entry" id="Writer"><code class="sig">class Writer : AutoCloseable</code><a class="anchor" href="#Writer">#</a>
-<p>Something to write to, bytes or text: a file, what a program reads, a socket. A write returns when the system has taken all of it, so flush() has nothing left to do.</p>
+<p>Something to write to, bytes or text: a file, what a program reads, a socket, a ByteChannel. A write returns when the system (or the channel) has taken all of it, so flush() has nothing left to do.</p>
 </div>
 <div class="entry member" id="Writer.charset"><code class="sig">var charset : Charset</code><a class="anchor" href="#Writer.charset">#</a>
 <p>What text is written in; a change takes effect from the next write.</p>

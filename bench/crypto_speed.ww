@@ -2,7 +2,7 @@
 // cipher at 16 KB a call (a TLS record), HMAC and PBKDF2 calls a second, and Argon2id's time at
 // the RFC's second recommendation. Compare with `openssl speed -evp <algorithm> -bytes 16384`.
 //
-//   ww bench/crypto.ww [portable]
+//   ww bench/crypto_speed.ww [portable]
 import Crypto.*
 
 if (Program.arguments.contains("portable")) { CryptoEngine.portable = true }

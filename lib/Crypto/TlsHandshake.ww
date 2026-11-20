@@ -1,0 +1,918 @@
+// ---- The TLS handshake: TLS 1.3's key schedule, client and server (networking plan, part 5) ----
+
+// TLS 1.3's key schedule for a cipher suite (RFC 8446 7.1): HKDF over its hash.
+class __TlsKeys(val suite : int) {
+  val sha384 : bool = suite == __Tls.aes256GcmSha384 or suite == __Tls.ecdheEcdsaAes256GcmSha384 or suite == __Tls.ecdheRsaAes256GcmSha384
+  val hashSize : int = sha384 ? 48 : 32
+
+  fun newHash() : Hash => sha384 ? Sha384() as Hash : Sha256() as Hash
+  fun digest(data : Bytes) : Bytes => sha384 ? Sha384.hash(data) : Sha256.hash(data)
+  val emptyHash : Bytes = digest(Bytes(0))
+
+  fun extract(salt : Bytes?, secret : Bytes) : Bytes => Hkdf.extract(newHash(), secret, salt)
+
+  // HKDF-Expand-Label: the label with "tls13 " in front, and the context.
+  fun expandLabel(secret : Bytes, label : string, context : Bytes, length : int) : Bytes {
+    val full = ("tls13 " + label).toBytes()
+    val info = __TlsWriter().u16(length).u8(full.size).bytes(full).u8(context.size).bytes(context).toBytes()
+    return Hkdf.expand(newHash(), secret, info, length)
+  }
+  fun deriveSecret(secret : Bytes, label : string, transcriptHash : Bytes) : Bytes => expandLabel(secret, label, transcriptHash, hashSize)
+
+  // The record protection a traffic secret gives.
+  fun cipher(secret : Bytes) : __TlsCipher {
+    val chacha = suite == __Tls.chacha20Poly1305Sha256
+    val key = expandLabel(secret, "key", Bytes(0), chacha or sha384 ? 32 : 16)
+    val iv = expandLabel(secret, "iv", Bytes(0), 12)
+    return __TlsCipher(chacha ? ChaCha20Poly1305(key) as Aead : AesGcm(key) as Aead, iv)
+  }
+  // A Finished message's MAC: HMAC with the finished key of `base`.
+  fun finishedMac(base : Bytes, transcriptHash : Bytes) : Bytes =>
+    Hmac.mac(newHash(), expandLabel(base, "finished", Bytes(0), hashSize), transcriptHash)
+  // KeyUpdate's next traffic secret.
+  fun nextSecret(secret : Bytes) : Bytes => expandLabel(secret, "traffic upd", Bytes(0), hashSize)
+}
+
+// The handshake's messages so far, hashed once the cipher suite (and so the hash) is known.
+class __Transcript {
+  private val held : open List<Bytes> = []
+  private var hash : Hash? = null
+
+  fun add(raw : Bytes) {
+    val h = hash
+    if (h == null) { held.add(raw) } else { h!!.update(raw) }
+  }
+  // From here on with this suite's hash.
+  fun start(keys : __TlsKeys) {
+    if (hash != null) { return }   // begun already, after a HelloRetryRequest
+    val h = keys.newHash()
+    for (b in held) { h.update(b) }
+    held.clear()
+    hash = h
+  }
+  // After a HelloRetryRequest: the first ClientHello becomes message_hash, its hash.
+  fun restartWithHash(keys : __TlsKeys) {
+    val h = keys.newHash()
+    for (b in held) { h.update(b) }
+    val first = h.digest()
+    held.clear()
+    val m = __TlsWriter().u8(__Tls.messageHash).u24(first.size).bytes(first).toBytes()
+    val fresh = keys.newHash()
+    fresh.update(m)
+    hash = fresh
+  }
+  // A copy hashed with `keys`' hash from here on, for a PSK binder.
+  fun copyFor(keys : __TlsKeys) : __Transcript {
+    val t = __Transcript()
+    val h = hash
+    if (h == null) {
+      for (b in held) { t.held.add(b) }
+      t.start(keys)
+    } else {
+      t.hash = h!!.copy()
+    }
+    return t
+  }
+  // The hash of everything so far, and of everything so far and `more`.
+  fun current() : Bytes => hash!!.copy().digest()
+  fun currentWith(more : Bytes) : Bytes => hash!!.copy().update(more).digest()
+}
+
+// ---- Signatures ----
+
+// The signature schemes asked for and taken, most wanted first. TLS 1.3 takes PKCS#1 v1.5 in
+// certificates alone (RFC 8446 4.2.3).
+val __schemes13 = [__Tls.ecdsaSecp256r1Sha256, __Tls.ecdsaSecp384r1Sha384, __Tls.ed25519,
+                   __Tls.rsaPssRsaeSha256, __Tls.rsaPssRsaeSha384, __Tls.rsaPssRsaeSha512]
+val __schemesOffered = __schemes13 + [__Tls.rsaPkcs1Sha256, __Tls.rsaPkcs1Sha384, __Tls.rsaPkcs1Sha512]
+
+fun __schemeHash(scheme : int) : Hash => when (scheme) {
+  __Tls.ecdsaSecp384r1Sha384, __Tls.rsaPssRsaeSha384, __Tls.rsaPkcs1Sha384 -> Sha384()
+  __Tls.rsaPssRsaeSha512, __Tls.rsaPkcs1Sha512, __Tls.ecdsaSecp521r1Sha512 -> Sha512()
+  else -> Sha256()
+}
+
+// Whether `signature` by `key` with `scheme` is good for `content`.
+fun __verifyScheme(scheme : int, key : PublicKey, content : Bytes, signature : Bytes) : bool {
+  try {
+    return when (scheme) {
+      __Tls.ecdsaSecp256r1Sha256 -> key is EcPublicKey and (key as EcPublicKey).curve == 256 and (key as EcPublicKey).verify(content, signature, Sha256())
+      __Tls.ecdsaSecp384r1Sha384 -> key is EcPublicKey and (key as EcPublicKey).curve == 384 and (key as EcPublicKey).verify(content, signature, Sha384())
+      __Tls.ed25519 -> key is Ed25519PublicKey and (key as Ed25519PublicKey).verify(content, signature)
+      __Tls.rsaPssRsaeSha256, __Tls.rsaPssRsaeSha384, __Tls.rsaPssRsaeSha512 ->
+        key is RsaPublicKey and (key as RsaPublicKey).verify(content, signature, __schemeHash(scheme), RsaPadding.pss())
+      __Tls.rsaPkcs1Sha256, __Tls.rsaPkcs1Sha384, __Tls.rsaPkcs1Sha512 ->
+        key is RsaPublicKey and (key as RsaPublicKey).verify(content, signature, __schemeHash(scheme))
+      else -> false
+    }
+  } catch (e : IllegalArgumentException) {
+    return false
+  }
+}
+
+// The scheme to sign with, of those the peer takes (`offered`), for `key`; null where none fits.
+fun __schemeFor(key : PrivateKey, offered : List<int>, tls13 : bool) : int? {
+  val mine : List<int> = when (key) {
+    is EcPrivateKey -> key.curve == 384 ? [__Tls.ecdsaSecp384r1Sha384] : [__Tls.ecdsaSecp256r1Sha256]
+    is Ed25519PrivateKey -> [__Tls.ed25519]
+    is RsaPrivateKey -> tls13 ? [__Tls.rsaPssRsaeSha256, __Tls.rsaPssRsaeSha384, __Tls.rsaPssRsaeSha512] :
+                                [__Tls.rsaPssRsaeSha256, __Tls.rsaPssRsaeSha384, __Tls.rsaPssRsaeSha512, __Tls.rsaPkcs1Sha256, __Tls.rsaPkcs1Sha384, __Tls.rsaPkcs1Sha512]
+    else -> []
+  }
+  return mine.firstOrNull { offered.contains(it) }
+}
+
+fun __signScheme(scheme : int, key : PrivateKey, content : Bytes) : Bytes => when (scheme) {
+  __Tls.ecdsaSecp256r1Sha256 -> (key as EcPrivateKey).sign(content, Sha256())
+  __Tls.ecdsaSecp384r1Sha384 -> (key as EcPrivateKey).sign(content, Sha384())
+  __Tls.ed25519 -> (key as Ed25519PrivateKey).sign(content)
+  __Tls.rsaPssRsaeSha256, __Tls.rsaPssRsaeSha384, __Tls.rsaPssRsaeSha512 -> (key as RsaPrivateKey).sign(content, __schemeHash(scheme), RsaPadding.pss())
+  else -> (key as RsaPrivateKey).sign(content, __schemeHash(scheme))
+}
+
+// What a TLS 1.3 CertificateVerify signs: 64 spaces, the context, a zero, the transcript's hash.
+fun __verifyContent(server : bool, transcriptHash : Bytes) : Bytes {
+  val label = (server ? "TLS 1.3, server CertificateVerify" : "TLS 1.3, client CertificateVerify").toBytes()
+  val w = __TlsWriter()
+  for (i in 0..<64) { w.u8(0x20) }
+  return w.bytes(label).u8(0).bytes(transcriptHash).toBytes()
+}
+
+// A signature scheme list: a vector of 2-byte codes.
+fun __readSchemes(r : __TlsReader) : List<int> {
+  val v = r.vector(2, 2)
+  val list : open List<int> = []
+  while (!v.isEmpty) { list.add(v.u16()) }
+  return list
+}
+
+// ---- Key shares ----
+
+// One side's share of a key exchange: its private key, and the public bytes it sends.
+class __KeyShare(val group : int) {
+  private val x : X25519PrivateKey? = group == __Tls.x25519 ? X25519PrivateKey.generate() : null
+  private val ec : EcPrivateKey? = group == __Tls.secp256r1 ? P256PrivateKey.generate() as EcPrivateKey :
+                                   group == __Tls.secp384r1 ? P384PrivateKey.generate() as EcPrivateKey : null
+  val publicBytes : Bytes = x != null ? x!!.publicKey.bytes : ec!!.publicKey.bytes
+
+  // The shared secret with the peer's public bytes; illegal_parameter where they are not a key.
+  fun agree(peer : Bytes) : Bytes {
+    try {
+      if (x != null) {
+        if (peer.size != 32) { __fault(__Tls.illegalParameter, "an x25519 share of ${peer.size} bytes") }
+        return x!!.agree(X25519PublicKey(peer))
+      }
+      val size = group == __Tls.secp256r1 ? 65 : 97
+      if (peer.size != size or peer[0].toInt() != 4) { __fault(__Tls.illegalParameter, "a ${__groupName(group)} share not of an uncompressed point") }
+      val key = group == __Tls.secp256r1 ? P256PublicKey(peer) as EcPublicKey : P384PublicKey(peer) as EcPublicKey
+      return ec!!.agree(key)
+    } catch (e : IllegalArgumentException) {
+      __fault(__Tls.illegalParameter, "the peer's key share is not good: ${e.message}")
+    }
+  }
+}
+
+val __groupsOffered = [__Tls.x25519, __Tls.secp256r1, __Tls.secp384r1]
+
+// HelloRetryRequest's random: SHA-256 of "HelloRetryRequest".
+val __helloRetryRandom = "CF21AD74E59A6111BE1D8C021E65B891C2A211167ABB8C5E079E09E2C8A8339C".hexToBytes()
+
+// The cipher suites of TLS 1.3 offered or taken, most wanted first: AES-GCM where the processor
+// has AES instructions, ChaCha20-Poly1305 first where it has not.
+fun __suites13() : List<int> {
+  val aes = CryptoEngine.instructions.contains("aes")
+  return aes ? [__Tls.aes128GcmSha256, __Tls.aes256GcmSha384, __Tls.chacha20Poly1305Sha256] :
+               [__Tls.chacha20Poly1305Sha256, __Tls.aes128GcmSha256, __Tls.aes256GcmSha384]
+}
+
+fun __nowMillis() : int => Instant.now().epochMilliseconds
+
+fun __isIpLiteral(host : string) : bool => IpAddress.parse(host.removeSurrounding("[", "]")) != null
+
+// A certificate refused, as the alert that says so.
+fun __certificateAlert(e : CertificateException) : int {
+  val m = e.message ?: ""
+  if (m.contains("expired") or m.contains("not good until")) { return __Tls.certificateExpired }
+  if (m.contains("no issuer") or m.contains("trusted")) { return __Tls.unknownCa }
+  return __Tls.badCertificate
+}
+
+// A Certificate message's chain (TLS 1.3: each with extensions after it).
+fun __readChain(r : __TlsReader, tls13 : bool) : List<Certificate> {
+  val list = r.vector(3)
+  val chain : open List<Certificate> = []
+  while (!list.isEmpty) {
+    val der = list.opaque(3, 1)
+    if (tls13) { list.opaque(2) }
+    try {
+      chain.add(Certificate(der))
+    } catch (e : CertificateException) {
+      __fault(__Tls.badCertificate, "a certificate that cannot be read: ${e.message}")
+    }
+  }
+  return chain
+}
+
+fun __writeChain(w : __TlsWriter, chain : List<Certificate>, tls13 : bool) {
+  w.vector(3) { list ->
+    for (c in chain) {
+      list.vector(3) { it.bytes(c.der) }
+      if (tls13) { list.u16(0) }
+    }
+  }
+}
+
+// A peer certificate's key; unsupported_certificate where it is of a kind not known here.
+fun __peerKey(leaf : Certificate, who : string) : PublicKey {
+  try {
+    return leaf.publicKey
+  } catch (e : CertificateException) {
+    __fault(__Tls.unsupportedCertificate, "the $who's key: ${e.message}")
+  }
+}
+
+// ---- The client ----
+
+fun __clientHandshake(c : __TlsConnection, host : string, cacheKey : string, o : TlsClientOptions) throws IOException {
+  val offer13 = o.maximumVersion == TlsVersion.tls13
+  val offer12 = o.minimumVersion == TlsVersion.tls12
+  val name = host.removeSuffix(".").lower()
+  val sni = __isIpLiteral(host) ? null : name
+  c.serverName = sni
+  c.sessions = o.sessions
+  c.sessionKey = cacheKey
+  val random = SecureRandom.bytes(32)
+  val sessionId = SecureRandom.bytes(32)
+  val suites13 = offer13 ? __kept(__suites13(), o.cipherSuites) { __suiteName(it) } : []
+  val suites = suites13 + (offer12 ? __kept(__suites12(), o.cipherSuites) { __suiteName(it) } : [])
+  if (suites.isEmpty()) { throw IllegalArgumentException("no cipher suite of the versions allowed") }
+  val groups = __kept(__groupsOffered, o.groups) { __groupName(it) }
+  c.groups = groups
+  // A share of the group most wanted; another the server asks for by HelloRetryRequest.
+  var shares = offer13 ? [__KeyShare(groups[0])] : []
+  val ticket = offer13 and o.sessions != null ? o.sessions!!.take(cacheKey, __nowMillis()) : null
+  val transcript = __Transcript()
+  var cookie : Bytes? = null
+  var retried = false
+
+  // The ClientHello, with its PSK binder (over everything before the binders) where resuming.
+  fun hello() : Bytes {
+    val ticketKeys = ticket == null ? null : __TlsKeys(ticket!!.suite)
+    val m = __handshakeMessage(__Tls.clientHello) { w ->
+      w.u16(__Tls.tls12).bytes(random)
+      w.vector(1) { it.bytes(sessionId) }
+      w.vector(2) { v -> for (s in suites) { v.u16(s) } }
+      w.vector(1) { it.u8(0) }
+      w.vector(2) { e ->
+        if (sni != null) {
+          e.extension(__Tls.serverName) { x -> x.vector(2) { l -> l.u8(0).vector(2) { it.bytes(sni!!.toBytes()) } } }
+        }
+        e.extension(__Tls.supportedGroups) { x -> x.vector(2) { l -> for (g in groups) { l.u16(g) } } }
+        e.extension(__Tls.signatureAlgorithms) { x -> x.vector(2) { l -> for (s in __schemesOffered) { l.u16(s) } } }
+        e.extension(__Tls.supportedVersions) { x -> x.vector(1) { l -> if (offer13) { l.u16(__Tls.tls13) }; if (offer12) { l.u16(__Tls.tls12) } } }
+        if (offer12) {
+          e.extension(__Tls.ecPointFormats) { x -> x.vector(1) { it.u8(0) } }
+          e.extension(__Tls.extendedMasterSecret) { }
+          e.extension(__Tls.renegotiationInfo) { it.u8(0) }
+        }
+        if (o.alpn.isNotEmpty()) {
+          e.extension(__Tls.alpn) { x -> x.vector(2) { l -> for (p in o.alpn) { l.vector(1) { it.bytes(p.toBytes()) } } } }
+        }
+        if (offer13) {
+          e.extension(__Tls.keyShare) { x -> x.vector(2) { l -> for (s in shares) { l.u16(s.group).vector(2) { it.bytes(s.publicBytes) } } } }
+          e.extension(__Tls.pskKeyExchangeModes) { x -> x.vector(1) { it.u8(1) } }
+          if (cookie != null) { e.extension(__Tls.cookie) { x -> x.vector(2) { it.bytes(cookie!!) } } }
+        }
+        if (ticket != null) {
+          // Last of all (RFC 8446 4.2.11): the identity, then the binder, filled in below.
+          val age = (__nowMillis() - ticket!!.received + ticket!!.ageAdd) & 0xFFFFFFFF
+          e.extension(__Tls.preSharedKey) { x ->
+            x.vector(2) { l -> l.vector(2) { it.bytes(ticket!!.ticket) }.u32(age) }
+            x.vector(2) { l -> l.vector(1) { it.bytes(Bytes(ticketKeys!!.hashSize)) } }
+          }
+        }
+      }
+    }
+    if (ticket == null) { return m }
+    // The binder: over the hello up to its binders (their 2-byte list length, a byte, the MAC).
+    val k = ticketKeys!!
+    val cut = m.size - (2 + 1 + k.hashSize)
+    val early = k.extract(null, ticket!!.psk)
+    val binderKey = k.deriveSecret(early, "res binder", k.emptyHash)
+    // The transcript so far (a HelloRetryRequest and what came before it), then the cut hello.
+    val before = transcript.copyFor(k)
+    before.add(m[0..<cut])
+    val binder = k.finishedMac(binderKey, before.current())
+    m.copyFrom(binder, 0, 1, m.size - k.hashSize, 1, k.hashSize)
+    return m
+  }
+
+  var ch = hello()
+  c.records.recordVersion = 0x0301
+  c.sendHandshake(ch)
+  c.records.recordVersion = 0x0303
+  transcript.add(ch)
+
+  while (true) {
+    val sh = c.nextHandshake()
+    if (sh.type != __Tls.serverHello) { __fault(__Tls.unexpectedMessage, "message ${sh.type} where ServerHello belongs") }
+    val r = __TlsReader(sh.body)
+    val legacy = r.u16()
+    val serverRandom = r.bytes(32)
+    val echo = r.opaque(1)
+    val suite = r.u16()
+    val compression = r.u8()
+    val ext = r.isEmpty ? __TlsExtensions(__TlsReader(Bytes(0))) : __TlsExtensions(r.vector(2))
+    r.done()
+    if (compression != 0) { __fault(__Tls.illegalParameter, "compression $compression") }
+    if (!suites.contains(suite)) { __fault(__Tls.illegalParameter, "the server chose cipher suite ${__suiteName(suite)}, which was not offered") }
+    val versions = ext.get(__Tls.supportedVersions)
+    val chosen = versions == null ? legacy : versions!!.u16()
+    if (chosen != __Tls.tls13) {
+      if (chosen != __Tls.tls12 or !offer12) { __fault(__Tls.protocolVersion, "the server chose version ${chosen.toString(16)}, which was not offered") }
+      if (versions != null) { __fault(__Tls.illegalParameter, "TLS 1.2 chosen in supported_versions") }
+      // A server that has TLS 1.3 says so in its random when something took it away (RFC 8446 4.1.3).
+      if (offer13 and serverRandom[24..] == "444F574E47524401".hexToBytes()) { __fault(__Tls.illegalParameter, "the server's random says TLS 1.3 was taken away on the way") }
+      if (suites13.contains(suite)) { __fault(__Tls.illegalParameter, "a TLS 1.3 suite with TLS 1.2") }
+      __client12(c, o, name, sni, random, serverRandom, echo, suite, ext, ch, sh)
+      return
+    }
+    if (echo != sessionId) { __fault(__Tls.illegalParameter, "the server did not echo the session id") }
+    if (!suites13.contains(suite)) { __fault(__Tls.illegalParameter, "a TLS 1.2 suite with TLS 1.3") }
+    for (t in ext.types) {
+      if (t != __Tls.supportedVersions and t != __Tls.keyShare and t != __Tls.preSharedKey and t != __Tls.cookie) {
+        __fault(__Tls.unsupportedExtension, "extension $t in ServerHello")
+      }
+    }
+    val keys = __TlsKeys(suite)
+    if (serverRandom == __helloRetryRandom) {
+      // HelloRetryRequest: once, for a group offered and not yet sent a share of.
+      if (retried) { __fault(__Tls.unexpectedMessage, "a second HelloRetryRequest") }
+      retried = true
+      val ks = ext.get(__Tls.keyShare)
+      val ck = ext.get(__Tls.cookie)
+      if (ks == null and ck == null) { __fault(__Tls.illegalParameter, "a HelloRetryRequest that changes nothing") }
+      if (ks != null) {
+        val g = ks!!.u16()
+        ks!!.done()
+        if (!groups.contains(g) or shares.any { it.group == g }) { __fault(__Tls.illegalParameter, "a HelloRetryRequest for group $g") }
+        shares = [__KeyShare(g)]
+      }
+      cookie = ck == null ? null : ck!!.opaque(2, 1)
+      if (ticket != null and __TlsKeys(ticket!!.suite).sha384 != keys.sha384) {
+        // The ticket's hash is not the suite's: resuming cannot work, so it is not offered again.
+        __fault(__Tls.illegalParameter, "a HelloRetryRequest for a suite of another hash than the ticket's")
+      }
+      transcript.restartWithHash(keys)
+      transcript.add(sh.raw)
+      ch = hello()
+      c.flight {
+        c.sendChangeCipherSpec()
+        c.sendHandshake(ch)
+      }
+      transcript.add(ch)
+      continue
+    }
+    if (ext.has(__Tls.cookie)) { __fault(__Tls.unsupportedExtension, "a cookie in ServerHello") }
+    transcript.start(keys)
+    transcript.add(sh.raw)
+    c.version = __Tls.tls13
+    c.suite = suite
+    c.keys = keys
+    val ks = ext.get(__Tls.keyShare)
+    var psk : Bytes? = null
+    val pskExt = ext.get(__Tls.preSharedKey)
+    if (pskExt != null) {
+      val index = pskExt!!.u16()
+      pskExt!!.done()
+      if (ticket == null or index != 0) { __fault(__Tls.illegalParameter, "the server chose a PSK that was not offered") }
+      if (__TlsKeys(ticket!!.suite).sha384 != keys.sha384) { __fault(__Tls.illegalParameter, "the server resumed with a suite of another hash") }
+      psk = ticket!!.psk
+    }
+    if (ks == null) { __fault(__Tls.missingExtension, "no key_share in ServerHello (resuming with no key exchange is not offered)") }
+    val g = ks!!.u16()
+    val peer = ks!!.opaque(2, 1)
+    ks!!.done()
+    val mine = shares.firstOrNull { it.group == g }
+    if (mine == null) { __fault(__Tls.illegalParameter, "a key share for group $g, which was not sent") }
+    c.group = g
+    val shared = mine!!.agree(peer)
+    __client13(c, o, name, keys, transcript, shared, psk, ticket)
+    return
+  }
+}
+
+// The rest of a TLS 1.3 handshake as a client, after ServerHello.
+fun __client13(c : __TlsConnection, o : TlsClientOptions, host : string, keys : __TlsKeys, transcript : __Transcript,
+               shared : Bytes, psk : Bytes?, ticket : __TlsTicket?) throws IOException {
+  val early = keys.extract(null, psk ?: Bytes(keys.hashSize))
+  val handshakeSecret = keys.extract(keys.deriveSecret(early, "derived", keys.emptyHash), shared)
+  val th = transcript.current()
+  val clientHs = keys.deriveSecret(handshakeSecret, "c hs traffic", th)
+  val serverHs = keys.deriveSecret(handshakeSecret, "s hs traffic", th)
+  c.setReadCipher(keys.cipher(serverHs))
+  // From here an alert of this side's is sealed, as the server reads with these keys.
+  c.setWriteCipher(keys.cipher(clientHs))
+
+  // EncryptedExtensions: only what was asked for.
+  val ee = c.nextHandshake()
+  if (ee.type != __Tls.encryptedExtensions) { __fault(__Tls.unexpectedMessage, "message ${ee.type} where EncryptedExtensions belongs") }
+  val er = __TlsReader(ee.body)
+  val ext = __TlsExtensions(er.vector(2))
+  er.done()
+  for (t in ext.types) {
+    val asked = t == __Tls.supportedGroups or (t == __Tls.serverName and c.serverName != null) or (t == __Tls.alpn and o.alpn.isNotEmpty())
+    if (!asked) { __fault(__Tls.unsupportedExtension, "extension $t in EncryptedExtensions, which was not asked for") }
+  }
+  val alpn = ext.get(__Tls.alpn)
+  if (alpn != null) {
+    val list = alpn!!.vector(2)
+    val p = list.opaque(1, 1).decodeToString()
+    list.done()
+    if (!o.alpn.contains(p)) { __fault(__Tls.illegalParameter, "the server chose application protocol '$p', which was not offered") }
+    c.alpn = p
+  }
+  transcript.add(ee.raw)
+
+  var certificateRequest : Bytes? = null
+  var requestedSchemes : List<int> = []
+  if (psk == null) {
+    var m = c.nextHandshake()
+    if (m.type == __Tls.certificateRequest) {
+      val r = __TlsReader(m.body)
+      certificateRequest = r.opaque(1)
+      val rext = __TlsExtensions(r.vector(2))
+      r.done()
+      val sa = rext.get(__Tls.signatureAlgorithms)
+      if (sa == null) { __fault(__Tls.missingExtension, "a CertificateRequest with no signature_algorithms") }
+      requestedSchemes = __readSchemes(sa!!)
+      transcript.add(m.raw)
+      m = c.nextHandshake()
+    }
+    if (m.type != __Tls.certificate) { __fault(__Tls.unexpectedMessage, "message ${m.type} where Certificate belongs") }
+    val cr = __TlsReader(m.body)
+    if (cr.opaque(1).size != 0) { __fault(__Tls.illegalParameter, "a server's Certificate with a request context") }
+    val chain = __readChain(cr, true)
+    cr.done()
+    if (chain.isEmpty()) { __fault(__Tls.decodeError, "the server sent no certificate") }
+    try {
+      val trust = o.trust ?: TrustStore.system()
+      trust.verify(chain, host, o.at ?: Instant.now(), ExtendedKeyUsage.serverAuth)
+    } catch (e : CertificateException) {
+      __fault(__certificateAlert(e), "the server's certificate is not trusted: ${e.message}")
+    } catch (e : IOException) {
+      __fault(__Tls.internalError, "the system's trusted roots cannot be read: ${e.message}")
+    }
+    c.peerCertificates = chain
+    transcript.add(m.raw)
+    val cv = c.nextHandshake()
+    if (cv.type != __Tls.certificateVerify) { __fault(__Tls.unexpectedMessage, "message ${cv.type} where CertificateVerify belongs") }
+    val vr = __TlsReader(cv.body)
+    val scheme = vr.u16()
+    val signature = vr.opaque(2, 1)
+    vr.done()
+    if (!__schemes13.contains(scheme)) { __fault(__Tls.illegalParameter, "signature scheme ${scheme.toString(16)}, which was not offered for TLS 1.3") }
+    val key = __peerKey(chain[0], "server")
+    if (!__verifyScheme(scheme, key, __verifyContent(true, transcript.current()), signature)) {
+      __fault(__Tls.decryptError, "the server's CertificateVerify signature is not good")
+    }
+    transcript.add(cv.raw)
+  } else {
+    c.peerCertificates = ticket!!.peerCertificates
+    c.resumed = true
+  }
+
+  val fin = c.nextHandshake()
+  if (fin.type != __Tls.finished) { __fault(__Tls.unexpectedMessage, "message ${fin.type} where Finished belongs") }
+  if (!Secrets.equal(fin.body, keys.finishedMac(serverHs, transcript.current()))) { __fault(__Tls.decryptError, "the server's Finished is not right") }
+  transcript.add(fin.raw)
+
+  val master = keys.extract(keys.deriveSecret(handshakeSecret, "derived", keys.emptyHash), Bytes(keys.hashSize))
+  val th2 = transcript.current()
+  val clientAp = keys.deriveSecret(master, "c ap traffic", th2)
+  val serverAp = keys.deriveSecret(master, "s ap traffic", th2)
+  c.setReadCipher(keys.cipher(serverAp))
+
+  // This side's flight: ChangeCipherSpec for middleboxes, then sealed with the handshake keys.
+  val flight = __TlsWriter()
+  if (certificateRequest != null) {
+    val id = o.identity
+    val scheme = id == null ? null : __schemeFor(id!!.key, requestedSchemes, true)
+    val chain = scheme == null ? [] : id!!.certificates
+    val cm = __handshakeMessage(__Tls.certificate) { w ->
+      w.vector(1) { it.bytes(certificateRequest!!) }
+      __writeChain(w, chain, true)
+    }
+    transcript.add(cm)
+    flight.bytes(cm)
+    if (scheme != null) {
+      val sig = __signScheme(scheme!!, id!!.key, __verifyContent(false, transcript.current()))
+      val cvm = __handshakeMessage(__Tls.certificateVerify) { w -> w.u16(scheme!!).vector(2) { it.bytes(sig) } }
+      transcript.add(cvm)
+      flight.bytes(cvm)
+    }
+  }
+  val finished = __handshakeMessage(__Tls.finished) { it.bytes(keys.finishedMac(clientHs, transcript.current())) }
+  transcript.add(finished)
+  flight.bytes(finished)
+  c.flight {
+    c.sendChangeCipherSpec()
+    c.sendHandshake(flight.toBytes())
+    c.setWriteCipher(keys.cipher(clientAp))
+  }
+  c.readSecret = serverAp
+  c.writeSecret = clientAp
+  c.resumptionSecret = keys.deriveSecret(master, "res master", transcript.current())
+  c.handshakeDone = true
+}
+
+// A NewSessionTicket, kept to resume with.
+fun __receiveTicket(c : __TlsConnection, body : Bytes) {
+  val r = __TlsReader(body)
+  val lifetime = r.u32()
+  val ageAdd = r.u32()
+  val nonce = r.opaque(1)
+  val ticket = r.opaque(2, 1)
+  r.vector(2)
+  r.done()
+  if (lifetime > 604800) { __fault(__Tls.illegalParameter, "a ticket for more than seven days") }
+  val cache = c.sessions
+  if (cache == null or lifetime == 0) { return }
+  val keys = c.keys!!
+  val psk = keys.expandLabel(c.resumptionSecret!!, "resumption", nonce, keys.hashSize)
+  cache!!.put(c.sessionKey, __TlsTicket(ticket, psk, c.suite, __nowMillis(), lifetime, ageAdd, c.peerCertificates, __Tls.tls13))
+}
+
+// ---- The server ----
+
+// A ClientHello, read.
+class __ClientHello {
+  val message : __TlsMessage
+  val legacyVersion : int
+  val random : Bytes
+  val sessionId : Bytes
+  val suites : List<int>
+  val compressions : Bytes
+  val ext : __TlsExtensions
+  // Where the pre_shared_key extension's binders start in the message (for the binder's hash).
+  var bindersAt = -1
+
+  fun init(message : __TlsMessage) {
+    this.message = message
+    val r = __TlsReader(message.body)
+    legacyVersion = r.u16()
+    random = r.bytes(32)
+    sessionId = r.opaque(1)
+    if (sessionId.size > 32) { __fault(__Tls.illegalParameter, "a session id of ${sessionId.size} bytes") }
+    val sv = r.vector(2, 2)
+    val list : open List<int> = []
+    while (!sv.isEmpty) { list.add(sv.u16()) }
+    suites = list
+    compressions = r.opaque(1, 1)
+    ext = r.isEmpty ? __TlsExtensions(__TlsReader(Bytes(0))) : __TlsExtensions(r.vector(2))
+    r.done()
+    if (ext.has(__Tls.preSharedKey)) {
+      if (ext.types.last() != __Tls.preSharedKey) { __fault(__Tls.illegalParameter, "pre_shared_key not the last extension") }
+      // The binders are the extension's last vector: identities first.
+      val body = ext.bodies.last()
+      val pr = __TlsReader(body)
+      pr.vector(2, 7)
+      val bindersSize = pr.left
+      bindersAt = message.raw.size - bindersSize
+    }
+  }
+
+  fun groups() : List<int> {
+    val g = ext.get(__Tls.supportedGroups)
+    if (g == null) { return [] }
+    val v = g!!.vector(2, 2)
+    val list : open List<int> = []
+    while (!v.isEmpty) { list.add(v.u16()) }
+    return list
+  }
+  // The key shares offered: group to public bytes.
+  fun shares() : Map<int, Bytes> {
+    val k = ext.get(__Tls.keyShare)
+    val map : open Map<int, Bytes> = {:}
+    if (k == null) { return map }
+    val v = k!!.vector(2)
+    while (!v.isEmpty) {
+      val g = v.u16()
+      val b = v.opaque(2, 1)
+      if (map.keys.contains(g)) { __fault(__Tls.illegalParameter, "two key shares for one group") }
+      map[g] = b
+    }
+    return map
+  }
+  fun schemes() : List<int> {
+    val s = ext.get(__Tls.signatureAlgorithms)
+    return s == null ? [] : __readSchemes(s!!)
+  }
+  fun versions() : List<int> {
+    val s = ext.get(__Tls.supportedVersions)
+    if (s == null) { return [] }
+    val v = s!!.vector(1, 2)
+    val list : open List<int> = []
+    while (!v.isEmpty) { list.add(v.u16()) }
+    return list
+  }
+  fun serverName() : string? {
+    val s = ext.get(__Tls.serverName)
+    if (s == null) { return null }
+    val v = s!!.vector(2, 1)
+    while (!v.isEmpty) {
+      val type = v.u8()
+      val n = v.opaque(2, 1)
+      if (type == 0) {
+        for (x in n.toList()) {
+          if (x.toInt() < 0x21 or x.toInt() > 0x7E) { __fault(__Tls.illegalParameter, "a server name that is not ASCII") }
+        }
+        return n.decodeToString(Charset.ascii).lower().removeSuffix(".")
+      }
+    }
+    return null
+  }
+  fun protocols() : List<string> {
+    val a = ext.get(__Tls.alpn)
+    if (a == null) { return [] }
+    val v = a!!.vector(2, 2)
+    val list : open List<string> = []
+    while (!v.isEmpty) { list.add(v.opaque(1, 1).decodeToString()) }
+    return list
+  }
+}
+
+fun __serverHandshake(c : __TlsConnection, o : TlsServerOptions) throws IOException {
+  c.serverOptions = o
+  var m = c.nextHandshake()
+  if (m.type != __Tls.clientHello) { __fault(__Tls.unexpectedMessage, "message ${m.type} where ClientHello belongs") }
+  var hello = __ClientHello(m)
+  val versions = hello.versions()
+  val take13 = o.maximumVersion == TlsVersion.tls13 and versions.contains(__Tls.tls13)
+  if (!take13) {
+    val take12 = o.minimumVersion == TlsVersion.tls12 and (versions.contains(__Tls.tls12) or (versions.isEmpty() and hello.legacyVersion >= __Tls.tls12))
+    if (!take12) { __fault(__Tls.protocolVersion, "the client offers no version taken here (TLS 1.2 or 1.3)") }
+    __server12(c, o, hello)
+    return
+  }
+  if (hello.compressions.size != 1 or hello.compressions[0].toInt() != 0) { __fault(__Tls.illegalParameter, "compression offered with TLS 1.3") }
+  val suite = __kept(__suites13(), o.cipherSuites) { __suiteName(it) }.firstOrNull { hello.suites.contains(it) }
+  val groups = __kept(__groupsOffered, o.groups) { __groupName(it) }
+  c.groups = groups
+  if (suite == null) { __fault(__Tls.handshakeFailure, "the client offers no TLS 1.3 cipher suite taken here") }
+  val keys = __TlsKeys(suite!!)
+  val transcript = __Transcript()
+  transcript.add(m.raw)
+
+  // The group: a share the client sent, else one it takes, asked for by HelloRetryRequest.
+  var shares = hello.shares()
+  var group = groups.firstOrNull { shares.keys.contains(it) }
+  var retried = false
+  // What a PSK binder's hash starts from: nothing, or the HelloRetryRequest and what came before.
+  var binderBase = __Transcript()
+  if (group == null) {
+    retried = true
+    val g = groups.firstOrNull { hello.groups().contains(it) }
+    if (g == null) { __fault(__Tls.handshakeFailure, "the client offers no group taken here (x25519, secp256r1, secp384r1)") }
+    transcript.restartWithHash(keys)
+    val hrr = __handshakeMessage(__Tls.serverHello) { w ->
+      w.u16(__Tls.tls12).bytes(__helloRetryRandom)
+      w.vector(1) { it.bytes(hello.sessionId) }
+      w.u16(suite!!).u8(0)
+      w.vector(2) { e ->
+        e.extension(__Tls.supportedVersions) { it.u16(__Tls.tls13) }
+        e.extension(__Tls.keyShare) { it.u16(g!!) }
+      }
+    }
+    transcript.add(hrr)
+    c.flight {
+      c.sendHandshake(hrr)
+      if (hello.sessionId.size > 0) { c.sendChangeCipherSpec() }
+    }
+    m = c.nextHandshake()
+    if (m.type != __Tls.clientHello) { __fault(__Tls.unexpectedMessage, "message ${m.type} where the second ClientHello belongs") }
+    val second = __ClientHello(m)
+    if (second.random != hello.random or second.sessionId != hello.sessionId or !second.suites.contains(suite!!)) {
+      __fault(__Tls.illegalParameter, "a second ClientHello unlike the first")
+    }
+    hello = second
+    binderBase = transcript.copyFor(keys)
+    transcript.add(m.raw)
+    shares = hello.shares()
+    if (shares.size != 1 or !shares.keys.contains(g!!)) { __fault(__Tls.illegalParameter, "the second ClientHello lacks the share asked for") }
+    group = g
+  } else {
+    transcript.start(keys)
+    binderBase.start(keys)
+  }
+  c.version = __Tls.tls13
+  c.suite = suite!!
+  c.keys = keys
+  c.group = group!!
+  c.serverName = hello.serverName()
+
+  // Resuming: a ticket of this server's, of the suite's hash, not run out, its binder right.
+  var psk : Bytes? = null
+  val pskExt = hello.ext.get(__Tls.preSharedKey)
+  val modes = hello.ext.get(__Tls.pskKeyExchangeModes)
+  if (pskExt != null and o.tickets) {
+    if (modes == null) { __fault(__Tls.missingExtension, "pre_shared_key with no psk_key_exchange_modes") }
+    val modeList = modes!!.opaque(1, 1)
+    val identities = pskExt!!.vector(2, 7)
+    val binders = pskExt!!.vector(2, 33)
+    pskExt!!.done()
+    var index = 0
+    while (!identities.isEmpty and psk == null) {
+      val identity = identities.opaque(2, 1)
+      identities.u32()
+      val binder = binders.isEmpty ? null : binders.opaque(1, 32)
+      if (binder == null) { __fault(__Tls.illegalParameter, "fewer binders than identities") }
+      val state = modeList.toList().any { it.toInt() == 1 } ? __openTicket(o, identity, keys) : null
+      if (state != null) {
+        val early = keys.extract(null, state!!)
+        val binderKey = keys.deriveSecret(early, "res binder", keys.emptyHash)
+        val expected = keys.finishedMac(binderKey, binderBase.currentWith(m.raw[0..<hello.bindersAt]))
+        if (!Secrets.equal(binder!!, expected)) { __fault(__Tls.decryptError, "a PSK binder that is not right") }
+        psk = state
+        c.resumed = true
+      } else {
+        index++
+      }
+    }
+    // The identity chosen, for ServerHello.
+    if (psk != null) { c.pskIndex = index }
+  }
+
+  // The identity to show, for the name asked and the schemes the client takes.
+  val schemes = hello.schemes()
+  var identity : TlsIdentity? = null
+  var scheme : int? = null
+  if (psk == null) {
+    if (schemes.isEmpty()) { __fault(__Tls.missingExtension, "no signature_algorithms in ClientHello") }
+    val name = c.serverName
+    val fitting = o.identities.filter { __schemeFor(it.key, schemes, true) != null }
+    identity = (name == null ? null : fitting.firstOrNull { it.certificates[0].matchesHost(name!!) }) ?: fitting.firstOrNull()
+    if (identity == null) { __fault(__Tls.handshakeFailure, "no certificate here signs with a scheme the client takes") }
+    scheme = __schemeFor(identity!!.key, schemes, true)
+  }
+  val offered = hello.protocols()
+  if (offered.isNotEmpty() and o.alpn.isNotEmpty()) {
+    val p = o.alpn.firstOrNull { offered.contains(it) }
+    if (p == null) { __fault(__Tls.noApplicationProtocol, "the client offers no application protocol taken here (${offered.join(", ")})") }
+    c.alpn = p
+  }
+
+  val share = __KeyShare(group!!)
+  val shared = share.agree(shares[group!!]!!)
+  val sh = __handshakeMessage(__Tls.serverHello) { w ->
+    w.u16(__Tls.tls12).bytes(SecureRandom.bytes(32))
+    w.vector(1) { it.bytes(hello.sessionId) }
+    w.u16(suite!!).u8(0)
+    w.vector(2) { e ->
+      e.extension(__Tls.supportedVersions) { it.u16(__Tls.tls13) }
+      e.extension(__Tls.keyShare) { x -> x.u16(group!!).vector(2) { it.bytes(share.publicBytes) } }
+      if (psk != null) { e.extension(__Tls.preSharedKey) { it.u16(c.pskIndex) } }
+    }
+  }
+  transcript.add(sh)
+
+  val early = keys.extract(null, psk ?: Bytes(keys.hashSize))
+  val handshakeSecret = keys.extract(keys.deriveSecret(early, "derived", keys.emptyHash), shared)
+  val th = transcript.current()
+  val clientHs = keys.deriveSecret(handshakeSecret, "c hs traffic", th)
+  val serverHs = keys.deriveSecret(handshakeSecret, "s hs traffic", th)
+  c.setReadCipher(keys.cipher(clientHs))
+
+  val flight = __TlsWriter()
+  val ee = __handshakeMessage(__Tls.encryptedExtensions) { w ->
+    w.vector(2) { e ->
+      if (c.alpn != null) { e.extension(__Tls.alpn) { x -> x.vector(2) { l -> l.vector(1) { it.bytes(c.alpn!!.toBytes()) } } } }
+      if (c.serverName != null) { e.extension(__Tls.serverName) { } }
+    }
+  }
+  transcript.add(ee)
+  flight.bytes(ee)
+  val askClient = psk == null and o.clientAuthentication != TlsClientAuthentication.none
+  if (askClient) {
+    val cr = __handshakeMessage(__Tls.certificateRequest) { w ->
+      w.u8(0)
+      w.vector(2) { e -> e.extension(__Tls.signatureAlgorithms) { x -> x.vector(2) { l -> for (s in __schemes13) { l.u16(s) } } } }
+    }
+    transcript.add(cr)
+    flight.bytes(cr)
+  }
+  if (psk == null) {
+    val cm = __handshakeMessage(__Tls.certificate) { w ->
+      w.u8(0)
+      __writeChain(w, identity!!.certificates, true)
+    }
+    transcript.add(cm)
+    flight.bytes(cm)
+    val sig = __signScheme(scheme!!, identity!!.key, __verifyContent(true, transcript.current()))
+    val cvm = __handshakeMessage(__Tls.certificateVerify) { w -> w.u16(scheme!!).vector(2) { it.bytes(sig) } }
+    transcript.add(cvm)
+    flight.bytes(cvm)
+  }
+  val finished = __handshakeMessage(__Tls.finished) { it.bytes(keys.finishedMac(serverHs, transcript.current())) }
+  transcript.add(finished)
+  flight.bytes(finished)
+  c.flight {
+    c.sendHandshake(sh)
+    if (hello.sessionId.size > 0 and !retried) { c.sendChangeCipherSpec() }
+    c.setWriteCipher(keys.cipher(serverHs))
+    c.sendHandshake(flight.toBytes())
+  }
+
+  val master = keys.extract(keys.deriveSecret(handshakeSecret, "derived", keys.emptyHash), Bytes(keys.hashSize))
+  val th2 = transcript.current()
+  val clientAp = keys.deriveSecret(master, "c ap traffic", th2)
+  val serverAp = keys.deriveSecret(master, "s ap traffic", th2)
+  c.setWriteCipher(keys.cipher(serverAp))
+
+  // The client's flight.
+  var cm = c.nextHandshake()
+  if (askClient) {
+    if (cm.type != __Tls.certificate) { __fault(__Tls.unexpectedMessage, "message ${cm.type} where the client's Certificate belongs") }
+    val r = __TlsReader(cm.body)
+    if (r.opaque(1).size != 0) { __fault(__Tls.illegalParameter, "a client Certificate of another request context") }
+    val chain = __readChain(r, true)
+    r.done()
+    transcript.add(cm.raw)
+    if (chain.isEmpty()) {
+      if (o.clientAuthentication == TlsClientAuthentication.required) { __fault(__Tls.certificateRequired, "the client sent no certificate") }
+    } else {
+      try {
+        o.clientTrust!!.verify(chain, null, Instant.now(), ExtendedKeyUsage.clientAuth)
+      } catch (e : CertificateException) {
+        __fault(__certificateAlert(e), "the client's certificate is not trusted: ${e.message}")
+      }
+      val cv = c.nextHandshake()
+      if (cv.type != __Tls.certificateVerify) { __fault(__Tls.unexpectedMessage, "message ${cv.type} where the client's CertificateVerify belongs") }
+      val vr = __TlsReader(cv.body)
+      val s = vr.u16()
+      val signature = vr.opaque(2, 1)
+      vr.done()
+      if (!__schemes13.contains(s)) { __fault(__Tls.illegalParameter, "signature scheme ${s.toString(16)}, which was not asked for") }
+      val key = __peerKey(chain[0], "client")
+      if (!__verifyScheme(s, key, __verifyContent(false, transcript.current()), signature)) {
+        __fault(__Tls.decryptError, "the client's CertificateVerify signature is not good")
+      }
+      transcript.add(cv.raw)
+      c.peerCertificates = chain
+    }
+    cm = c.nextHandshake()
+  }
+  if (cm.type != __Tls.finished) { __fault(__Tls.unexpectedMessage, "message ${cm.type} where the client's Finished belongs") }
+  if (!Secrets.equal(cm.body, keys.finishedMac(clientHs, transcript.current()))) { __fault(__Tls.decryptError, "the client's Finished is not right") }
+  transcript.add(cm.raw)
+  c.setReadCipher(keys.cipher(clientAp))
+  c.readSecret = clientAp
+  c.writeSecret = serverAp
+  c.resumptionSecret = keys.deriveSecret(master, "res master", transcript.current())
+  c.handshakeDone = true
+  if (o.tickets) { __sendTicket(c, o) }
+}
+
+// A ticket for the client to resume with: the session's PSK and suite, sealed with the options'
+// key; the client keeps it, the server keeps nothing.
+fun __sendTicket(c : __TlsConnection, o : TlsServerOptions) throws IOException {
+  val keys = c.keys!!
+  val nonce = Bytes(1)
+  nonce[0] = c.ticketsSent.toByteWrapped()
+  c.ticketsSent += 1
+  val psk = keys.expandLabel(c.resumptionSecret!!, "resumption", nonce, keys.hashSize)
+  val lifetime = 86400
+  val ageAdd = SecureRandom.bytes(4).int32(0) & 0xFFFFFFFF
+  val state = __TlsWriter().u8(1).u16(c.suite).u32(__nowMillis() / 1000).u32(lifetime).vector(1) { it.bytes(psk) }.toBytes()
+  val sealNonce = SecureRandom.bytes(12)
+  val ticket = __TlsWriter().bytes(sealNonce).bytes(o.ticketCipher.seal(sealNonce, state)).toBytes()
+  val m = __handshakeMessage(__Tls.newSessionTicket) { w ->
+    w.u32(lifetime).u32(ageAdd)
+    w.vector(1) { it.bytes(nonce) }
+    w.vector(2) { it.bytes(ticket) }
+    w.u16(0)
+  }
+  c.sendHandshake(m)
+}
+
+// A ticket's PSK, where it is this server's, of a suite of `keys`' hash, and has not run out.
+fun __openTicket(o : TlsServerOptions, ticket : Bytes, keys : __TlsKeys) : Bytes? {
+  if (ticket.size < 12 + 16 + 1) { return null }
+  val state = o.ticketCipher.open(ticket[0..<12], ticket[12..])
+  if (state == null) { return null }
+  try {
+    val r = __TlsReader(state!!)
+    if (r.u8() != 1) { return null }
+    val suite = r.u16()
+    val issued = r.u32()
+    val lifetime = r.u32()
+    val psk = r.opaque(1)
+    r.done()
+    if (__TlsKeys(suite).sha384 != keys.sha384) { return null }
+    val now = __nowMillis() / 1000
+    if (now < issued or now - issued > lifetime) { return null }
+    return psk
+  } catch (f : __TlsFault) {
+    return null
+  }
+}

@@ -1,0 +1,296 @@
+// import Crypto's TLS, a client and a server in this program over the loopback (networking plan,
+// part 5): both versions, every cipher suite and group, a HelloRetryRequest, RSA-PSS, ECDSA and
+// Ed25519 certificates, ALPN, client certificates, resumption, KeyUpdate, a megabyte each way,
+// lines through a TlsSocket's reader and writer, how a connection ends, what is refused (each
+// with its alert), and ClientHellos changed at random, each refused with an alert, never an
+// internal error. tools/crypto/tls_interop.sh checks the same against OpenSSL and curl.
+// The certificates (tests/data/certs/tls) are made by tools/crypto/tls_certs.sh.
+import Crypto.*
+
+val dir = "data/certs/tls"
+fun identity(name : string) : TlsIdentity => TlsIdentity.of(Pkcs12.read(FilePath("$dir/$name.p12").readBytes(), "pw")[0])
+val roots = TrustStore.fromPem(FilePath("$dir/root.pem").readText())
+val ec = identity("ec")
+val rsa = identity("rsa")
+val ed = identity("ed25519")
+val client = identity("client")
+val listener = ServerSocket(0, bindAddress = "127.0.0.1")
+val port = listener.localPort
+// Quick (WW_TEST_QUICK=1, under GC stress): 64 KB each way in place of a megabyte, 30 hellos
+// changed in place of 300.
+val quick = Program.environment["WW_TEST_QUICK"] == "1"
+val bigSize = quick ? 65536 : 1048576
+
+fun describe(t : TlsSocket) : string =>
+  "${t.version} ${t.cipherSuite} ${t.group} alpn=${t.applicationProtocol} resumed=${t.isResumed} peer=${t.peerCertificates.size}"
+
+fun sayHello(tls : TlsSocket) : string {
+  tls.writer.println("hello")
+  return tls.reader.readLine() ?: ""
+}
+
+// One connection: the server on a thread, echoing a line; what each side says, or why it refused.
+suspend fun talk(server : TlsServerOptions, options : TlsClientOptions, name : string = "server.test",
+         work : ((TlsSocket) -> string throws IOException)? = null) : string {
+  val side = thread {
+    val s = listener.accept()
+    s.readTimeout = 20.seconds
+    try {
+      val tls = TlsSocket.server(s, server)
+      val line = tls.reader.readLine()
+      if (line == "big") {
+        // All of it read, then its hash and all of it written back.
+        val parts : open List<Bytes> = []
+        val sum = Sha256()
+        var size = 0
+        while (size < bigSize) {
+          val part = tls.reader.read()
+          if (part == null) { break }
+          parts.add(part!!)
+          sum.update(part!!)
+          size += part!!.size
+        }
+        tls.writer.write(sum.digest().toHex() + "\n")
+        for (part in parts) { tls.writer.write(part) }
+      } else if (line == "update") {
+        tls.updateKeys()
+        tls.writer.println("updated")
+        tls.writer.println("then: ${tls.reader.readLine()}")
+      } else {
+        tls.writer.println("echo $line")
+      }
+      tls.close()
+      "server: ${describe(tls)}"
+    } catch (e : IOException) {
+      s.close()
+      "server refused: ${e.message}"
+    }
+  }
+  var said = ""
+  try {
+    val socket = Socket("127.0.0.1", port)
+    socket.readTimeout = 20.seconds
+    val tls = TlsSocket.client(socket, name, options)
+    said = work == null ? sayHello(tls) : work!!(tls)
+    said = "${describe(tls)}: $said"
+    tls.close()
+  } catch (e : IOException) {
+    said = "client refused: ${e.message}"
+  }
+  return "$said | ${side.get()}"
+}
+
+fun options(alpn : List<string> = [], suites : List<string>? = null, groups : List<string>? = null, identity : TlsIdentity? = null,
+            sessions : TlsSessionCache? = null, minimum : TlsVersion = TlsVersion.tls12, maximum : TlsVersion = TlsVersion.tls13,
+            at : Instant? = null, trust : TrustStore = roots) : TlsClientOptions =>
+  TlsClientOptions(trust = trust, alpn = alpn, identity = identity, sessions = sessions, minimumVersion = minimum, maximumVersion = maximum,
+                   at = at, cipherSuites = suites, groups = groups)
+
+val plain = TlsServerOptions(ec)
+
+// ---- TLS 1.3 ----
+for (s in ["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"]) {
+  print(talk(plain, options(suites = [s])))
+}
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+// expect: tls13 TLS_AES_256_GCM_SHA384 x25519 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_256_GCM_SHA384 x25519 alpn=null resumed=false peer=0
+// expect: tls13 TLS_CHACHA20_POLY1305_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_CHACHA20_POLY1305_SHA256 x25519 alpn=null resumed=false peer=0
+for (g in ["secp256r1", "secp384r1"]) {
+  print(talk(plain, options(suites = ["TLS_AES_128_GCM_SHA256"], groups = [g])))
+}
+// expect: tls13 TLS_AES_128_GCM_SHA256 secp256r1 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_128_GCM_SHA256 secp256r1 alpn=null resumed=false peer=0
+// expect: tls13 TLS_AES_128_GCM_SHA256 secp384r1 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_128_GCM_SHA256 secp384r1 alpn=null resumed=false peer=0
+// A HelloRetryRequest: the client's share is x25519, the server takes secp384r1 alone.
+print(talk(TlsServerOptions(ec, groups = ["secp384r1"]), options(suites = ["TLS_AES_128_GCM_SHA256"])))
+// expect: tls13 TLS_AES_128_GCM_SHA256 secp384r1 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_128_GCM_SHA256 secp384r1 alpn=null resumed=false peer=0
+// RSA-PSS and Ed25519 certificates; the address as the name (no SNI, the IP address checked).
+print(talk(TlsServerOptions(rsa), options(suites = ["TLS_AES_128_GCM_SHA256"])))
+print(talk(TlsServerOptions(ed), options(suites = ["TLS_AES_128_GCM_SHA256"]), "127.0.0.1"))
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+
+// ---- TLS 1.2 ----
+for (s in ["TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"]) {
+  print(talk(plain, options(suites = [s], maximum = TlsVersion.tls12)))
+}
+// expect: tls12 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+// expect: tls12 TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 x25519 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 x25519 alpn=null resumed=false peer=0
+// expect: tls12 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 x25519 alpn=null resumed=false peer=0
+for (s in ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"]) {
+  print(talk(TlsServerOptions(rsa), options(suites = [s], maximum = TlsVersion.tls12)))
+}
+// expect: tls12 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+// expect: tls12 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 x25519 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 x25519 alpn=null resumed=false peer=0
+// expect: tls12 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 x25519 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 x25519 alpn=null resumed=false peer=0
+print(talk(plain, options(suites = ["TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"], groups = ["secp384r1"], maximum = TlsVersion.tls12)))
+// expect: tls12 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 secp384r1 alpn=null resumed=false peer=2: echo hello | server: tls12 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 secp384r1 alpn=null resumed=false peer=0
+
+// ---- ALPN, client certificates, resumption ----
+val alpnServer = TlsServerOptions(ec, alpn = ["h2", "http/1.1"])
+print(talk(alpnServer, options(alpn = ["http/1.1", "h2"])).substringBefore(":"))
+print(talk(alpnServer, options(alpn = ["http/1.1"], maximum = TlsVersion.tls12)).substringBefore(":"))
+print(talk(alpnServer, options()).substringBefore(":"))
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=h2 resumed=false peer=2
+// expect: tls12 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 x25519 alpn=http/1.1 resumed=false peer=2
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2
+val required = TlsServerOptions(ec, clientAuthentication = TlsClientAuthentication.required, clientTrust = roots)
+val requested = TlsServerOptions(ec, clientAuthentication = TlsClientAuthentication.requested, clientTrust = roots)
+print(talk(required, options(identity = client)).substringAfter("| "))
+print(talk(required, options(identity = client, maximum = TlsVersion.tls12)).substringAfter("| "))
+print(talk(requested, options()).substringAfter("| "))
+// expect: server: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2
+// expect: server: tls12 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2
+// expect: server: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+val cache = TlsSessionCache()
+for (i in 0..<3) { print(talk(plain, options(sessions = cache)).substringBefore(":")) }
+// Another server's tickets are not this one's: a whole handshake again.
+print(talk(TlsServerOptions(ec), options(sessions = cache)).substringBefore(":"))
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=true peer=2
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=true peer=2
+// expect: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=2
+
+// ---- KeyUpdate, a megabyte, lines ----
+print(talk(plain, options()) { tls ->
+  tls.updateKeys()
+  tls.writer.println("update")
+  val first = tls.reader.readLine()
+  tls.writer.println("after both")
+  "$first ${tls.reader.readLine()}"
+}.substringAfter(": "))
+// expect: updated then: after both | server: tls13 TLS_AES_128_GCM_SHA256 x25519 alpn=null resumed=false peer=0
+for (max in [TlsVersion.tls13, TlsVersion.tls12]) {
+  print(talk(plain, options(maximum = max)) { tls ->
+    val data = Bytes(bigSize)
+    for (i in 0..<data.size) { data[i] = (i * 7 + i / 1000).toByteWrapped() }
+    tls.writer.println("big")
+    tls.writer.write(data)
+    val hash = tls.reader.readLine()
+    var back = 0
+    val sum = Sha256()
+    while (back < data.size) {
+      val part = tls.reader.read()
+      if (part == null) { break }
+      sum.update(part!!)
+      back += part!!.size
+    }
+    "${hash == Sha256.hash(data).toHex()} ${back == data.size} ${sum.digest() == Sha256.hash(data)}"
+  }.substringAfter(": ").substringBefore(" |"))
+}
+// expect: true true true
+// expect: true true true
+print(talk(plain, options()) { tls ->
+  tls.writer.write("a line\r\n")
+  val reply = tls.reader.readLine()
+  val rest = tls.reader.readLine()
+  "$reply / $rest / ${tls.closedCleanly}"
+}.substringAfter(": ").substringBefore(" |"))
+// expect: echo a line / null / true
+
+// ---- Refused ----
+print(talk(plain, options(), "other.test"))
+// expect: client refused: the server's certificate is not trusted: the certificate CN=ec: it is not for other.test (it is for server.test, 127.0.0.1) (bad_certificate sent) | server refused: the client sent bad_certificate during the handshake
+print(talk(plain, options(trust = TrustStore([]))))
+// expect: client refused: the server's certificate is not trusted: the root CN=TLS Test Root is not one trusted here (unknown_ca sent) | server refused: the client sent unknown_ca during the handshake
+print(talk(TlsServerOptions(identity("expired")), options(at = Instant.parse("2027-06-01T00:00:00Z"))))
+// expect: client refused: the server's certificate is not trusted: the certificate CN=expired: it expired at 2026-12-31T00:00:00Z (certificate_expired sent) | server refused: the client sent certificate_expired during the handshake
+print(talk(TlsServerOptions(ec, maximumVersion = TlsVersion.tls12), options(minimum = TlsVersion.tls13)))
+// expect: client refused: the server sent protocol_version during the handshake | server refused: the client offers no version taken here (TLS 1.2 or 1.3) (protocol_version sent)
+print(talk(TlsServerOptions(ec, cipherSuites = ["TLS_AES_256_GCM_SHA384"]), options(suites = ["TLS_AES_128_GCM_SHA256"])))
+// expect: client refused: the server sent handshake_failure during the handshake | server refused: the client offers no TLS 1.3 cipher suite taken here (handshake_failure sent)
+print(talk(alpnServer, options(alpn = ["spdy/3"])))
+// expect: client refused: the server sent no_application_protocol during the handshake | server refused: the client offers no application protocol taken here (spdy/3) (no_application_protocol sent)
+print(talk(required, options()))
+print(talk(required, options(maximum = TlsVersion.tls12)))
+// expect: client refused: the server sent certificate_required | server refused: the client sent no certificate (certificate_required sent)
+// expect: client refused: the server sent handshake_failure during the handshake | server refused: the client sent no certificate (handshake_failure sent)
+print(talk(TlsServerOptions(ec, clientAuthentication = TlsClientAuthentication.required, clientTrust = TrustStore([])), options(identity = client)).substringAfter("| "))
+// expect: server refused: the client's certificate is not trusted: the root CN=TLS Test Root is not one trusted here (unknown_ca sent)
+
+// A server that says TLS 1.3 was taken away (its random ends DOWNGRD 01) while choosing 1.2.
+val fake = thread {
+  val s = listener.accept()
+  s.reader.read()
+  val sh = "160303002c" + "02000028" + "0303" + "00".repeat(24) + "444f574e47524401" + "00" + "c02b" + "00" + "0000"
+  s.writer.write(sh.hexToBytes())
+  try { s.reader.read() } catch (e : IOException) { }
+  s.close()
+}
+try {
+  val s = Socket("127.0.0.1", port)
+  s.readTimeout = 20.seconds
+  TlsSocket.client(s, "server.test", options())
+} catch (e : TlsException) {
+  print(e.message, e.alertName)
+}
+fake.get()
+// expect: the server's random says TLS 1.3 was taken away on the way (illegal_parameter sent) illegal_parameter
+
+// A connection cut with no close_notify: the end, but not a clean one.
+val cut = thread {
+  val s = listener.accept()
+  val tls = TlsSocket.server(s, plain)
+  tls.writer.println("then nothing")
+  s.close()
+}
+val cutClient = TlsSocket.client(Socket("127.0.0.1", port), "server.test", options())
+print(cutClient.reader.readLine(), cutClient.reader.readLine(), cutClient.closedCleanly)
+cutClient.close()
+cut.get()
+// expect: then nothing null false
+
+// ---- ClientHellos changed at random: each refused with an alert, never an internal error ----
+val captured = thread {
+  val s = listener.accept()
+  val hello = s.reader.read()
+  s.close()
+  hello!!
+}
+try { TlsSocket.client(Socket("127.0.0.1", port), "server.test", options()) } catch (e : IOException) { }
+val hello = captured.get()
+Math.seed(5)
+val rounds = quick ? 30 : 300
+var internal = 0
+var refused = 0
+for (round in 0..<rounds) {
+  val changed = hello[0..]
+  // Bytes changed anywhere, the hello cut short, or a length (the record's, the message's) changed.
+  val kind = Math.randomInt(0, 2)
+  if (kind == 0) {
+    for (k in 0..<Math.randomInt(1, 4)) {
+      val at = Math.randomInt(0, changed.size - 1)
+      changed[at] = Math.randomInt(0, 255).toByteWrapped()
+    }
+  } else if (kind == 2) {
+    val at = [3, 4, 6, 7, 8][Math.randomInt(0, 4)]
+    changed[at] = Math.randomInt(0, 255).toByteWrapped()
+  }
+  val sent = kind == 1 ? changed[0..<Math.randomInt(1, changed.size - 1)] : changed
+  val server = thread {
+    val s = listener.accept()
+    s.readTimeout = 10.seconds
+    try {
+      TlsSocket.server(s, plain).close()
+      "taken"
+    } catch (e : TlsException) {
+      e.message ?: ""
+    } catch (e : IOException) {
+      "io: ${e.message}"
+    }
+  }
+  val raw = Socket("127.0.0.1", port)
+  raw.writer.write(sent)
+  raw.shutdownOutput()
+  try { raw.reader.readBytes() } catch (e : IOException) { }
+  raw.close()
+  val result = server.get()
+  if (result.startsWith("an internal error")) {
+    internal++
+    print("round $round: $result")
+  } else if (result != "taken") {
+    refused++
+  }
+}
+print("fuzzed: ${internal == 0 and refused > rounds / 2}")
+// expect: fuzzed: true
+listener.close()

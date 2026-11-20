@@ -22,34 +22,122 @@ enum Charset { utf8, latin1, ascii, utf16le, utf16be, utf16, windows1252, latin9
 
 // ---- Reader and Writer (D119) ----
 
-// Something to read from, bytes or text: a file, what a program writes, a socket. It reads
-// ahead into a buffer of its own, so there is nothing to wrap it in.
+// A connection that WinterWolf code carries rather than the system: a TLS connection of import
+// Crypto is one (networking plan, part 5). A Reader or Writer made over one reads and writes it as
+// it would a socket, so code that reads lines from a Socket's reader reads them from a
+// TlsSocket's the same way.
+interface ByteChannel {
+  // Up to `count` bytes (one or more), waiting until there are some; null at the end.
+  fun receive(count : int) : Bytes? throws IOException
+  // All of `data`, returning when it has been handed on.
+  fun send(data : Bytes) throws IOException
+  // Closes it; closing it again does nothing.
+  fun closeChannel()
+  // Whether it has not been closed yet.
+  val isChannelOpen : bool
+}
+
+// Something to read from, bytes or text: a file, what a program writes, a socket, a
+// ByteChannel. It reads ahead into a buffer of its own, so there is nothing to wrap it in.
 class Reader : AutoCloseable {
   private val handle : any
+  private val channel : ByteChannel?
+  // A channel's bytes read ahead (a line's search reads past its end), from heldAt on.
+  private var held : Bytes? = null
+  private var heldAt = 0
   // What text is read in; a change takes effect from the next read.
   var charset : Charset         // what text is read or written in; it may change as the reading goes on
 
+  // Over a handle of the system's (a file's, a socket's), or a ByteChannel.
   fun init(handle : any, charset : Charset = Charset.utf8) {
     this.handle = handle
+    this.channel = handle is ByteChannel ? handle as ByteChannel : null
     this.charset = charset
   }
 
   // Up to `count` bytes as soon as there are any; null at the end.
-  fun read(count : int = 65536) : Bytes? throws IOException => __io.read(handle, count)
+  fun read(count : int = 65536) : Bytes? throws IOException {
+    val ch = channel
+    if (ch == null) { return __io.read(handle, count) }
+    val h = held
+    if (h != null) {
+      val n = Math.min(count, h.size - heldAt)
+      val part = h[heldAt..<heldAt + n]
+      heldAt += n
+      if (heldAt == h.size) { held = null }
+      return part
+    }
+    return ch.receive(count)
+  }
 
   // Everything up to the end, as bytes or as text.
-  fun readBytes() : Bytes throws IOException => __io.readAll(handle)
+  fun readBytes() : Bytes throws IOException {
+    val ch = channel
+    if (ch == null) { return __io.readAll(handle) }
+    var all = Bytes(0)
+    while (true) {
+      val part = read()
+      if (part == null) { return all }
+      all = __joined(all, 0, part)
+    }
+  }
   // Everything up to the end as text in `charset`; "" when nothing is left.
-  fun readText() : string throws IOException => __io.readText(handle, charset)
+  fun readText() : string throws IOException => channel == null ? __io.readText(handle, charset) : readBytes().decodeToString(charset)
 
   // The next line without its line end; null at the end.
-  fun readLine() : string? throws IOException => __io.readLine(handle, charset)
+  fun readLine() : string? throws IOException => channel == null ? __io.readLine(handle, charset) : channelLine()
+
+  // A channel's next line: what comes before "\n" (in the character set's code units), without
+  // a "\r" before it.
+  private fun channelLine() : string? throws IOException {
+    val unit = (charset == Charset.utf16le or charset == Charset.utf16be or charset == Charset.utf16) ? 2 : 1
+    val lowFirst = charset == Charset.utf16le
+    var searched = 0
+    while (true) {
+      val h = held
+      if (h != null) {
+        var i = heldAt + searched
+        while (i + unit <= h.size) {
+          val newline = unit == 1 ? h[i].toInt() == 10 :
+                        lowFirst ? (h[i].toInt() == 10 and h[i + 1].toInt() == 0) : (h[i].toInt() == 0 and h[i + 1].toInt() == 10)
+          if (newline) {
+            var end = i
+            if (end - unit >= heldAt) {
+              val cr = unit == 1 ? h[end - 1].toInt() == 13 :
+                       lowFirst ? (h[end - 2].toInt() == 13 and h[end - 1].toInt() == 0) : (h[end - 2].toInt() == 0 and h[end - 1].toInt() == 13)
+              if (cr) { end -= unit }
+            }
+            val line = h[heldAt..<end].decodeToString(charset)
+            heldAt = i + unit
+            if (heldAt == h.size) { held = null }
+            return line
+          }
+          i += unit
+        }
+        searched = (h.size - heldAt) / unit * unit
+      }
+      val more = channel!!.receive(65536)
+      if (more == null) {
+        val rest = held
+        if (rest == null) { return null }
+        held = null
+        return rest[heldAt..].decodeToString(charset)
+      }
+      if (h == null) {
+        held = more
+        heldAt = 0
+      } else {
+        held = __joined(h, heldAt, more)
+        heldAt = 0
+      }
+    }
+  }
 
   // The lines that are left.
   fun readLines() : open List<string> throws IOException {
     val lines : open List<string> = []
     while (true) {
-      val line : string? = __io.readLine(handle, charset)
+      val line : string? = channel == null ? __io.readLine(handle, charset) : channelLine()
       if (line == null) { break }
       lines.add(line)
     }
@@ -59,7 +147,7 @@ class Reader : AutoCloseable {
   // Calls `action` with each line that is left, without its line end, as it is read.
   fun forEachLine(action : (string) -> unit) throws IOException {
     while (true) {
-      val line : string? = __io.readLine(handle, charset)
+      val line : string? = channel == null ? __io.readLine(handle, charset) : channelLine()
       if (line == null) { break }
       action(line)
     }
@@ -89,50 +177,64 @@ class Reader : AutoCloseable {
 
   // Closes it; closing it again does nothing. A read after that is an IOException.
   override fun close() {
-    __io.close(handle)
+    val ch = channel
+    if (ch == null) { __io.close(handle) } else { ch.closeChannel() }
   }
 
   // Whether it has not been closed yet.
   val isOpen : bool
-    get() => __io.isOpen(handle)
+    get() => channel == null ? __io.isOpen(handle) : channel!!.isChannelOpen
 }
 
-// Something to write to, bytes or text: a file, what a program reads, a socket. A write
-// returns when the system has taken all of it, so flush() has nothing left to do.
+// Something to write to, bytes or text: a file, what a program reads, a socket, a ByteChannel.
+// A write returns when the system (or the channel) has taken all of it, so flush() has nothing
+// left to do.
 class Writer : AutoCloseable {
   private val handle : any
+  private val channel : ByteChannel?
   // What text is written in; a change takes effect from the next write.
   var charset : Charset         // what text is read or written in; it may change as the writing goes on
 
+  // Over a handle of the system's (a file's, a socket's), or a ByteChannel.
   fun init(handle : any, charset : Charset = Charset.utf8) {
     this.handle = handle
+    this.channel = handle is ByteChannel ? handle as ByteChannel : null
     this.charset = charset
+  }
+
+  private fun put(data : any?) throws IOException {
+    val ch = channel
+    if (ch == null) {
+      __io.write(handle, data, charset)
+    } else {
+      ch.send(data is Bytes ? data as Bytes : "$data".toBytes(charset))
+    }
   }
 
   // Text, or bytes. Anything else is written as print would show it.
   fun write(data : any?) throws IOException {
-    __io.write(handle, data, charset)
+    put(data)
   }
 
   // Writes `value` as print would show it (null as "null"), with no line end.
   fun print(value : any?) throws IOException {
-    __io.write(handle, "$value", charset)
+    put("$value")
   }
 
   // Writes `value` as print would show it, then "\n"; with no `value`, only the "\n".
   fun println(value : any? = "") throws IOException {
-    __io.write(handle, "$value\n", charset)
+    put("$value\n")
   }
 
   // Writes a line end, "\n".
   fun newLine() throws IOException {
-    __io.write(handle, "\n", charset)
+    put("\n")
   }
 
   // Writes `value` as print would show it and gives the writer, for more:
   //   out.append("total: ").append(sum)
   fun append(value : any?) : Writer throws IOException {
-    __io.write(handle, "$value", charset)
+    put("$value")
     return this
   }
 
@@ -143,12 +245,21 @@ class Writer : AutoCloseable {
   // Closes it; closing it again does nothing. A write after that is an IOException. Closing a
   // program's input is how it reads the end.
   override fun close() {
-    __io.close(handle)
+    val ch = channel
+    if (ch == null) { __io.close(handle) } else { ch.closeChannel() }
   }
 
   // Whether it has not been closed yet.
   val isOpen : bool
-    get() => __io.isOpen(handle)
+    get() => channel == null ? __io.isOpen(handle) : channel!!.isChannelOpen
+}
+
+// `b` after the bytes of `a` from `from` on, as one Bytes.
+fun __joined(a : Bytes, from : int, b : Bytes) : Bytes {
+  val out = Bytes(a.size - from + b.size)
+  out.copyFrom(a, from, 1, 0, 1, a.size - from)
+  out.copyFrom(b, 0, 1, a.size - from, 1, b.size)
+  return out
 }
 
 // ---- Processes (D91) ----

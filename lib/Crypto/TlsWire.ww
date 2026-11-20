@@ -1,0 +1,333 @@
+// ---- TLS on the wire: its numbers, and messages read and written (networking plan, part 5) ----
+
+// The numbers TLS gives its record types, handshake messages, extensions, groups, signature
+// schemes, cipher suites and alerts (RFC 8446, RFC 5246 and those they name).
+object __Tls {
+  // Record content types.
+  const changeCipherSpec = 20
+  const alert = 21
+  const handshake = 22
+  const applicationData = 23
+
+  // Handshake message types.
+  const clientHello = 1
+  const serverHello = 2
+  const newSessionTicket = 4
+  const endOfEarlyData = 5
+  const encryptedExtensions = 8
+  const certificate = 11
+  const serverKeyExchange = 12
+  const certificateRequest = 13
+  const serverHelloDone = 14
+  const certificateVerify = 15
+  const clientKeyExchange = 16
+  const finished = 20
+  const keyUpdate = 24
+  const messageHash = 254
+
+  // Extensions.
+  const serverName = 0
+  const supportedGroups = 10
+  const ecPointFormats = 11
+  const signatureAlgorithms = 13
+  const alpn = 16
+  const extendedMasterSecret = 23
+  const sessionTicket = 35
+  const preSharedKey = 41
+  const earlyData = 42
+  const supportedVersions = 43
+  const cookie = 44
+  const pskKeyExchangeModes = 45
+  const certificateAuthorities = 47
+  const postHandshakeAuth = 49
+  const signatureAlgorithmsCert = 50
+  const keyShare = 51
+  const renegotiationInfo = 0xFF01
+
+  // Versions.
+  const tls12 = 0x0303
+  const tls13 = 0x0304
+
+  // Groups.
+  const secp256r1 = 23
+  const secp384r1 = 24
+  const x25519 = 29
+
+  // Signature schemes.
+  const rsaPkcs1Sha256 = 0x0401
+  const rsaPkcs1Sha384 = 0x0501
+  const rsaPkcs1Sha512 = 0x0601
+  const ecdsaSecp256r1Sha256 = 0x0403
+  const ecdsaSecp384r1Sha384 = 0x0503
+  const ecdsaSecp521r1Sha512 = 0x0603
+  const rsaPssRsaeSha256 = 0x0804
+  const rsaPssRsaeSha384 = 0x0805
+  const rsaPssRsaeSha512 = 0x0806
+  const ed25519 = 0x0807
+
+  // Cipher suites.
+  const aes128GcmSha256 = 0x1301
+  const aes256GcmSha384 = 0x1302
+  const chacha20Poly1305Sha256 = 0x1303
+  const ecdheEcdsaAes128GcmSha256 = 0xC02B
+  const ecdheEcdsaAes256GcmSha384 = 0xC02C
+  const ecdheRsaAes128GcmSha256 = 0xC02F
+  const ecdheRsaAes256GcmSha384 = 0xC030
+  const ecdheRsaChacha20Poly1305 = 0xCCA8
+  const ecdheEcdsaChacha20Poly1305 = 0xCCA9
+  const emptyRenegotiationInfo = 0x00FF
+  const fallbackScsv = 0x5600
+
+  // Alerts.
+  const closeNotify = 0
+  const unexpectedMessage = 10
+  const badRecordMac = 20
+  const recordOverflow = 22
+  const handshakeFailure = 40
+  const badCertificate = 42
+  const unsupportedCertificate = 43
+  const certificateRevoked = 44
+  const certificateExpired = 45
+  const certificateUnknown = 46
+  const illegalParameter = 47
+  const unknownCa = 48
+  const accessDenied = 49
+  const decodeError = 50
+  const decryptError = 51
+  const protocolVersion = 70
+  const insufficientSecurity = 71
+  const internalError = 80
+  const inappropriateFallback = 86
+  const userCanceled = 90
+  const noRenegotiation = 100
+  const missingExtension = 109
+  const unsupportedExtension = 110
+  const unrecognizedName = 112
+  const unknownPskIdentity = 115
+  const certificateRequired = 116
+  const noApplicationProtocol = 120
+
+  // The largest plaintext a record holds, and the most a sealed one may add (RFC 8446 5.2).
+  const maxPlaintext = 16384
+  const maxSealedExtra = 256
+}
+
+// An alert's name, as RFC 8446 writes it.
+fun __alertName(code : int) : string => when (code) {
+  __Tls.closeNotify -> "close_notify"
+  __Tls.unexpectedMessage -> "unexpected_message"
+  __Tls.badRecordMac -> "bad_record_mac"
+  __Tls.recordOverflow -> "record_overflow"
+  __Tls.handshakeFailure -> "handshake_failure"
+  __Tls.badCertificate -> "bad_certificate"
+  __Tls.unsupportedCertificate -> "unsupported_certificate"
+  __Tls.certificateRevoked -> "certificate_revoked"
+  __Tls.certificateExpired -> "certificate_expired"
+  __Tls.certificateUnknown -> "certificate_unknown"
+  __Tls.illegalParameter -> "illegal_parameter"
+  __Tls.unknownCa -> "unknown_ca"
+  __Tls.accessDenied -> "access_denied"
+  __Tls.decodeError -> "decode_error"
+  __Tls.decryptError -> "decrypt_error"
+  __Tls.protocolVersion -> "protocol_version"
+  __Tls.insufficientSecurity -> "insufficient_security"
+  __Tls.internalError -> "internal_error"
+  __Tls.inappropriateFallback -> "inappropriate_fallback"
+  __Tls.userCanceled -> "user_canceled"
+  __Tls.noRenegotiation -> "no_renegotiation"
+  __Tls.missingExtension -> "missing_extension"
+  __Tls.unsupportedExtension -> "unsupported_extension"
+  __Tls.unrecognizedName -> "unrecognized_name"
+  __Tls.unknownPskIdentity -> "unknown_psk_identity"
+  __Tls.certificateRequired -> "certificate_required"
+  __Tls.noApplicationProtocol -> "no_application_protocol"
+  else -> "alert $code"
+}
+
+// A cipher suite's name, as the IANA registry writes it.
+fun __suiteName(suite : int) : string => when (suite) {
+  __Tls.aes128GcmSha256 -> "TLS_AES_128_GCM_SHA256"
+  __Tls.aes256GcmSha384 -> "TLS_AES_256_GCM_SHA384"
+  __Tls.chacha20Poly1305Sha256 -> "TLS_CHACHA20_POLY1305_SHA256"
+  __Tls.ecdheEcdsaAes128GcmSha256 -> "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+  __Tls.ecdheEcdsaAes256GcmSha384 -> "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+  __Tls.ecdheRsaAes128GcmSha256 -> "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+  __Tls.ecdheRsaAes256GcmSha384 -> "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+  __Tls.ecdheRsaChacha20Poly1305 -> "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+  __Tls.ecdheEcdsaChacha20Poly1305 -> "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"
+  else -> "0x${suite.toString(16)}"
+}
+
+// A group's name.
+fun __groupName(group : int) : string => when (group) {
+  __Tls.x25519 -> "x25519"
+  __Tls.secp256r1 -> "secp256r1"
+  __Tls.secp384r1 -> "secp384r1"
+  else -> "group $group"
+}
+
+// Something wrong with what the peer sent, or with this side's state: the alert to send it, and
+// why. Caught by the connection, which sends the alert and throws a TlsException.
+class __TlsFault(val alert : int, message : string) : RuntimeException(message)
+
+fun __fault(alert : int, message : string) : nothing => throw __TlsFault(alert, message)
+
+// Writes TLS's structures: numbers of 1, 2 or 3 bytes, bytes, and vectors with their length in
+// front.
+class __TlsWriter {
+  private var data = Bytes(256)
+  var size = 0
+
+  private fun room(n : int) {
+    if (size + n <= data.size) { return }
+    var grown = data.size * 2
+    while (grown < size + n) { grown *= 2 }
+    val bigger = Bytes(grown)
+    bigger.copyFrom(data, 0, 1, 0, 1, size)
+    data = bigger
+  }
+
+  fun u8(v : int) : __TlsWriter {
+    room(1)
+    data[size] = v.toByteWrapped()
+    size += 1
+    return this
+  }
+  fun u16(v : int) : __TlsWriter {
+    room(2)
+    data[size] = (v >> 8).toByteWrapped()
+    data[size + 1] = v.toByteWrapped()
+    size += 2
+    return this
+  }
+  fun u24(v : int) : __TlsWriter {
+    room(3)
+    data[size] = (v >> 16).toByteWrapped()
+    data[size + 1] = (v >> 8).toByteWrapped()
+    data[size + 2] = v.toByteWrapped()
+    size += 3
+    return this
+  }
+  fun u32(v : int) : __TlsWriter {
+    room(4)
+    data[size] = (v >> 24).toByteWrapped()
+    data[size + 1] = (v >> 16).toByteWrapped()
+    data[size + 2] = (v >> 8).toByteWrapped()
+    data[size + 3] = v.toByteWrapped()
+    size += 4
+    return this
+  }
+  fun bytes(b : Bytes, offset : int = 0, count : int = b.size - offset) : __TlsWriter {
+    room(count)
+    data.copyFrom(b, offset, 1, size, 1, count)
+    size += count
+    return this
+  }
+  // A vector: its length in `lengthSize` bytes (1, 2 or 3), then what `fill` writes.
+  fun vector(lengthSize : int, fill : (__TlsWriter) -> unit) : __TlsWriter {
+    room(lengthSize)
+    val at = size
+    size += lengthSize
+    fill(this)
+    val n = size - at - lengthSize
+    for (i in 0..<lengthSize) { data[at + i] = (n >> (8 * (lengthSize - 1 - i))).toByteWrapped() }
+    return this
+  }
+  // An extension: its type, then what `fill` writes, with its length.
+  fun extension(type : int, fill : (__TlsWriter) -> unit) : __TlsWriter {
+    u16(type)
+    return vector(2, fill)
+  }
+  fun toBytes() : Bytes => data[0..<size]
+}
+
+// A handshake message: its type, then its body with its length.
+fun __handshakeMessage(type : int, fill : (__TlsWriter) -> unit) : Bytes {
+  val w = __TlsWriter()
+  w.u8(type)
+  w.vector(3, fill)
+  return w.toBytes()
+}
+
+// Reads TLS's structures from part of some bytes; anything cut short or left over is a
+// decode_error.
+class __TlsReader(val data : Bytes, var at : int = 0, val end : int = data.size) {
+  val isEmpty : bool
+    get() => at >= end
+  val left : int
+    get() => end - at
+
+  private fun need(n : int) {
+    if (n > end - at) { __fault(__Tls.decodeError, "a message cut short") }
+  }
+  fun u8() : int {
+    need(1)
+    val v = data[at].toInt()
+    at += 1
+    return v
+  }
+  fun u16() : int {
+    need(2)
+    val v = (data[at].toInt() << 8) | data[at + 1].toInt()
+    at += 2
+    return v
+  }
+  fun u24() : int {
+    need(3)
+    val v = (data[at].toInt() << 16) | (data[at + 1].toInt() << 8) | data[at + 2].toInt()
+    at += 3
+    return v
+  }
+  fun u32() : int {
+    need(4)
+    val v = (data[at].toInt() << 24) | (data[at + 1].toInt() << 16) | (data[at + 2].toInt() << 8) | data[at + 3].toInt()
+    at += 4
+    return v
+  }
+  fun bytes(n : int) : Bytes {
+    need(n)
+    val b = data[at..<at + n]
+    at += n
+    return b
+  }
+  // A vector whose length is in `lengthSize` bytes, as a reader over it; at least `min` bytes.
+  fun vector(lengthSize : int, min : int = 0) : __TlsReader {
+    val n = lengthSize == 1 ? u8() : lengthSize == 2 ? u16() : u24()
+    if (n < min) { __fault(__Tls.decodeError, "a vector shorter than it may be") }
+    need(n)
+    val r = __TlsReader(data, at, at + n)
+    at += n
+    return r
+  }
+  // A vector's bytes.
+  fun opaque(lengthSize : int, min : int = 0) : Bytes {
+    val r = vector(lengthSize, min)
+    return r.bytes(r.left)
+  }
+  fun done() {
+    if (at != end) { __fault(__Tls.decodeError, "${end - at} bytes left over in a message") }
+  }
+}
+
+// A message's extensions, read: each type once, in order.
+class __TlsExtensions(r : __TlsReader) {
+  val types : open List<int> = []
+  val bodies : open List<Bytes> = []
+
+  init {
+    while (!r.isEmpty) {
+      val type = r.u16()
+      val body = r.opaque(2)
+      if (types.contains(type)) { __fault(__Tls.illegalParameter, "the extension $type twice") }
+      types.add(type)
+      bodies.add(body)
+    }
+  }
+
+  fun has(type : int) : bool => types.contains(type)
+  // The extension's body as a reader, or null.
+  fun get(type : int) : __TlsReader? {
+    val i = types.indexOf(type)
+    return i < 0 ? null : __TlsReader(bodies[i])
+  }
+}

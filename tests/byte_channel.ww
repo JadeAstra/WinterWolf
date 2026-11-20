@@ -1,0 +1,70 @@
+// A Reader and a Writer over a ByteChannel of WinterWolf's own (networking plan, part 5: what a
+// TlsSocket's reader and writer stand on): lines split across reads, "\r\n" and "\n", UTF-16 both
+// ways round, read(count), readBytes, readText, readLines, and close and isOpen reaching the
+// channel.
+
+// A channel that gives what it holds a few bytes at a time, and keeps what is sent.
+class Trickle(private val data : Bytes, private val step : int) : ByteChannel {
+  private var at = 0
+  var open = true
+  val sent : open List<Bytes> = []
+
+  override fun receive(count : int) : Bytes? {
+    if (at >= data.size) { return null }
+    val n = Math.min(Math.min(step, count), data.size - at)
+    val part = data[at..<at + n]
+    at += n
+    return part
+  }
+  override fun send(data : Bytes) {
+    sent.add(data)
+  }
+  override fun closeChannel() {
+    open = false
+  }
+  override val isChannelOpen : bool
+    get() => open
+}
+
+for (step in [1, 2, 3, 7, 100]) {
+  val r = Reader(Trickle("first\r\nsecond\nthird\r\n\nlast".toBytes(), step))
+  print(step, r.readLine(), r.readLine(), r.readLines(), r.readLine())
+}
+// expect: 1 first second ["third", "", "last"] null
+// expect: 2 first second ["third", "", "last"] null
+// expect: 3 first second ["third", "", "last"] null
+// expect: 7 first second ["third", "", "last"] null
+// expect: 100 first second ["third", "", "last"] null
+
+for (cs in [Charset.utf16le, Charset.utf16be, Charset.latin1]) {
+  val r = Reader(Trickle("añb\r\nc€d\n".toBytes(cs == Charset.latin1 ? Charset.windows1252 : cs), 3), cs == Charset.latin1 ? Charset.windows1252 : cs)
+  print(r.readLine(), r.readLine(), r.readLine())
+}
+// expect: añb c€d null
+// expect: añb c€d null
+// expect: añb c€d null
+
+val mixed = Reader(Trickle("head\nrest of it".toBytes(), 4))
+print(mixed.readLine(), mixed.read(3)!!.decodeToString(), mixed.readText())
+// expect: head res t of it
+val all = Reader(Trickle(Bytes(1000).fill(7.toByte()), 64))
+print(all.readBytes().size, all.read())
+// expect: 1000 null
+var count = 0
+Reader(Trickle("a\nb\nc".toBytes(), 1)).forEachLine { count++ }
+print(count)
+// expect: 3
+
+val channel = Trickle(Bytes(0), 1)
+val w = Writer(channel)
+w.write("text ")
+w.print(42)
+w.println()
+w.println("line")
+w.append("x").append(1.5)
+w.write(Bytes([1, 2, 3]))
+print(channel.sent.map { it.decodeToString() }.dropLast(1), channel.sent.last().toList(), w.isOpen)
+w.close()
+print(w.isOpen, channel.open)
+// expect: ["text ", "42", "\n", "line\n", "x", "1.5"] [1, 2, 3] true
+// expect: false false

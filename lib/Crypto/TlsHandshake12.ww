@@ -1,0 +1,347 @@
+// ---- TLS 1.2: ECDHE with AEAD ciphers only (networking plan, part 5) ----
+//
+// RFC 5246 with ECDHE (RFC 8422) and AES-GCM (RFC 5288) or ChaCha20-Poly1305 (RFC 7905), the
+// extended master secret required (RFC 7627, against the triple handshake), and no renegotiation
+// (RFC 5746's empty renegotiation_info sent, a HelloRequest answered no_renegotiation). No
+// sessions resumed: a TLS 1.2 handshake is whole each time.
+
+// The suites of TLS 1.2 offered or taken, most wanted first.
+fun __suites12() : List<int> {
+  val aes = CryptoEngine.instructions.contains("aes")
+  val gcm = [__Tls.ecdheEcdsaAes128GcmSha256, __Tls.ecdheRsaAes128GcmSha256, __Tls.ecdheEcdsaAes256GcmSha384, __Tls.ecdheRsaAes256GcmSha384]
+  val chacha = [__Tls.ecdheEcdsaChacha20Poly1305, __Tls.ecdheRsaChacha20Poly1305]
+  return aes ? gcm + chacha : chacha + gcm
+}
+
+fun __suiteIsRsa(suite : int) : bool =>
+  suite == __Tls.ecdheRsaAes128GcmSha256 or suite == __Tls.ecdheRsaAes256GcmSha384 or suite == __Tls.ecdheRsaChacha20Poly1305
+
+// TLS 1.2's PRF (RFC 5246 5): P_hash with the suite's hash.
+fun __prf12(keys : __TlsKeys, secret : Bytes, label : string, seed : Bytes, size : int) : Bytes {
+  val labelSeed = __TlsWriter().bytes(label.toBytes()).bytes(seed).toBytes()
+  val out = Bytes(size)
+  var a = labelSeed
+  var done = 0
+  while (done < size) {
+    a = Hmac.mac(keys.newHash(), secret, a)
+    val block = Hmac(keys.newHash(), secret).update(a).update(labelSeed).digest()
+    val n = Math.min(block.size, size - done)
+    out.copyFrom(block, 0, 1, done, 1, n)
+    done += n
+  }
+  return out
+}
+
+// The two directions' protection from the master secret.
+fun __ciphers12(keys : __TlsKeys, master : Bytes, clientRandom : Bytes, serverRandom : Bytes) : List<__TlsCipher> {
+  val chacha = keys.suite == __Tls.ecdheEcdsaChacha20Poly1305 or keys.suite == __Tls.ecdheRsaChacha20Poly1305
+  val keySize = chacha or keys.sha384 ? 32 : 16
+  val ivSize = chacha ? 12 : 4
+  val block = __prf12(keys, master, "key expansion", __TlsWriter().bytes(serverRandom).bytes(clientRandom).toBytes(), 2 * keySize + 2 * ivSize)
+  fun make(key : Bytes, iv : Bytes) : __TlsCipher =>
+    chacha ? __TlsCipher(ChaCha20Poly1305(key), iv) : __TlsCipher(AesGcm(key), iv, true)
+  val client = make(block[0..<keySize], block[2 * keySize..<2 * keySize + ivSize])
+  val server = make(block[keySize..<2 * keySize], block[2 * keySize + ivSize..<2 * keySize + 2 * ivSize])
+  return [client, server]
+}
+
+// TLS 1.2 keeps every handshake message (a CertificateVerify signs them whole) and hashes them.
+class __Messages12 {
+  val all = __TlsWriter()
+  fun add(raw : Bytes) { all.bytes(raw) }
+  fun hash(keys : __TlsKeys) : Bytes => keys.digest(all.toBytes())
+}
+
+// What a ServerKeyExchange signs: both randoms and the ECDH parameters.
+fun __serverParams(group : int, publicBytes : Bytes) : Bytes =>
+  __TlsWriter().u8(3).u16(group).vector(1) { it.bytes(publicBytes) }.toBytes()
+
+// Whether the certificate's key fits the suite's kind (RSA, or ECDSA and Ed25519).
+fun __keyFitsSuite(key : PublicKey, suite : int) : bool =>
+  __suiteIsRsa(suite) ? key is RsaPublicKey : (key is EcPublicKey or key is Ed25519PublicKey)
+
+// ---- The client ----
+
+fun __client12(c : __TlsConnection, o : TlsClientOptions, host : string, sni : string?, clientRandom : Bytes, serverRandom : Bytes,
+               sessionId : Bytes, suite : int, ext : __TlsExtensions, clientHello : Bytes, serverHello : __TlsMessage) throws IOException {
+  val keys = __TlsKeys(suite)
+  c.version = __Tls.tls12
+  c.suite = suite
+  c.records.tls13 = false
+  val messages = __Messages12()
+  messages.add(clientHello)
+  messages.add(serverHello.raw)
+  for (t in ext.types) {
+    val asked = t == __Tls.renegotiationInfo or t == __Tls.extendedMasterSecret or t == __Tls.ecPointFormats or
+                (t == __Tls.serverName and sni != null) or (t == __Tls.alpn and o.alpn.isNotEmpty())
+    if (!asked) { __fault(__Tls.unsupportedExtension, "extension $t in ServerHello, which was not asked for") }
+  }
+  if (!ext.has(__Tls.extendedMasterSecret)) { __fault(__Tls.handshakeFailure, "the server has no extended master secret (RFC 7627), which TLS 1.2 here requires") }
+  val reneg = ext.get(__Tls.renegotiationInfo)
+  if (reneg != null and reneg!!.opaque(1).size != 0) { __fault(__Tls.handshakeFailure, "a renegotiation_info that is not empty") }
+  val alpn = ext.get(__Tls.alpn)
+  if (alpn != null) {
+    val list = alpn!!.vector(2)
+    val p = list.opaque(1, 1).decodeToString()
+    list.done()
+    if (!o.alpn.contains(p)) { __fault(__Tls.illegalParameter, "the server chose application protocol '$p', which was not offered") }
+    c.alpn = p
+  }
+
+  // Certificate.
+  var m = c.nextHandshake()
+  if (m.type != __Tls.certificate) { __fault(__Tls.unexpectedMessage, "message ${m.type} where Certificate belongs") }
+  val cr = __TlsReader(m.body)
+  val chain = __readChain(cr, false)
+  cr.done()
+  if (chain.isEmpty()) { __fault(__Tls.decodeError, "the server sent no certificate") }
+  try {
+    val trust = o.trust ?: TrustStore.system()
+    trust.verify(chain, host, o.at ?: Instant.now(), ExtendedKeyUsage.serverAuth)
+  } catch (e : CertificateException) {
+    __fault(__certificateAlert(e), "the server's certificate is not trusted: ${e.message}")
+  } catch (e : IOException) {
+    __fault(__Tls.internalError, "the system's trusted roots cannot be read: ${e.message}")
+  }
+  c.peerCertificates = chain
+  val serverKey = __peerKey(chain[0], "server")
+  if (!__keyFitsSuite(serverKey, suite)) { __fault(__Tls.illegalParameter, "a certificate whose key does not fit ${__suiteName(suite)}") }
+  messages.add(m.raw)
+
+  // ServerKeyExchange: the server's share, signed.
+  m = c.nextHandshake()
+  if (m.type != __Tls.serverKeyExchange) { __fault(__Tls.unexpectedMessage, "message ${m.type} where ServerKeyExchange belongs") }
+  val kr = __TlsReader(m.body)
+  if (kr.u8() != 3) { __fault(__Tls.illegalParameter, "ECDH parameters not of a named curve") }
+  val group = kr.u16()
+  val peer = kr.opaque(1, 1)
+  val scheme = kr.u16()
+  val signature = kr.opaque(2, 1)
+  kr.done()
+  if (!c.groups.contains(group)) { __fault(__Tls.illegalParameter, "the server chose group $group, which was not offered") }
+  if (!__schemesOffered.contains(scheme)) { __fault(__Tls.illegalParameter, "signature scheme ${scheme.toString(16)}, which was not offered") }
+  val signed = __TlsWriter().bytes(clientRandom).bytes(serverRandom).bytes(__serverParams(group, peer)).toBytes()
+  if (!__verifyScheme12(scheme, serverKey, signed, signature)) { __fault(__Tls.decryptError, "the server's ServerKeyExchange signature is not good") }
+  messages.add(m.raw)
+  c.group = group
+
+  // CertificateRequest, maybe; ServerHelloDone.
+  m = c.nextHandshake()
+  var requested : List<int>? = null
+  if (m.type == __Tls.certificateRequest) {
+    val rr = __TlsReader(m.body)
+    rr.opaque(1, 1)
+    requested = __readSchemes(rr)
+    rr.vector(2)
+    rr.done()
+    messages.add(m.raw)
+    m = c.nextHandshake()
+  }
+  if (m.type != __Tls.serverHelloDone or m.body.size != 0) { __fault(__Tls.unexpectedMessage, "message ${m.type} where ServerHelloDone belongs") }
+  messages.add(m.raw)
+
+  // This side's flight.
+  val share = __KeyShare(group)
+  val preMaster = share.agree(peer)
+  val flight = __TlsWriter()
+  var signWith : int? = null
+  if (requested != null) {
+    val id = o.identity
+    signWith = id == null ? null : __schemeFor(id!!.key, requested!!, false)
+    val cm = __handshakeMessage(__Tls.certificate) { w -> __writeChain(w, signWith == null ? [] : id!!.certificates, false) }
+    messages.add(cm)
+    flight.bytes(cm)
+  }
+  val cke = __handshakeMessage(__Tls.clientKeyExchange) { w -> w.vector(1) { it.bytes(share.publicBytes) } }
+  messages.add(cke)
+  flight.bytes(cke)
+  val master = __prf12(keys, preMaster, "extended master secret", messages.hash(keys), 48)
+  if (signWith != null) {
+    val sig = __signScheme(signWith!!, o.identity!!.key, messages.all.toBytes())
+    val cvm = __handshakeMessage(__Tls.certificateVerify) { w -> w.u16(signWith!!).vector(2) { it.bytes(sig) } }
+    messages.add(cvm)
+    flight.bytes(cvm)
+  }
+  val ciphers = __ciphers12(keys, master, clientRandom, serverRandom)
+  val finished = __handshakeMessage(__Tls.finished) { it.bytes(__prf12(keys, master, "client finished", messages.hash(keys), 12)) }
+  messages.add(finished)
+  c.flight {
+    c.sendHandshake(flight.toBytes())
+    c.sendChangeCipherSpec()
+    c.setWriteCipher(ciphers[0])
+    c.sendHandshake(finished)
+  }
+
+  // The server's ChangeCipherSpec and Finished.
+  val ccs = c.nextHandshake(true)
+  if (ccs.type != -1) { __fault(__Tls.unexpectedMessage, "message ${ccs.type} where ChangeCipherSpec belongs") }
+  c.setReadCipher(ciphers[1])
+  val fin = c.nextHandshake()
+  if (fin.type != __Tls.finished) { __fault(__Tls.unexpectedMessage, "message ${fin.type} where Finished belongs") }
+  if (!Secrets.equal(fin.body, __prf12(keys, master, "server finished", messages.hash(keys), 12))) { __fault(__Tls.decryptError, "the server's Finished is not right") }
+  c.handshakeDone = true
+}
+
+// TLS 1.2's signatures: as TLS 1.3's, but ECDSA with any curve and hash, and PKCS#1 v1.5 taken.
+fun __verifyScheme12(scheme : int, key : PublicKey, content : Bytes, signature : Bytes) : bool {
+  if (scheme == __Tls.ecdsaSecp256r1Sha256 or scheme == __Tls.ecdsaSecp384r1Sha384 or scheme == __Tls.ecdsaSecp521r1Sha512) {
+    try {
+      return key is EcPublicKey and (key as EcPublicKey).verify(content, signature, __schemeHash(scheme))
+    } catch (e : IllegalArgumentException) {
+      return false
+    }
+  }
+  return __verifyScheme(scheme, key, content, signature)
+}
+
+// ---- The server ----
+
+fun __server12(c : __TlsConnection, o : TlsServerOptions, hello : __ClientHello) throws IOException {
+  // A client that fell back from a higher version, where this server has it (RFC 7507).
+  if (hello.suites.contains(__Tls.fallbackScsv) and o.maximumVersion == TlsVersion.tls13) {
+    __fault(__Tls.inappropriateFallback, "the client fell back to TLS 1.2, and TLS 1.3 is here")
+  }
+  if (!hello.ext.has(__Tls.extendedMasterSecret)) { __fault(__Tls.handshakeFailure, "the client has no extended master secret (RFC 7627), which TLS 1.2 here requires") }
+  if (!hello.ext.has(__Tls.renegotiationInfo) and !hello.suites.contains(__Tls.emptyRenegotiationInfo)) {
+    __fault(__Tls.handshakeFailure, "the client has no secure renegotiation (RFC 5746)")
+  }
+  val reneg = hello.ext.get(__Tls.renegotiationInfo)
+  if (reneg != null and reneg!!.opaque(1).size != 0) { __fault(__Tls.handshakeFailure, "a renegotiation_info that is not empty") }
+  if (hello.compressions.toList().none { it.toInt() == 0 }) { __fault(__Tls.illegalParameter, "no null compression offered") }
+  val schemes = hello.schemes()
+  if (schemes.isEmpty()) { __fault(__Tls.handshakeFailure, "no signature_algorithms (TLS 1.2's default is SHA-1, which is not taken here)") }
+  val groups = hello.groups()
+  c.groups = __kept(__groupsOffered, o.groups) { __groupName(it) }
+  val group = c.groups.firstOrNull { groups.contains(it) }
+  if (group == null) { __fault(__Tls.handshakeFailure, "the client offers no group taken here (x25519, secp256r1, secp384r1)") }
+  c.serverName = hello.serverName()
+
+  // A suite and an identity that fit each other and the client.
+  var suite : int? = null
+  var identity : TlsIdentity? = null
+  var scheme : int? = null
+  for (s in __kept(__suites12(), o.cipherSuites) { __suiteName(it) }) {
+    if (!hello.suites.contains(s) or suite != null) { continue }
+    val name = c.serverName
+    val fitting = o.identities.filter { __keyFitsSuite(__publicOf(it.key), s) and __schemeFor(it.key, schemes, false) != null }
+    val id = (name == null ? null : fitting.firstOrNull { it.certificates[0].matchesHost(name!!) }) ?: fitting.firstOrNull()
+    if (id != null) {
+      suite = s
+      identity = id
+      scheme = __schemeFor(id!!.key, schemes, false)
+    }
+  }
+  if (suite == null) { __fault(__Tls.handshakeFailure, "the client offers no TLS 1.2 suite (ECDHE with AES-GCM or ChaCha20-Poly1305) that fits a certificate here") }
+  val keys = __TlsKeys(suite!!)
+  c.version = __Tls.tls12
+  c.suite = suite!!
+  c.group = group!!
+  c.records.tls13 = false
+  val offered = hello.protocols()
+  if (offered.isNotEmpty() and o.alpn.isNotEmpty()) {
+    val p = o.alpn.firstOrNull { offered.contains(it) }
+    if (p == null) { __fault(__Tls.noApplicationProtocol, "the client offers no application protocol taken here (${offered.join(", ")})") }
+    c.alpn = p
+  }
+
+  val messages = __Messages12()
+  messages.add(hello.message.raw)
+  // The random's last 8 bytes say "TLS 1.3 was here" (RFC 8446 4.1.3), so a client that has it
+  // knows TLS 1.2 was not its choice where something between took 1.3 away.
+  val serverRandom = SecureRandom.bytes(32)
+  if (o.maximumVersion == TlsVersion.tls13) { serverRandom.copyFrom("444F574E47524401".hexToBytes(), 0, 1, 24, 1, 8) }
+  val flight = __TlsWriter()
+  val sh = __handshakeMessage(__Tls.serverHello) { w ->
+    w.u16(__Tls.tls12).bytes(serverRandom)
+    w.u8(0)
+    w.u16(suite!!).u8(0)
+    w.vector(2) { e ->
+      e.extension(__Tls.renegotiationInfo) { it.u8(0) }
+      e.extension(__Tls.extendedMasterSecret) { }
+      e.extension(__Tls.ecPointFormats) { x -> x.vector(1) { it.u8(0) } }
+      if (c.alpn != null) { e.extension(__Tls.alpn) { x -> x.vector(2) { l -> l.vector(1) { it.bytes(c.alpn!!.toBytes()) } } } }
+      if (c.serverName != null) { e.extension(__Tls.serverName) { } }
+    }
+  }
+  messages.add(sh)
+  flight.bytes(sh)
+  val cm = __handshakeMessage(__Tls.certificate) { w -> __writeChain(w, identity!!.certificates, false) }
+  messages.add(cm)
+  flight.bytes(cm)
+  val share = __KeyShare(group!!)
+  val params = __serverParams(group!!, share.publicBytes)
+  val sig = __signScheme(scheme!!, identity!!.key, __TlsWriter().bytes(hello.random).bytes(serverRandom).bytes(params).toBytes())
+  val ske = __handshakeMessage(__Tls.serverKeyExchange) { w -> w.bytes(params).u16(scheme!!).vector(2) { it.bytes(sig) } }
+  messages.add(ske)
+  flight.bytes(ske)
+  val askClient = o.clientAuthentication != TlsClientAuthentication.none
+  if (askClient) {
+    val crm = __handshakeMessage(__Tls.certificateRequest) { w ->
+      w.vector(1) { it.u8(1).u8(64) }   // rsa_sign, ecdsa_sign
+      w.vector(2) { l -> for (s in __schemesOffered) { l.u16(s) } }
+      w.u16(0)
+    }
+    messages.add(crm)
+    flight.bytes(crm)
+  }
+  val done = __handshakeMessage(__Tls.serverHelloDone) { }
+  messages.add(done)
+  flight.bytes(done)
+  c.sendHandshake(flight.toBytes())
+
+  // The client's flight.
+  var m = c.nextHandshake()
+  var clientChain : List<Certificate> = []
+  if (askClient) {
+    if (m.type != __Tls.certificate) { __fault(__Tls.unexpectedMessage, "message ${m.type} where the client's Certificate belongs") }
+    val r = __TlsReader(m.body)
+    clientChain = __readChain(r, false)
+    r.done()
+    messages.add(m.raw)
+    if (clientChain.isEmpty()) {
+      if (o.clientAuthentication == TlsClientAuthentication.required) { __fault(__Tls.handshakeFailure, "the client sent no certificate") }
+    } else {
+      try {
+        o.clientTrust!!.verify(clientChain, null, Instant.now(), ExtendedKeyUsage.clientAuth)
+      } catch (e : CertificateException) {
+        __fault(__certificateAlert(e), "the client's certificate is not trusted: ${e.message}")
+      }
+    }
+    m = c.nextHandshake()
+  }
+  if (m.type != __Tls.clientKeyExchange) { __fault(__Tls.unexpectedMessage, "message ${m.type} where ClientKeyExchange belongs") }
+  val kr = __TlsReader(m.body)
+  val peer = kr.opaque(1, 1)
+  kr.done()
+  val preMaster = share.agree(peer)
+  messages.add(m.raw)
+  val master = __prf12(keys, preMaster, "extended master secret", messages.hash(keys), 48)
+  if (clientChain.isNotEmpty()) {
+    val cv = c.nextHandshake()
+    if (cv.type != __Tls.certificateVerify) { __fault(__Tls.unexpectedMessage, "message ${cv.type} where the client's CertificateVerify belongs") }
+    val vr = __TlsReader(cv.body)
+    val s = vr.u16()
+    val signature = vr.opaque(2, 1)
+    vr.done()
+    if (!__schemesOffered.contains(s)) { __fault(__Tls.illegalParameter, "signature scheme ${s.toString(16)}, which was not asked for") }
+    if (!__verifyScheme12(s, __peerKey(clientChain[0], "client"), messages.all.toBytes(), signature)) {
+      __fault(__Tls.decryptError, "the client's CertificateVerify signature is not good")
+    }
+    messages.add(cv.raw)
+    c.peerCertificates = clientChain
+  }
+  val ciphers = __ciphers12(keys, master, hello.random, serverRandom)
+  val ccs = c.nextHandshake(true)
+  if (ccs.type != -1) { __fault(__Tls.unexpectedMessage, "message ${ccs.type} where ChangeCipherSpec belongs") }
+  c.setReadCipher(ciphers[0])
+  val fin = c.nextHandshake()
+  if (fin.type != __Tls.finished) { __fault(__Tls.unexpectedMessage, "message ${fin.type} where the client's Finished belongs") }
+  if (!Secrets.equal(fin.body, __prf12(keys, master, "client finished", messages.hash(keys), 12))) { __fault(__Tls.decryptError, "the client's Finished is not right") }
+  messages.add(fin.raw)
+  c.flight {
+    c.sendChangeCipherSpec()
+    c.setWriteCipher(ciphers[1])
+    c.sendHandshake(__handshakeMessage(__Tls.finished) { it.bytes(__prf12(keys, master, "server finished", messages.hash(keys), 12)) })
+  }
+  c.handshakeDone = true
+}
