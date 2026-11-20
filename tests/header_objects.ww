@@ -60,7 +60,8 @@ try { kindsOf("five") } catch (e : ClassCastException) { print(e.message) }
 
 // Fields of the body given constants: by the fields' function, or inside a generated initializer
 // after the header's arguments; a class with an initializer of its own (its fields' function's
-// work done here, the initializer still called); a value worked out (the function as before).
+// work done here, the initializer still called); a list made for each object, which leaves the
+// whole fields' function to be called as before (`6 * 7` beside it is a constant: the compiler gives 42).
 class Defaults {
   var i = 7
   var f = 2.5
