@@ -1296,6 +1296,14 @@ struct ObjClass final : Obj {
             if (const Value* v = k->statics.find(key)) return v;
         return nullptr;
     }
+
+    // An initializer that only gives the header's fields their arguments, in order (objects plan
+    // part 4, VM::seeHeaderInit): for each parameter, the cache of its SET_OWN in the
+    // initializer, which an object made with no frame for it is given its fields through
+    // (VM::construct). Last in the class, past what native code reads at fixed places (layout.h).
+    bool headerOnly = false;
+    std::vector<uint16_t> headerCaches;
+    std::vector<uint32_t> headerFields;  // and each one's field, in `declared`, for its type
 };
 
 // A type as the program has it when it runs (M6.6 part 1): what a list or a map was made to

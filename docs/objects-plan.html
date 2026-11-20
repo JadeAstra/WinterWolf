@@ -201,6 +201,18 @@ td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: t
 <li>The collector's sweep walks the blocks rather than the list of every object.</li>
 </ol>
 <p>Gate: an object of no fields at 10 ns or less, of two fields at 12 ns or less, and the suite's GC-stress setting as it is.</p>
+<h4 id="op-p4-step2">Step 2 built 2026-11-20 (0.9.5049): an object made with no frame for its initializer</h4>
+<p>Measured first: the first step was there already (each thread takes and gives back memory in blocks of its size, <code>objectMemory::take</code> and <code>give</code>, with no lock and no call to the system), so an object of no fields costs 21 ns, and one of two header fields 41: its initializer a call of its own. A class's initializer that only gives the header's fields their arguments, exactly as the compiler makes it (<code>GET_LOCAL 0</code>, <code>GET_LOCAL k</code>, <code>SET_OWN</code>, <code>POP</code> for each, then <code>RETURN_INIT</code>; no field of the body given a value first, none required), is seen so as the class is finished (<code>VM::seeHeaderInit</code>), and its objects are given their fields by <code>VM::construct</code> through the caches of those <code>SET_OWN</code>s, as their quick way writes them, with no frame: every argument checked first (the object's layout, a payload's kind, the field's declared type as <code>checkFieldAssignment</code> checks it), then all written; where one does not fit, the initializer is called as before. A dead object of a class is given back by the sweep with no call of a destructor through its table. The VM alone, best of three, each kind in a process of its own:</p>
+<div class="table"><table>
+<thead><tr><th>Object</th><th class="num">0.9.5048</th><th class="num">0.9.5049</th></tr></thead>
+<tbody>
+<tr><td>of no fields</td><td class="num">20.7</td><td class="num">21.4</td></tr>
+<tr><td>of two header fields</td><td class="num">40.6</td><td class="num">31.1</td></tr>
+<tr><td>of two fields of the body, given values</td><td class="num">45.4</td><td class="num">44.9</td></tr>
+<tr><td>a data class of two</td><td class="num">40.5</td><td class="num">30.7</td></tr>
+<tr><td>of two header fields, kept in a list</td><td class="num">118.9</td><td class="num">96.6</td></tr>
+</tbody></table></div>
+<p>The gate is not reached: an object of no fields costs what it did, its memory, its header and the collector's work. <code>tests/header_objects.ww</code>: every kind of header field, a class's and a nullable one, a private one, a data class, a generic class, a subclass sharing its parent's initializer with another layout; the same answers as before.</p>
 
 <h2 id="op-p5">Part 5: native code across calls, after the emitter</h2>
 <p>With parts 1 to 4, a loop of toww's kind does in the VM what it must, each step cheaply. Native code that keeps going across a call (the callee's own native code entered from the caller's, its frame made by native code) is the native-calls plan, whose spike failed its gate with Clang stencils; the emitter makes the calling convention ww's own. It is planned there, after the emitter's parts 1 and 2, and measured on toww.</p>

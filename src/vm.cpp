@@ -4512,6 +4512,13 @@ bool VM::construct(ObjClass* cls, int argc, bool packed, const Value* captures, 
         nameEntry(instance, cls->nextEntry, cls->nextOrdinal);
         cls->nextEntry = nullptr;
     }
+    // An initializer that only gives the header's fields their arguments: given here, with no
+    // frame for it, where each fits (objects plan part 4).
+    if (cls->headerOnly && !packed && fieldsFromHeader(instance, argc)) {
+        instance->constructing = false;
+        sp_ -= argc;
+        return false;
+    }
     // Declared fields get their initial values before the initializer runs.
     for (size_t i = 0; i < cls->fieldInits.size(); i++) callWithReceiver(Value::object(instance), cls->fieldInits[i]);
     if (cls->init != nullptr) {
@@ -4521,6 +4528,97 @@ bool VM::construct(ObjClass* cls, int argc, bool packed, const Value* captures, 
     instance->constructing = false;
     if (argc != 0) throw runtimeError(Thrown::IllegalArgumentException, cls->name->utf8() + "() takes no arguments but got " + std::to_string(argc));
     return false;
+}
+
+// A class whose initializer is the one the compiler makes for a header of fields and nothing
+// else (objects plan part 4, 2026-11-20): GET_LOCAL 0, GET_LOCAL k, SET_OWN, POP for each
+// parameter in order, then GET_LOCAL 0, RETURN_INIT; no field of the body given a value first,
+// none required. Its objects are given their fields by construct, through the caches of those
+// SET_OWNs, with no frame for the initializer. Any other code in it (a default, an init block,
+// a check) and it is called as before.
+void VM::seeHeaderInit(ObjClass* cls) {
+    cls->headerOnly = false;
+    cls->headerCaches.clear();
+    if (cls->isValue || cls->isInterface || cls->isAbstract || cls->init == nullptr || !cls->fieldInits.empty() || cls->anyRequired) return;
+    const FunctionProto* const p = cls->init->proto;
+    if (p->caches == nullptr || p->quickArity != p->arity || p->quickFewest != p->arity) return;
+    const std::vector<uint8_t>& c = p->code;
+    auto opAtCode = [&](size_t i) { return i < c.size() ? static_cast<Op>(c[i]) : Op::Pop; };
+    auto u16At = [&](size_t i) { return i + 1 < c.size() ? static_cast<int>(c[i] | (c[i + 1] << 8)) : -1; };
+    std::vector<uint16_t> caches;
+    std::vector<uint32_t> fields;
+    size_t at = 0;
+    for (int k = 1;; k++) {
+        if (opAtCode(at) != Op::GetLocal || u16At(at + 1) != 0) return;
+        at += 3;
+        if (opAtCode(at) == Op::ReturnInit && at + 1 == c.size()) break;
+        if (opAtCode(at) != Op::GetLocal || u16At(at + 1) != k) return;
+        at += 3;
+        if (opAtCode(at) != Op::SetOwn) return;
+        const int name = u16At(at + 1);
+        const int cache = u16At(at + 3);
+        if (cache < 0 || static_cast<uint32_t>(cache) >= p->cacheCount || name < 0 || static_cast<size_t>(name) >= p->constants.size() ||
+            !p->constants[static_cast<size_t>(name)].isObjType(ObjType::String))
+            return;
+        const Value* const declared = cls->declaredIndex.find(asString(p->constants[static_cast<size_t>(name)]));
+        if (declared == nullptr) return;
+        at += 5;
+        if (opAtCode(at) != Op::Pop) return;
+        at += 1;
+        caches.push_back(static_cast<uint16_t>(cache));
+        fields.push_back(static_cast<uint32_t>(declared->as.i));
+    }
+    if (static_cast<int>(caches.size()) != p->arity) return;
+    cls->headerCaches = std::move(caches);
+    cls->headerFields = std::move(fields);
+    cls->headerOnly = true;}
+
+bool VM::fieldsFromHeader(ObjInstance* instance, int argc) {
+    const ObjClass* const cls = instance->cls;
+    if (static_cast<size_t>(argc) != cls->headerCaches.size() || instance->core != coreId_) return false;
+    const std::atomic<uint64_t>* const caches = cls->init->proto->caches.get();
+    const Value* const args = sp_ - argc;
+    // Every argument first: one that does not fit as its SET_OWN's cache says (no cache yet, an
+    // object of another layout, a value of another kind, a type quickly told and not this one,
+    // a Ref or a value kept in the value itself) and the initializer gives them all instead.
+    for (int k = 0; k < argc; k++) {
+        const uint64_t seen = caches[cls->headerCaches[static_cast<size_t>(k)]].load(std::memory_order_relaxed);
+        const Value& value = args[k];
+        if (seen == 0 || static_cast<uint32_t>(seen >> 32) != instance->shape || value.kind == ValueKind::Ref ||
+            value.kind == ValueKind::Small || value.kind == ValueKind::Undefined)
+            return false;
+        if ((seen & 0x80) != 0) {
+            if (value.kind != static_cast<ValueKind>(seen & 3)) return false;  // a payload of its kind
+        } else {
+            if ((seen & 2) != 0) return false;  // a value kept inside the object: its own way
+            // Its declared type, as SET_OWN's rare way checks it (checkFieldAssignment): a class's
+            // found by the initializer the first time, before which the initializer does it.
+            const FieldDecl& d = cls->declared[cls->headerFields[static_cast<size_t>(k)]];
+            const uint8_t type = d.type;
+            if (type != 0 && !(value.isNull() && (type & kTypeNullable) != 0)) {
+                if ((type & kTypeMask) == kTypeInstance && d.typeClass == nullptr) return false;
+                if (!matchesType(value, type, d.typeClass)) return false;
+            }
+        }
+    }
+    // Then each written as SET_OWN's quick way writes it: a new object's vals have no value yet.
+    uint8_t* const data = instance->payloadData();
+    for (int k = 0; k < argc; k++) {
+        const uint64_t seen = caches[cls->headerCaches[static_cast<size_t>(k)]].load(std::memory_order_relaxed);
+        const Value& value = args[k];
+        uint8_t* const field = reinterpret_cast<uint8_t*>(instance) + ((seen >> 16) & 0xFFFF);
+        if ((seen & 0x80) != 0) {
+            const int64_t bits = value.kind == ValueKind::Bool ? (value.as.b ? 1 : 0) : value.as.i;
+            std::memcpy(field, &bits, 8);
+            if ((seen & 0x20) != 0) {
+                const uint32_t bit = (seen >> 8) & 0xFF;
+                data[bit / 8] |= static_cast<uint8_t>(1u << (bit % 8));
+            }
+        } else {
+            std::memcpy(field, &value, sizeof(Value));
+        }
+    }
+    return true;
 }
 
 ObjUpvalue* VM::capturedOf(Value receiver, int k) {
@@ -8925,7 +9023,10 @@ void VM::sweep() {
                     sharedAs.erase(shared);
                 }
             }
-            delete obj;
+            // An object of a class has nothing to let go of but its memory (objects plan part 4):
+            // given back at once, with no call of a destructor through its table.
+            if (obj->type == ObjType::Instance) ObjInstance::operator delete(obj);
+            else delete obj;
         }
     }
 }

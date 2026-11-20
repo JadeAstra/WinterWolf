@@ -1,0 +1,59 @@
+// Objects of a class whose initializer only gives its header's fields their arguments, made with
+// no frame for it (objects plan part 4, 2026-11-20): every kind of field, given as the
+// initializer gives it, many times over (the first through the initializer, which fills the
+// caches the rest are made by); and where an argument does not fit, the initializer's own error.
+
+class Kinds(val i : int, val f : float, val b : bool, val s : string, val c : char)
+class Node(val value : int, val next : Node?)
+class Plain(val anything : any?, var count : int)
+data Point(val x : int, val y : int)
+class Box<T>(val item : T)
+class Hidden(private val secret : int) {
+  fun reveal() : int => secret * 2
+}
+// A subclass using its parent's initializer, its objects laid out as their own.
+class Base(val a : int, val b : int)
+class Wide(a : int, b : int) : Base(a, b) {
+  var extra = 7
+}
+
+var sum = 0
+var text = ""
+var last : Node? = null
+for round in 0..<300 {
+  val k = Kinds(round, round * 0.5, round % 2 == 0, "s$round", 'a')
+  sum += k.i + (k.b ? 1 : 0) + k.s.size + k.c.code
+  last = Node(round, last)
+  val p = Plain(round % 3 == 0 ? null : round, round)
+  p.count += 1
+  sum += p.count + (p.anything == null ? 0 : 1)
+  val pt = Point(round, -round)
+  sum += pt.x + pt.y + (pt == Point(round, -round) ? 1 : 0)
+  sum += Box<string>("b").item.size + Box(round).item
+  sum += Hidden(round).reveal()
+  val w = Wide(round, 1)
+  sum += w.a + w.b + w.extra + Base(round, 2).b
+  val bx = Box("x")
+  text = "${k.f} ${pt} ${bx.item}"
+}
+var length = 0
+var node = last
+while node != null {
+  length += 1
+  node = node.next
+}
+print(sum, length, text)
+// expect: 303540 300 149.5 Point(x=299, y=-299) x
+
+// A val given once by the object made so, as by its initializer.
+val fixed = Point(1, 2)
+try { (fixed as any as Base).a } catch (e : ClassCastException) { print("not a Base") }
+// expect: not a Base
+
+// An argument of the wrong type, through `any`: the initializer's own error, as before.
+fun nodeOf(x : any?) : Node => Node(1, x as Node?)
+try { nodeOf("not a node") } catch (e : ClassCastException) { print(e.message) }
+// expect: cannot cast a value of type string to Node?
+fun kindsOf(x : any) : Kinds => Kinds(x as int, 1.0, true, "", 'z')
+try { kindsOf("five") } catch (e : ClassCastException) { print(e.message) }
+// expect: cannot cast a value of type string to int

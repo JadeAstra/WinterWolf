@@ -2593,6 +2593,7 @@ CASE(FinishClass) {
                            " requires");
     }
     cls->required.clear();
+    seeHeaderInit(cls);  // objects made with no frame for their initializer (objects plan part 4)
     DONE();
 }
 }

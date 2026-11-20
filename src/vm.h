@@ -358,6 +358,12 @@ public:
     // initializer; with `captures`, an anonymous object that keeps them (Op::NewObject).
     // Returns whether a frame was pushed.
     bool construct(ObjClass* cls, int argc, bool packed, const Value* captures = nullptr, uint16_t captureCount = 0);
+    // Whether a finished class's initializer only gives its header's fields their arguments
+    // (ObjClass::headerOnly, objects plan part 4).
+    void seeHeaderInit(ObjClass* cls);
+    // An object of such a class given its `argc` arguments' fields as its initializer's SET_OWNs
+    // would, where every one fits as their caches say; false, nothing written, where one does not.
+    bool fieldsFromHeader(ObjInstance* instance, int argc);
     // An anonymous object made with the `count` captured cells on the stack's top (NewObject).
     bool constructObject(ObjClass* cls, int count);
     // A field the class declares in place of a property an interface gives with accessors.
