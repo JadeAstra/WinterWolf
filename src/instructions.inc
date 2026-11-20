@@ -101,7 +101,7 @@ CASE(GetImplicit) {
     {
     ObjString* name = asString(consts[READ_U16()]);
     size_t index = static_cast<size_t>(READ_U16());
-    Value receiver = implicitReceiver(frame, base, name);
+    Value receiver = implicitReceiver(frame, base, name, ip);
     if (receiver.kind == ValueKind::Undefined) {
         Value value = globals_[index];
         if (value.isLazy()) {
@@ -141,7 +141,7 @@ CASE(TryImplicit) {
     {
     ObjString* name = asString(consts[READ_U16()]);
     int target = READ_I32();
-    Value receiver = implicitReceiver(frame, base, name);
+    Value receiver = implicitReceiver(frame, base, name, ip);
     if (receiver.kind == ValueKind::Undefined) DONE();
     ip = code + target;
     if (!receiver.isObjType(ObjType::Instance)) {
@@ -175,7 +175,7 @@ CASE(InvokeImplicit) {
     int argc = READ_U8();
     GC_SAFE_POINT();
     SAVE_IP();
-    Value receiver = implicitReceiver(frame, base, name);
+    Value receiver = implicitReceiver(frame, base, name, ip);
     if (receiver.kind == ValueKind::Undefined) {
         Value callee = globals_[index];
         if (callee.isLazy()) callee = globalOrLazy(index);
@@ -193,7 +193,7 @@ CASE(SetImplicit) {
     {
     ObjString* name = asString(consts[READ_U16()]);
     size_t index = static_cast<size_t>(READ_U16());
-    Value receiver = implicitReceiver(frame, base, name);
+    Value receiver = implicitReceiver(frame, base, name, ip);
     if (receiver.kind == ValueKind::Undefined) {
         if (coreId_ != 0) throw notOwned("the variable '" + program_->globalNames[index] + "' is shared");
         Value& slot = globals_[index];

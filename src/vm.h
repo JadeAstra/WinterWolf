@@ -1690,7 +1690,9 @@ private:
     void checkArity(const std::string& name, int minArgs, int maxArgs, int argc);
 
     Value callWithReceiver(Value receiver, ObjClosure* method);
-    Value implicitReceiver(const CallFrame* frame, const Value* base, const ObjString* name) const;
+    // `ip`, just past the instruction's operands: code copied in from another class keeps that
+    // class's rights there (FunctionProto::rights), as a property's own instruction judges it.
+    Value implicitReceiver(const CallFrame* frame, const Value* base, const ObjString* name, const uint8_t* ip) const;
     // What ImplicitFirst gave the next lookup of a bare name (D58, D59), for the running
     // context: saved with it when threads take turns (saveContext).
     mutable Value implicitFirst_[8];

@@ -268,6 +268,8 @@ private:
     std::unordered_map<std::string, std::string> directoryOf_;
     std::unordered_map<std::string, std::set<std::string>> filesByDirectory_;
     std::vector<std::pair<std::string, uint64_t>> compiledFrom(const std::vector<std::string>& files) const;
+    // Whether `to` is among the files compiling `from` depends on, as compiledFrom finds them.
+    bool dependsOn(const std::string& from, const std::string& to) const;
     // Units compiled this time, kept once the whole program is; only within compileFile.
     struct ToKeep {
         std::string unit;

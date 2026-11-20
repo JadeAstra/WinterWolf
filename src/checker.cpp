@@ -9327,7 +9327,87 @@ struct Checker::Impl {
     // put in place, whose end does not check it (noteSmallCall).
     std::unordered_map<const ReturnStmt*, Type> returnedTypes;
 
+    // Whether compiling one file depends on another, as the compiler's session says (objects plan
+    // part 2.1); none given, and a body of another file is never taken for an interface's.
+    std::function<bool(const std::string& from, const std::string& to)> dependsOn;
+    std::unordered_map<std::string, bool> dependsKnown;  // each pair asked, "from\nto"
+    bool fileDependsOn(const std::string& from, const std::string& to) {
+        if (!dependsOn) return false;
+        const std::string key = from + "\n" + to;
+        if (auto known = dependsKnown.find(key); known != dependsKnown.end()) return known->second;
+        const bool depends = dependsOn(from, to);
+        dependsKnown[key] = depends;
+        return depends;
+    }
+
+    // The one body a call of method `f` reaches (objects plan part 2.1, 2026-11-20): `f` of an
+    // interface or an abstract class, or of a class with a supertype, whose objects may be of a
+    // class below it. Every class of the program that an object can be of and that has `f` (one
+    // of `f`'s class or below it, not an interface or abstract) is looked at: where each runs one
+    // and the same body, of a class of its own (not a value type, not an abstract class), that
+    // body; else none. A class the checker does not see (a script's, a program loaded later)
+    // only fails the check the body is put in place behind, its own method called as before.
+    std::unordered_map<const FuncInfo*, FuncInfo*> onlyBodies;
+    FuncInfo* onlyBodyOf(FuncInfo* f) {
+        if (auto known = onlyBodies.find(f); known != onlyBodies.end()) return known->second;
+        FuncInfo* const found = findOnlyBody(f);
+        onlyBodies[f] = found;
+        return found;
+    }
+    FuncInfo* findOnlyBody(FuncInfo* f) {
+        ClassInfo* const top = f->owner;
+        if (top == nullptr || f->isStatic || top->unknownSuper || top->isValue) return nullptr;
+        auto own = top->methods.find(f->name);
+        if (own == top->methods.end() || own->second.size() != 1) return nullptr;  // one form alone
+        // `top` and every class below it, each once (countBelow: an extend fitting a class to an
+        // interface, D33, is not among them; such a class's objects fail the check, and call).
+        countBelow();
+        std::vector<ClassInfo*> reach{top};
+        std::unordered_set<const ClassInfo*> seen{top};
+        for (size_t i = 0; i < reach.size(); i++)
+            if (auto under = below.find(reach[i]); under != below.end())
+                for (ClassInfo* k : under->second)
+                    if (seen.insert(k).second) reach.push_back(k);
+        FuncInfo* found = nullptr;
+        for (ClassInfo* const k : reach) {
+            if (k->isInterface || k->isAbstract || k->decl == nullptr) continue;
+            if (k->isEnum || k->isEnumClass || k->unknownSuper) return nullptr;
+            // The method an object of k runs: the first of its class and those above it.
+            FuncInfo* runs = nullptr;
+            for (ClassInfo* c = k; c != nullptr; c = c->superclass) {
+                resolveSupers(c);
+                if (c->getters.count(f->name) != 0 || c->fields.count(f->name) != 0) return nullptr;
+                auto m = c->methods.find(f->name);
+                if (m == c->methods.end()) continue;
+                if (m->second.size() != 1) return nullptr;
+                runs = m->second[0];
+                // A private method of that name is its class's own member, not this one (o-private-shadow).
+                if (runs != f && runs->decl != nullptr && runs->decl->access == kAccessWordPrivate) return nullptr;
+                break;
+            }
+            // None in its classes: an interface's own body, or an extend's (D186), which stay calls.
+            if (runs == nullptr || runs->decl == nullptr || runs->decl->isAbstract) return nullptr;
+            if (found != nullptr && found != runs) return nullptr;
+            found = runs;
+        }
+        if (found == nullptr || found->owner == nullptr || found->owner->isAbstract || found->owner->isValue || found->owner->isInterface)
+            return nullptr;
+        return found;
+    }
+
     void noteSmallCall(FuncInfo* f, const Binding& b, const Args& args, const Node& at) {
+        // A method an object of a class below its own may have another of (objects plan part
+        // 2.1): the one body every such class runs, put in place behind the check of its class.
+        // From another file only where this file's kept unit is compiled again as that file
+        // changes (the call names an interface, not the class whose body it copies).
+        // (Not a private method: no class below has it, a member of that name there another, o-private-shadow.)
+        if (f->owner != nullptr && !f->isStatic && f->decl != nullptr && !f->owner->isValue && f->decl->access != kAccessWordPrivate &&
+            (f->owner->isInterface || f->owner->isAbstract || f->decl->isAbstract || (f->owner->decl != nullptr && f->owner->decl->hasSuper))) {
+            FuncInfo* const only = onlyBodyOf(f);
+            if (only == nullptr || unit == nullptr || only->unit == nullptr) return;
+            if (only->unit != unit && !fileDependsOn(unit->fileKey, only->unit->fileKey)) return;
+            f = only;
+        }
         if (f->decl == nullptr || f->decl->isInline || unit == nullptr || unit->shell || f->unit == nullptr || !smallBody(*f->decl)) return;
         const FunctionDecl& d = *f->decl;
         if ((f->owner != nullptr && !methodMayBeCopied(f)) || f->isExtension || f->isExternal || d.isAbstract || d.isSuspend || d.isTail ||
@@ -9420,11 +9500,12 @@ struct Checker::Impl {
     // class, which must be a global the check can name.
     static bool methodMayBeCopied(const FuncInfo* f) {
         const ClassInfo* owner = f->owner;
-        // A class of no superclass: every bare name in its method is a member of its own, read
-        // as one, never looked up as the program runs (where access is judged by the code).
+        // A class with a supertype too (objects plan part 2.1, 2026-11-20): a bare name of a
+        // member it inherits is looked up on the object as the program runs, and the body put in
+        // place keeps its class's rights (CompilerSession's noteRights), as its own method has
+        // them; one that uses `super` stays a call (copyableBody).
         if (owner == nullptr || owner->decl == nullptr || owner->isInterface || owner->isObject || owner->isEnum || owner->isEnumClass ||
-            !owner->typeParams.empty() || owner->unknownSuper || !owner->nested.empty() || owner->name.find('.') != std::string::npos ||
-            owner->decl->hasSuper)
+            !owner->typeParams.empty() || owner->unknownSuper || !owner->nested.empty() || owner->name.find('.') != std::string::npos)
             return false;
         const FunctionDecl& d = *f->decl;
         // No static method: its body's names are the class's statics, which a body put in place
@@ -9500,6 +9581,7 @@ struct Checker::Impl {
                     for (const ExprPtr& arg : call.args) inExpr(*arg);
                     return;
                 }
+                case ExprKind::Super: ok = false; return;  // the superclass the method's own frame names
                 default: return;
             }
         };
@@ -12516,6 +12598,10 @@ bool Checker::inlineCall(const Node& call, InlineCall& out) const {
     out.pure = found->second.pure;
     out.guarded = found->second.guarded;
     return true;
+}
+
+void Checker::setDependsOn(std::function<bool(const std::string& from, const std::string& to)> dependsOn) {
+    impl_->dependsOn = std::move(dependsOn);
 }
 
 bool Checker::copiedIn(const FunctionDecl& fn, int param) const {

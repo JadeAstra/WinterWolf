@@ -1306,6 +1306,10 @@ private:
         if (info.fn->isAbstract) return false;
         for (const FunctionState* state = fs_; state != nullptr; state = state->enclosing)
             if (state->decl == info.fn) return false;  // a call of the method inside itself, as compileInlined leaves
+        // And as it leaves a small body inside a copy of itself, or past four copied in each other
+        // (decided here, before the check is written: objects plan part 2.1 puts more in place).
+        if (info.automatic && (smallInlined_.size() >= 4 || std::find(smallInlined_.begin(), smallInlined_.end(), info.fn) != smallInlined_.end()))
+            return false;
         const int global = ownerClassSlot(info);
         if (global < 0) return false;
         line_ = e.line;
@@ -8573,6 +8577,7 @@ CompilerSession::CompilerSession(VM& vm, Checker* given) : checker(given), vm_(v
         ownChecker_ = std::make_unique<Checker>();
         checker = ownChecker_.get();
     }
+    checker->setDependsOn([this](const std::string& from, const std::string& to) { return dependsOn(from, to); });
     auto builtins = std::make_unique<Namespace>();
     builtins->directory = "<builtin>";
     builtins->library = "<builtin>";
@@ -8717,6 +8722,24 @@ std::vector<std::pair<std::string, uint64_t>> CompilerSession::compiledFrom(cons
         all.emplace_back(file, hash == textHashes_.end() ? 0 : hash->second);
     }
     return all;
+}
+
+bool CompilerSession::dependsOn(const std::string& from, const std::string& to) const {
+    if (from == to) return true;
+    std::set<std::string> seen;
+    std::vector<std::string> todo{from};
+    while (!todo.empty()) {
+        const std::string file = todo.back();
+        todo.pop_back();
+        if (file == to) return true;
+        if (!seen.insert(file).second) continue;
+        if (auto uses = fileUses_.find(file); uses != fileUses_.end()) todo.insert(todo.end(), uses->second.begin(), uses->second.end());
+        if (auto dir = directoryOf_.find(file); dir != directoryOf_.end()) {
+            const std::set<std::string>& siblings = filesByDirectory_.at(dir->second);
+            todo.insert(todo.end(), siblings.begin(), siblings.end());
+        }
+    }
+    return false;
 }
 
 namespace {

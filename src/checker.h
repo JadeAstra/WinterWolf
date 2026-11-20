@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -334,6 +335,10 @@ public:
     };
     // A call (or `a[i]` of an inline op [], B2) put in place.
     bool inlineCall(const Node& call, InlineCall& out) const;
+    // Whether compiling file `from` depends on file `to` (CompilerSession::dependsOn): a body of
+    // another file put in place where the call does not name it (an interface's one class, objects
+    // plan part 2.1) only where a kept unit of `from` is compiled again when `to` changes.
+    void setDependsOn(std::function<bool(const std::string& from, const std::string& to)> dependsOn);
     // Whether a lambda given for this parameter of an inline function is copied in with it: the
     // body only calls it, or passes it on to an inline function that copies it in (D59).
     bool copiedIn(const FunctionDecl& fn, int param) const;

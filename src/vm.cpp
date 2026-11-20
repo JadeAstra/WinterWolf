@@ -1693,13 +1693,16 @@ ObjUpvalue* VM::receiverUpvalue(const CallFrame* frame, const Value* base, uint1
     return asInstance(base[0])->captured(k);
 }
 
-Value VM::implicitReceiver(const CallFrame* frame, const Value* base, const ObjString* name) const {
+Value VM::implicitReceiver(const CallFrame* frame, const Value* base, const ObjString* name, const uint8_t* ip) const {
     const FunctionProto* proto = frame->closure->proto;
+    // Judged as the code at `ip` may use it: a body copied in from another class's method (an
+    // inline function's, or one put in place, objects plan part 2.1) with that class's rights
+    // there, a protected member it inherits among them.
     auto has = [&](Value candidate) {
-        if (hasMember(candidate, name)) return !(name->restricted != 0 && accessDenied(candidate, name, proto, false));
+        if (hasMember(candidate, name)) return !(name->restricted != 0 && accessDeniedAt(candidate, name, proto, false, ip));
         // A private member of that text the code may use: opened by an override below (o-private-shadow).
         const ObjString* own = privateLike(classOf(candidate), name);
-        return own != nullptr && !accessDenied(candidate, own, proto, false);
+        return own != nullptr && !accessDeniedAt(candidate, own, proto, false, ip);
     };
     implicitTried_ = implicitFirstCount_;
     if (implicitFirstCount_ != 0) {
@@ -1713,7 +1716,8 @@ Value VM::implicitReceiver(const CallFrame* frame, const Value* base, const ObjS
     }
     // An object of a class, with no object around it to look in (no outer receivers): whether
     // the name is a member says its class alone, kept once found not to be (implicitMisses_).
-    if (proto->outerReceivers.empty())
+    // (Not where the function has rights of copied code: what it may use differs from place to place.)
+    if (proto->outerReceivers.empty() && proto->rights.empty())
         if (const ObjClass* const cls = classOf(base[0])) {
             guardRead(base[0]);
             const size_t at = ((reinterpret_cast<uintptr_t>(name) >> 4) ^ (reinterpret_cast<uintptr_t>(cls) >> 6) ^

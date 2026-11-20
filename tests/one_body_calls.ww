@@ -1,0 +1,145 @@
+// A call of a method that a class below may have another of, where every class of the program
+// runs one and the same body for it (objects plan part 2.1, 2026-11-20): that body put in place
+// behind a check of its class, the call made as before for an object of any other. Each case
+// gives the right result whichever way it goes.
+
+// An interface one class answers.
+interface Op {
+  fun execute(x : int) : int
+}
+class Inc : Op {
+  override fun execute(x : int) : int => x + 1
+}
+fun runOp(op : Op, n : int) : int { var s = 0; for i in 0..<n { s += op.execute(i) }; return s }
+print(runOp(Inc(), 1000))                                     // expect: 500500
+
+// An abstract class one class answers, and a subclass of that one that runs the same body: its
+// objects fail the check and call it.
+abstract class Shape {
+  abstract fun area() : int
+}
+class Square(val side : int) : Shape {
+  override fun area() : int => side * side
+}
+class Tile(side : int) : Square(side)
+fun areas(shapes : List<Shape>) : int { var s = 0; for sh in shapes { s += sh.area() }; return s }
+print(areas([Square(2), Tile(3), Square(4), Tile(5)]))        // expect: 54
+
+// A body that reads what its class inherits bare: a field, a protected one, a method (put in
+// place behind its own check), its own private method and a static of its own.
+class Base {
+  var scale = 3
+  protected val offset = 100
+  fun twice(x : int) : int => x * 2
+}
+class Child : Base {
+  static {
+    val extra = 7
+  }
+  private fun half(x : int) : int => x / 2
+  fun mixed(x : int) : int => x * scale + offset + twice(x) + half(x) + extra
+}
+fun viaChild(c : Child, x : int) : int => c.mixed(x)
+val child = Child()
+var mixedSum = 0
+for i in 0..<100 {
+  if i == 50 { child.scale = 5 }
+  mixedSum += viaChild(child, i)
+}
+print(mixedSum)                                               // expect: 45350
+
+// A body that calls the method above it through `super`: a call, as it is.
+class Louder : Base {
+  override fun twice(x : int) : int => super.twice(x) + 1
+}
+fun viaLouder(l : Louder, x : int) : int => l.twice(x)
+var louder = 0
+for i in 0..<100 { louder += viaLouder(Louder(), i) }
+print(louder)                                                 // expect: 10000
+
+// Two classes with bodies of their own: a call, each object its own class's.
+interface Named {
+  fun name() : string
+}
+class Cat : Named {
+  override fun name() : string => "cat"
+}
+class Dog : Named {
+  override fun name() : string => "dog"
+}
+fun named(n : Named) : string => n.name()
+var names = ""
+for i in 0..<6 { names += named(i % 2 == 0 ? Cat() : Dog()) }
+print(names)                                                  // expect: catdogcatdogcatdog
+
+// One class and an anonymous object: the anonymous object's own body, wherever the call goes.
+interface Gauge {
+  fun read() : int
+}
+class Fixed : Gauge {
+  override fun read() : int => 10
+}
+val loose = object : Gauge {
+  override fun read() : int => 20
+}
+fun gauge(g : Gauge) : int => g.read()
+var gauges = 0
+for i in 0..<100 { gauges += gauge(i % 2 == 0 ? Fixed() : loose) }
+print(gauges)                                                 // expect: 1500
+
+// An interface's own body, which one class takes and another replaces.
+interface Greeter {
+  fun greet() : string => "hello"
+}
+class Quiet : Greeter
+class Loud : Greeter {
+  override fun greet() : string => "HELLO"
+}
+fun greet(g : Greeter) : string => g.greet()
+print(greet(Quiet()), greet(Loud()))                          // expect: hello HELLO
+
+// A string, made to fit an interface one class answers: the string's own method.
+interface Measured {
+  fun indexOf(x : string) : int
+}
+class Bag : Measured {
+  override fun indexOf(x : string) : int => 7
+}
+extend string : Measured
+fun find(m : Measured, k : string) : int => m.indexOf(k)
+var found = 0
+for i in 0..<100 { found += find(Bag(), "b") + find("abc", "c") * 100 }
+print(found)                                                  // expect: 20700
+
+// An override no class below overrides, called on an object of its own class.
+class Animal {
+  fun sound() : string => "..."
+}
+class Bird : Animal {
+  override fun sound() : string => "tweet"
+}
+fun sound(b : Bird) : string => b.sound()
+fun anySound(a : Animal) : string => a.sound()
+print(sound(Bird()), anySound(Bird()), anySound(Animal()))    // expect: tweet tweet ...
+
+// An error in a body put in place: its line and the call's, as a call's.
+interface Splitter {
+  fun execute(x : int) : int
+}
+class Divider : Splitter {
+  override fun execute(x : int) : int => 100 / x
+}
+fun divide(op : Splitter, x : int) : int => op.execute(x)
+try {
+  print(divide(Divider(), 4))                                 // expect: 25
+  print(divide(Divider(), 0))
+} catch (e : ArithmeticException) {
+  print("caught")                                             // expect: caught
+}
+
+// An inline function's body, copied in, with the protected member its class inherits: allowed
+// there as in the function itself (before 0.9.5055 the bare name's lookup refused it).
+class Shifter : Base {
+  inline fun shifted(x : int) : int => x + offset
+}
+print(Shifter().shifted(5))                                   // expect: 105
