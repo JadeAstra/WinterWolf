@@ -3739,6 +3739,22 @@ COLD(RCall) {
                 ip += R_CALL_RETURN(18, 14);
                 NEXT();
             }
+        } else if (!cls->isValue) {
+            // An object of a class (objects plan part 4, 2026-11-20): made here, as the stack's
+            // Call makes it (construct), where the slow way went through Call and back. A frame
+            // for its initializer returns to where the call leaves its result, as QUICK_CALL's.
+            sp_ = at + argc + 1;
+            sp = sp_;
+            GC_SAFE_POINT();
+            SAVE_IP();
+            if (construct(cls, argc, false)) {
+                frame->ip = ip + R_CALL_RETURN(18, 14);
+                LOAD_FRAME();
+                DONE();
+            }
+            sp = sp_;
+            ip += R_CALL_RETURN(18, 14);
+            NEXT();
         }
     }
     ip = code + operandI32(ip + 10);

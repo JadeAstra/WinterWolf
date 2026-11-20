@@ -104,3 +104,16 @@ for round in 0..<300 {
 }
 print(total, shown)
 // expect: 187050 2.5 text m true
+
+// A bare enum entry given to a constructor (resolved by its parameter's type as the call is
+// made): never stored as the name it is until then.
+enum Shade { LIGHT, DARK }
+class Painted(val shade : Shade, val note : any?)
+var shades = ""
+for round in 0..<200 {
+  val p = Painted(round % 2 == 0 ? Shade.LIGHT : Shade.DARK, round)
+  val q = Painted(DARK, "x")
+  if round == 199 { shades = "${p.shade} ${q.shade} ${q.note}" }
+}
+print(shades)
+// expect: DARK DARK x

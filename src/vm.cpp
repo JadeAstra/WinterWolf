@@ -4518,7 +4518,7 @@ bool VM::construct(ObjClass* cls, int argc, bool packed, const Value* captures, 
         for (size_t i = 0; i < cls->fieldInits.size(); i++) callWithReceiver(Value::object(instance), cls->fieldInits[i]);
     // An initializer that only gives fields its arguments and constants: given here, with no
     // frame for it, where each fits.
-    if (cls->initPlanned && !packed && argc == cls->init->proto->arity && fieldsFromPlan(instance, cls->init->proto, cls->initPlan, sp_ - argc)) {
+    if (cls->initPlanned && !packed && pendingEnums_ == 0 && argc == cls->init->proto->arity && fieldsFromPlan(instance, cls->init->proto, cls->initPlan, sp_ - argc)) {
         instance->constructing = false;
         sp_ -= argc;
         return false;
@@ -4541,7 +4541,9 @@ bool VM::construct(ObjClass* cls, int argc, bool packed, const Value* captures, 
 // a value worked out, a check) and it is called as before. False, nothing planned, where not.
 static bool planFieldsOf(VM& vm, const ObjClass* cls, const FunctionProto* p, bool isInit, std::vector<ObjClass::PlannedField>& out) {
     out.clear();
-    if (p->caches == nullptr || p->quickArity != p->arity || p->quickFewest != p->arity || (!isInit && p->arity != 0)) return false;
+    // (Its caches may not be made yet: a function of a kept unit has them made as it first runs.
+    // Until then construct calls it, as it does where a cache has seen nothing.)
+    if (p->quickArity != p->arity || p->quickFewest != p->arity || (!isInit && p->arity != 0)) return false;
     const std::vector<uint8_t>& c = p->code;
     auto opAtCode = [&](size_t i) { return i < c.size() ? static_cast<Op>(c[i]) : Op::Pop; };
     auto u16At = [&](size_t i) { return i + 1 < c.size() ? static_cast<int>(c[i] | (c[i + 1] << 8)) : -1; };
@@ -4577,7 +4579,7 @@ static bool planFieldsOf(VM& vm, const ObjClass* cls, const FunctionProto* p, bo
         if (opAtCode(at) != Op::SetOwn) return false;
         const int name = u16At(at + 1);
         const int cache = u16At(at + 3);
-        if (cache < 0 || static_cast<uint32_t>(cache) >= p->cacheCount || name < 0 || static_cast<size_t>(name) >= p->constants.size() ||
+        if (cache < 0 || cache > 0xFFFF || name < 0 || static_cast<size_t>(name) >= p->constants.size() ||
             !p->constants[static_cast<size_t>(name)].isObjType(ObjType::String))
             return false;
         const Value* const declared = cls->declaredIndex.find(asString(p->constants[static_cast<size_t>(name)]));
@@ -4609,7 +4611,10 @@ void VM::seeHeaderInit(ObjClass* cls) {
 bool VM::fieldsFromPlan(ObjInstance* instance, const FunctionProto* fn, const std::vector<ObjClass::PlannedField>& plan, const Value* args) {
     if (instance->core != coreId_) return false;
     const std::atomic<uint64_t>* const caches = fn->caches.get();
+    if (caches == nullptr) return false;  // not run yet: it makes its caches as it first runs
     const ObjClass* const cls = instance->cls;
+    for (const ObjClass::PlannedField& planned : plan)
+        if (planned.cache >= fn->cacheCount) return false;
     // Every value first: one that does not fit as its SET_OWN's cache says (no cache yet, an
     // object of another layout, a value of another kind, a type not this one, a Ref or a value
     // kept in the value itself) and the function gives them all instead.
