@@ -2570,6 +2570,7 @@ CASE(FinishClass) {
     // Whether the class's own code may use every member its objects have:
     // then nothing has to be looked up for it (see CHECK_ACCESS).
     classFinished();
+    if (cls->callId == 0) cls->callId = ObjClass::nextCallId();  // its methods set for good (RInvoke's cache)
     cls->accessAllOwn = cls->accessSharedOwn = true;
     for (uint32_t at = 0; at < cls->accessMarks.capacity(); at++) {
         const Table::Entry& entry = cls->accessMarks.entries()[at];
@@ -3773,11 +3774,27 @@ CASE(RInvoke) {
     const Value& receiver = at[0];
     sp = at + argc + 1;
     if (receiver.isObjType(ObjType::Instance)) {
-        // A method of the object's class, open to this code, entered at once.
+        // A method of the object's class, open to this code, entered at once. The place's cache
+        // keeps the one called last (objects plan part 3, 2026-11-20): bit 63, the class's
+        // callId (bits 48-62) and the closure (the low 48 bits), in one word, so that no thread
+        // sees one class's number with another's method; the same class and it is called with
+        // no lookup. Whether the name is open to this code is the place's, and never changes.
         const ObjInstance* instance = asInstance(receiver);
-        const ObjString* name = asString(consts[FAST_U16(10)]);
-        if (((name->restricted & 1) == 0 || (ip[5] & 16) != 0) && (instance->core == 0 || instance->core == coreId_))
-            if (const Value* method = instance->cls->methods.find(name)) QUICK_CALL(asClosure(*method), argc, R_CALL_RETURN(22, 18))
+        if (instance->core == 0 || instance->core == coreId_) {
+            const uint64_t seen = caches[FAST_U16(12)].load(std::memory_order_relaxed);
+            const ObjClass* const cls = instance->cls;
+            if ((seen >> 48) == (0x8000u | cls->callId) && cls->callId != 0)
+                QUICK_CALL(reinterpret_cast<ObjClosure*>(seen & 0xFFFFFFFFFFFFull), argc, R_CALL_RETURN(22, 18))
+            const ObjString* name = asString(consts[FAST_U16(10)]);
+            if ((name->restricted & 1) == 0 || (ip[5] & 16) != 0)
+                if (const Value* method = cls->methods.find(name); method != nullptr && method->isObjType(ObjType::Closure)) {
+                    ObjClosure* const closure = asClosure(*method);
+                    const uint64_t at = reinterpret_cast<uint64_t>(closure);
+                    if (cls->callId != 0 && (at >> 48) == 0)
+                        caches[FAST_U16(12)].store(at | (static_cast<uint64_t>(0x8000u | cls->callId) << 48), std::memory_order_relaxed);
+                    QUICK_CALL(closure, argc, R_CALL_RETURN(22, 18))
+                }
+        }
     }
     GO_COLD(RInvoke);
     }
@@ -3792,7 +3809,7 @@ COLD(RInvoke) {
         // once, its result straight to slot A, where nothing is to be checked first (as quickNative).
         const Obj* obj = receiver.as.obj;
         const uint64_t seen = caches[FAST_U16(12)].load(std::memory_order_relaxed);
-        if (static_cast<int>((seen >> 48) & 63) == static_cast<int>(obj->type) + 1 && obj->core == 0 && coreId_ == 0 && pendingEnums_ == 0 &&
+        if (static_cast<int>((seen >> 48) & 0x803F) == static_cast<int>(obj->type) + 1 && obj->core == 0 && coreId_ == 0 && pendingEnums_ == 0 &&
             bytesAllocated_ <= nextGC_ && !attention_.load(std::memory_order_relaxed) && ((seen >> 54) & 1 & obj->frozen) == 0 &&
             (argc == 0 || !at[1].isObjType(ObjType::Instance))) {
             bool plain = true;

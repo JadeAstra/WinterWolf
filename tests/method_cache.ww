@@ -1,0 +1,88 @@
+// A method call's cache (objects plan part 3, 2026-11-20): the place keeps the class it called
+// last and that class's method, and calls it again with no lookup where the next object is of
+// the same class. Each place here sees several classes in turn, so that the cache is filled,
+// missed and filled again: the right method every time.
+
+interface Op {
+  fun step(x : int) : int
+}
+class Base : Op {
+  override fun step(x : int) : int => x + 1
+}
+class Twice : Base {
+  override fun step(x : int) : int => x * 2
+}
+class Same : Base           // Base's method, under a class of its own
+class Other : Op {
+  override fun step(x : int) : int => x - 3
+}
+
+fun stepAll(ops : List<Op>, rounds : int) : int {
+  var s = 0
+  for r in 0..<rounds {
+    for op in ops { s += op.step(r) }
+  }
+  return s
+}
+fun stepBase(b : Base, x : int) : int => b.step(x)
+
+val mixed : List<Op> = [Base(), Twice(), Same(), Other(), Base(), Base(), Other(), Twice()]
+print(stepAll(mixed, 1000))                                   // expect: 4993000
+// One class many times, then another: the cache changing once.
+val runs : open List<Op> = []
+for i in 0..<500 { runs.add(Twice()) }
+for i in 0..<500 { runs.add(Other()) }
+print(stepAll(runs, 3))                                       // expect: 0
+var viaBase = 0
+for i in 0..<300 { viaBase += stepBase(i % 3 == 0 ? Base() : i % 3 == 1 ? Twice() : Same(), i) }
+print(viaBase)                                                // expect: 60000
+
+// A place that sees an object and a string: the class's method from the cache, the string's
+// own (in C++) from its own.
+interface Measured {
+  fun indexOf(x : string) : int
+}
+class Bag : Measured {
+  override fun indexOf(x : string) : int => 7
+}
+extend string : Measured
+fun find(m : Measured, k : string) : int => m.indexOf(k)
+var found = 0
+for i in 0..<200 {
+  found += find(Bag(), "b")
+  found += find("abc", "b") * 100
+  found += find("abc", "z") * 10000
+}
+print(found)                                                  // expect: -1978600
+
+// A private method, its name the class's own: called from inside, and from a subclass's object
+// through the parent's method; a public one of the subclass under the same name its own.
+class Keeper {
+  private fun secret() : int => 5
+  fun open() : int => secret()
+}
+class Teller : Keeper {
+  fun secret() : int => 9
+}
+var kept = 0
+for i in 0..<200 {
+  val k : Keeper = i % 2 == 0 ? Keeper() : Teller()
+  kept += k.open()
+  if (k is Teller) { kept += (k as Teller).secret() * 100 }
+}
+print(kept)                                                   // expect: 91000
+
+// Every core at one place at once, each with objects of its own of several classes.
+val wrong = Atomic(0)
+(1..20000).parallelStream().forEach { n ->
+  val op : Op = n % 4 == 0 ? Base() : n % 4 == 1 ? Twice() : n % 4 == 2 ? Same() : Other()
+  val want = n % 4 == 0 ? n + 1 : n % 4 == 1 ? n * 2 : n % 4 == 2 ? n + 1 : n - 3
+  if (op.step(n) != want) { wrong.increment() }
+}
+print(wrong.get())                                            // expect: 0
+// And at one object made before, its class's method from every core.
+val shared : Op = Twice()
+(1..20000).parallelStream().forEach { n ->
+  if (shared.step(n) != n * 2 or (mixed[n % 8].step(n) == 0 and n != 3)) { wrong.increment() }
+}
+print(wrong.get())                                            // expect: 0

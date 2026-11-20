@@ -1313,6 +1313,16 @@ struct ObjClass final : Obj {
     std::vector<PlannedField> initPlan;
     bool fieldsPlanned = false;
     std::vector<PlannedField> fieldsPlan;
+    // The class's number in a method call's cache (objects plan part 3, the R_INVOKE cache): given
+    // when the class is finished (FinishClass), its methods set for good, from 1, never two
+    // classes of the process alike, and never given again; 0 (none yet, or past 32767) and its
+    // methods are looked up at each call.
+    uint16_t callId = 0;
+    static uint16_t nextCallId() {
+        static std::atomic<uint32_t> given{0};
+        const uint32_t n = given.fetch_add(1, std::memory_order_relaxed) + 1;
+        return n <= 32767 ? static_cast<uint16_t>(n) : 0;
+    }
 };
 
 // A type as the program has it when it runs (M6.6 part 1): what a list or a map was made to
