@@ -1,0 +1,66 @@
+[
+ {
+  "host": "www.google.com",
+  "chain": "google.pem",
+  "root": "google-root.pem",
+  "fetched": "2026-11-20T20:14:02Z",
+  "leafKey": "ECPublicKey",
+  "rootSubject": "CN=GTS Root R4,O=Google Trust Services LLC,C=US"
+ },
+ {
+  "host": "github.com",
+  "chain": "github.pem",
+  "root": "github-root.pem",
+  "fetched": "2026-11-20T20:14:03Z",
+  "leafKey": "ECPublicKey",
+  "rootSubject": "CN=Sectigo Public Server Authentication Root E46,O=Sectigo Limited,C=GB"
+ },
+ {
+  "host": "www.cloudflare.com",
+  "chain": "cloudflare.pem",
+  "root": "cloudflare-root.pem",
+  "fetched": "2026-11-20T20:14:03Z",
+  "leafKey": "ECPublicKey",
+  "rootSubject": "CN=GTS Root R4,O=Google Trust Services LLC,C=US"
+ },
+ {
+  "host": "letsencrypt.org",
+  "chain": "letsencrypt.pem",
+  "root": "letsencrypt-root.pem",
+  "fetched": "2026-11-20T20:14:03Z",
+  "leafKey": "ECPublicKey",
+  "rootSubject": "CN=ISRG Root X2,O=Internet Security Research Group,C=US"
+ },
+ {
+  "host": "www.wikipedia.org",
+  "chain": "wikipedia.pem",
+  "root": "wikipedia-root.pem",
+  "fetched": "2026-11-20T20:14:04Z",
+  "leafKey": "ECPublicKey",
+  "rootSubject": "CN=ISRG Root X2,O=Internet Security Research Group,C=US"
+ },
+ {
+  "host": "www.microsoft.com",
+  "chain": "microsoft.pem",
+  "root": "microsoft-root.pem",
+  "fetched": "2026-11-20T20:14:04Z",
+  "leafKey": "RSAPublicKey",
+  "rootSubject": "CN=DigiCert Global Root G2,OU=www.digicert.com,O=DigiCert Inc,C=US"
+ },
+ {
+  "host": "www.amazon.com",
+  "chain": "amazon.pem",
+  "root": "amazon-root.pem",
+  "fetched": "2026-11-20T20:14:04Z",
+  "leafKey": "RSAPublicKey",
+  "rootSubject": "CN=Amazon Root CA 1,O=Amazon,C=US"
+ },
+ {
+  "host": "www.mozilla.org",
+  "chain": "mozilla.pem",
+  "root": "mozilla-root.pem",
+  "fetched": "2026-11-20T20:14:04Z",
+  "leafKey": "RSAPublicKey",
+  "rootSubject": "CN=ISRG Root X1,O=Internet Security Research Group,C=US"
+ }
+]

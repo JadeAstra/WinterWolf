@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 # M3.5 is 0.3.5, M4 is 0.4.0, M5 is 0.5.0, M6 is 0.6.0, M6.5 is 0.6.5, M6.6 is 0.6.6, M6.6.2 is
 # 0.6.6.2, M6.7 is 0.6.7, M7 is 0.7.0, M8 is 0.8.0, M9.5 (native code, docs/native-plan.html) is 0.9.5.
 # Between milestones each minor build counts up after it (the user, 2026-11-17): 0.9.5001, 0.9.5002...
-project(WinterWolf VERSION 0.9.5050 LANGUAGES CXX)
+project(WinterWolf VERSION 0.9.5051 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,7 +85,7 @@ add_library(ww_core OBJECT
   src/crypto/aes_gcm.cpp
   src/crypto/chacha_poly.cpp
   src/crypto/curve25519.cpp
-  src/crypto/p256.cpp
+  src/crypto/ec.cpp
   src/crypto/rsa.cpp
   src/crypto/api.cpp
 )
@@ -250,7 +250,7 @@ foreach(part ww ww_core ww_window ww_compiler ww_proof ww_proof_plain)
 endforeach()
 if(WIN32)
   foreach(linked ww ww_proof ww_proof_plain)
-    target_link_libraries(${linked} PRIVATE opengl32 ws2_32 bcrypt shell32 ole32)
+    target_link_libraries(${linked} PRIVATE opengl32 ws2_32 bcrypt crypt32 shell32 ole32)
   endforeach()
   # __HrLoadAllImportsForDll, which the native layer calls whether or not the program
   # delay-loads OpenGL (only ww does, below).

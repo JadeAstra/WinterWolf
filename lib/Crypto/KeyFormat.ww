@@ -1,0 +1,314 @@
+// ---- Keys as files: SubjectPublicKeyInfo, PKCS#8, PEM (networking plan, part 4, 2026-11-20) ----
+//
+//   val key = PrivateKeys.fromPem(FilePath("server.key").readText())          // any kind
+//   val enc = PrivateKeys.toPem(key, password = "pass")                      // encrypted PKCS#8
+//   val pub = PublicKeys.fromPem(FilePath("server.pub").readText())
+//
+// Public keys as SubjectPublicKeyInfo (RFC 5280; "PUBLIC KEY"); private keys as PKCS#8 (RFC 5958;
+// "PRIVATE KEY"), encrypted with a password as PBES2 (RFC 8018: PBKDF2 with HMAC-SHA-256 and
+// AES-256-CBC; "ENCRYPTED PRIVATE KEY"), and read from the older forms too: PKCS#1's "RSA PRIVATE
+// KEY" and "RSA PUBLIC KEY", SEC 1's "EC PRIVATE KEY". Kinds: RSA, P-256, P-384, Ed25519, X25519.
+
+object KeyOid {
+  const rsa = "1.2.840.113549.1.1.1"
+  const rsaPss = "1.2.840.113549.1.1.10"
+  const ec = "1.2.840.10045.2.1"
+  const p256 = "1.2.840.10045.3.1.7"
+  const p384 = "1.3.132.0.34"
+  const ed25519 = "1.3.101.112"
+  const x25519 = "1.3.101.110"
+  const pbes2 = "1.2.840.113549.1.5.13"
+  const pbkdf2 = "1.2.840.113549.1.5.12"
+  const hmacSha256 = "1.2.840.113549.2.9"
+  const hmacSha384 = "1.2.840.113549.2.10"
+  const hmacSha512 = "1.2.840.113549.2.11"
+  const aes128Cbc = "2.16.840.1.101.3.4.1.2"
+  const aes192Cbc = "2.16.840.1.101.3.4.1.22"
+  const aes256Cbc = "2.16.840.1.101.3.4.1.42"
+}
+
+object PublicKeys {
+  // A public key from its SubjectPublicKeyInfo. A DerException where the bytes are not one, or
+  // of a kind not known here.
+  fun fromDer(spki : Bytes) : PublicKey throws DerException {
+    val outer = DerReader(spki).sequence()
+    val alg = outer.sequence()
+    val oid = alg.oid()
+    val bits = outer.bitString()
+    outer.done()
+    return when (oid) {
+      KeyOid.rsa, KeyOid.rsaPss -> {
+        val r = DerReader(bits).sequence()
+        val n = r.unsigned()
+        val e = r.unsigned()
+        r.done()
+        RsaPublicKey(n, e)
+      }
+      KeyOid.ec -> {
+        val curve = alg.oid()
+        try {
+          when (curve) {
+            KeyOid.p256 -> P256PublicKey(bits)
+            KeyOid.p384 -> P384PublicKey(bits)
+            else -> throw DerException("an elliptic curve not known here: $curve")
+          }
+        } catch (e : IllegalArgumentException) {
+          throw DerException("a public key that is not a point of its curve")
+        }
+      }
+      KeyOid.ed25519 -> __sized(bits, 32) { Ed25519PublicKey(it) }
+      KeyOid.x25519 -> __sized(bits, 32) { X25519PublicKey(it) }
+      else -> throw DerException("a public key of a kind not known here: $oid")
+    }
+  }
+
+  // Its SubjectPublicKeyInfo.
+  fun toDer(key : PublicKey) : Bytes {
+    val w = DerWriter()
+    w.sequence { outer ->
+      when (key) {
+        is RsaPublicKey -> {
+          outer.sequence { it.oid(KeyOid.rsa).nul() }
+          outer.bitString(DerWriter().sequence { it.integer(key.modulus).integer(key.exponent) }.toBytes())
+        }
+        is EcPublicKey -> {
+          outer.sequence { it.oid(KeyOid.ec).oid(key.curve == 384 ? KeyOid.p384 : KeyOid.p256) }
+          outer.bitString(key.bytes)
+        }
+        is Ed25519PublicKey -> {
+          outer.sequence { it.oid(KeyOid.ed25519) }
+          outer.bitString(key.bytes)
+        }
+        is X25519PublicKey -> {
+          outer.sequence { it.oid(KeyOid.x25519) }
+          outer.bitString(key.bytes)
+        }
+        else -> throw IllegalArgumentException("a public key of a kind not known here")
+      }
+    }
+    return w.toBytes()
+  }
+
+  // A public key from PEM: "PUBLIC KEY" (SubjectPublicKeyInfo) or "RSA PUBLIC KEY" (PKCS#1).
+  fun fromPem(text : string) : PublicKey throws DerException {
+    for (block in Pem.read(text)) {
+      if (block.label == "PUBLIC KEY") { return fromDer(block.der) }
+      if (block.label == "RSA PUBLIC KEY") {
+        val r = DerReader(block.der).sequence()
+        val n = r.unsigned()
+        val e = r.unsigned()
+        r.done()
+        return RsaPublicKey(n, e)
+      }
+    }
+    throw DerException("no PUBLIC KEY block in the text")
+  }
+  fun toPem(key : PublicKey) : string => Pem.write("PUBLIC KEY", toDer(key))
+}
+
+object PrivateKeys {
+  // A private key from PKCS#8: PrivateKeyInfo, or EncryptedPrivateKeyInfo with its password. A
+  // DerException where the bytes are not one; an IllegalArgumentException for a wrong password.
+  fun fromDer(der : Bytes, password : string? = null) : PrivateKey throws DerException {
+    val outer = DerReader(der).sequence()
+    if (outer.peekTag() == DerTag.sequence) {
+      // EncryptedPrivateKeyInfo: { algorithm, encryptedData }.
+      val alg = outer.raw()
+      if (outer.peekTag() != DerTag.octetString) { throw DerException("not a private key (a public key's SubjectPublicKeyInfo?)") }
+      val data = outer.octetString()
+      outer.done()
+      if (password == null) { throw IllegalArgumentException("the private key is encrypted: give its password") }
+      return fromDer(__pbes2Decrypt(alg, data, password!!))
+    }
+    val version = outer.integer()
+    if (version != 0 and version != 1) { throw DerException("a PKCS#8 version $version") }
+    val alg = outer.sequence()
+    val oid = alg.oid()
+    val inner = outer.octetString()
+    return when (oid) {
+      KeyOid.rsa, KeyOid.rsaPss -> __rsaPrivate(inner)
+      KeyOid.ec -> __ecPrivate(inner, alg.isEmpty ? null : alg.oid())
+      KeyOid.ed25519 -> Ed25519PrivateKey(__curveSeed(inner))
+      KeyOid.x25519 -> X25519PrivateKey(__curveSeed(inner))
+      else -> throw DerException("a private key of a kind not known here: $oid")
+    }
+  }
+
+  // Its PKCS#8; encrypted where a password is given (PBES2: PBKDF2-HMAC-SHA256 of `iterations`
+  // rounds, AES-256-CBC).
+  fun toDer(key : PrivateKey, password : string? = null, iterations : int = 600000) : Bytes {
+    val plain = DerWriter().sequence { w ->
+      w.integer(0)
+      when (key) {
+        is RsaPrivateKey -> {
+          w.sequence { it.oid(KeyOid.rsa).nul() }
+          w.octetString(DerWriter().sequence { r ->
+            r.integer(0)
+            for (name in ["n", "e", "d", "p", "q", "dp", "dq", "qinv"]) {
+              val part = key.part(name)
+              if (part == null) { throw IllegalArgumentException("PKCS#8 needs an RSA key's p, q, dp, dq and qinv too") }
+              r.integer(part!!)
+            }
+          }.toBytes())
+        }
+        is EcPrivateKey -> {
+          w.sequence { it.oid(KeyOid.ec).oid(key.curve == 384 ? KeyOid.p384 : KeyOid.p256) }
+          w.octetString(DerWriter().sequence { e ->
+            e.integer(1)
+            e.octetString(key.bytes)
+            e.explicit(1) { it.bitString(key.publicKey.bytes) }
+          }.toBytes())
+        }
+        is Ed25519PrivateKey -> {
+          w.sequence { it.oid(KeyOid.ed25519) }
+          w.octetString(DerWriter().octetString(key.bytes).toBytes())
+        }
+        is X25519PrivateKey -> {
+          w.sequence { it.oid(KeyOid.x25519) }
+          w.octetString(DerWriter().octetString(key.bytes).toBytes())
+        }
+        else -> throw IllegalArgumentException("a private key of a kind not known here")
+      }
+    }.toBytes()
+    if (password == null) { return plain }
+    return __pbes2Encrypt(plain, password!!, iterations)
+  }
+
+  // A private key from PEM: "PRIVATE KEY", "ENCRYPTED PRIVATE KEY" (with its password), "RSA
+  // PRIVATE KEY" (PKCS#1) or "EC PRIVATE KEY" (SEC 1), the first such block in the text.
+  fun fromPem(text : string, password : string? = null) : PrivateKey throws DerException {
+    for (block in Pem.read(text)) {
+      when (block.label) {
+        "PRIVATE KEY", "ENCRYPTED PRIVATE KEY" -> return fromDer(block.der, password)
+        "RSA PRIVATE KEY" -> return __rsaPrivate(block.der)
+        "EC PRIVATE KEY" -> return __ecPrivate(block.der, null)
+        else -> { }
+      }
+    }
+    throw DerException("no PRIVATE KEY block in the text")
+  }
+  fun toPem(key : PrivateKey, password : string? = null, iterations : int = 600000) : string =>
+    Pem.write(password == null ? "PRIVATE KEY" : "ENCRYPTED PRIVATE KEY", toDer(key, password, iterations))
+}
+
+// ---- Helpers ----
+
+fun __sized(bits : Bytes, size : int, make : (Bytes) -> PublicKey) : PublicKey throws DerException {
+  if (bits.size != size) { throw DerException("a key of ${bits.size} bytes where $size belong") }
+  return make(bits)
+}
+
+// PKCS#1's RSAPrivateKey: { version 0, n, e, d, p, q, dp, dq, qinv }.
+fun __rsaPrivate(der : Bytes) : RsaPrivateKey throws DerException {
+  val r = DerReader(der).sequence()
+  if (r.integer() != 0) { throw DerException("an RSA private key of more than two primes") }
+  val parts : open List<Bytes> = []
+  for (i in 0..<8) { parts.add(r.unsigned()) }
+  r.done()
+  return RsaPrivateKey(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7])
+}
+
+// SEC 1's ECPrivateKey: { version 1, privateKey, [0] curve, [1] publicKey }, the curve given by
+// PKCS#8's algorithm where the key leaves it out.
+fun __ecPrivate(der : Bytes, curveOid : string?) : EcPrivateKey throws DerException {
+  val r = DerReader(der).sequence()
+  if (r.integer() != 1) { throw DerException("an EC private key not of version 1") }
+  val secret = r.octetString()
+  var curve = curveOid
+  val params = r.explicit(0)
+  if (params != null) { curve = params!!.oid() }
+  val size = curve == KeyOid.p384 ? 48 : curve == KeyOid.p256 ? 32 : -1
+  if (size < 0) { throw DerException("an elliptic curve not known here: $curve") }
+  if (secret.size > size) { throw DerException("an EC private key longer than its curve's") }
+  val full = Bytes(size)
+  full.copyFrom(secret, 0, 1, size - secret.size, 1, secret.size)
+  try {
+    return size == 48 ? P384PrivateKey(full) : P256PrivateKey(full)
+  } catch (e : IllegalArgumentException) {
+    throw DerException("an EC private key out of its curve's range")
+  }
+}
+
+// RFC 8410's CurvePrivateKey: an OCTET STRING of 32 bytes inside the PKCS#8 OCTET STRING.
+fun __curveSeed(inner : Bytes) : Bytes throws DerException {
+  val seed = DerReader(inner).octetString()
+  if (seed.size != 32) { throw DerException("a key of ${seed.size} bytes where 32 belong") }
+  return seed
+}
+
+// The password's key and the cipher of a PBES2 AlgorithmIdentifier (its whole DER), as
+// [key, iv]. PBKDF2 with HMAC over SHA-256, -384 or -512 (not SHA-1); AES-CBC.
+fun __pbes2Key(alg : Bytes, password : string) : List<Bytes> throws DerException {
+  val a = DerReader(alg).sequence()
+  val oid = a.oid()
+  if (oid != KeyOid.pbes2) { throw DerException("a password-based encryption not known here: $oid (only PBES2 is)") }
+  val params = a.sequence()
+  val kdf = params.sequence()
+  if (kdf.oid() != KeyOid.pbkdf2) { throw DerException("a key derivation not known here (only PBKDF2 is)") }
+  val kp = kdf.sequence()
+  val salt = kp.octetString()
+  val iterations = kp.integer()
+  var keyLength = -1
+  if (kp.peekTag() == DerTag.integer) { keyLength = kp.integer() }
+  var hash : Hash? = null
+  if (!kp.isEmpty) {
+    val prf = kp.sequence()
+    hash = when (prf.oid()) {
+      KeyOid.hmacSha256 -> Sha256()
+      KeyOid.hmacSha384 -> Sha384()
+      KeyOid.hmacSha512 -> Sha512()
+      else -> null
+    }
+  }
+  if (hash == null) { throw DerException("PBKDF2 with HMAC-SHA-1, which is not taken here") }
+  val scheme = params.sequence()
+  val cipher = scheme.oid()
+  val size = when (cipher) {
+    KeyOid.aes128Cbc -> 16
+    KeyOid.aes192Cbc -> 24
+    KeyOid.aes256Cbc -> 32
+    else -> throw DerException("a cipher not known here: $cipher")
+  }
+  val iv = scheme.octetString()
+  if (iv.size != 16) { throw DerException("an AES-CBC IV of ${iv.size} bytes") }
+  if (keyLength >= 0 and keyLength != size) { throw DerException("a key length that does not match the cipher") }
+  if (iterations < 1 or iterations > 10000000) { throw DerException("PBKDF2 of $iterations rounds") }
+  return [Pbkdf2.derive(hash!!, password, salt, iterations, size), iv]
+}
+
+fun __pbes2Decrypt(alg : Bytes, data : Bytes, password : string) : Bytes throws DerException {
+  val kiv = __pbes2Key(alg, password)
+  val plain = __crypto.aesCbc(kiv[0], kiv[1], data, false)
+  if (plain == null) { throw IllegalArgumentException("the password is wrong (or the data damaged)") }
+  return plain!!
+}
+
+// The data encrypted with a new salt and IV: [PBES2's AlgorithmIdentifier, the encrypted bytes].
+fun __pbes2Seal(plain : Bytes, password : string, iterations : int) : List<Bytes> {
+  val alg = DerWriter().sequence { a ->
+    a.oid(KeyOid.pbes2)
+    a.sequence { p ->
+      p.sequence { k ->
+        k.oid(KeyOid.pbkdf2)
+        k.sequence { kp ->
+          kp.octetString(SecureRandom.bytes(16))
+          kp.integer(iterations)
+          kp.sequence { it.oid(KeyOid.hmacSha256).nul() }
+        }
+      }
+      p.sequence { it.oid(KeyOid.aes256Cbc).octetString(SecureRandom.bytes(16)) }
+    }
+  }.toBytes()
+  try {
+    val kiv = __pbes2Key(alg, password)
+    return [alg, __crypto.aesCbc(kiv[0], kiv[1], plain, true)!!]
+  } catch (e : DerException) {
+    throw IllegalStateException("PBES2 written here could not be read back: ${e.message}")
+  }
+}
+
+// EncryptedPrivateKeyInfo's DER: { algorithm PBES2, data }.
+fun __pbes2Encrypt(plain : Bytes, password : string, iterations : int) : Bytes {
+  val sealed = __pbes2Seal(plain, password, iterations)
+  return DerWriter().sequence { it.raw(sealed[0]).octetString(sealed[1]) }.toBytes()
+}

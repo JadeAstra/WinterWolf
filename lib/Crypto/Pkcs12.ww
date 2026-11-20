@@ -1,0 +1,365 @@
+// ---- PKCS#12 files (networking plan, part 4, 2026-11-20) ----
+//
+//   val entries = Pkcs12.read(FilePath("server.p12").readBytes(), "password")
+//   val key = entries[0].key!!                      // its chain: entries[0].certificates
+//   FilePath("copy.p12").writeBytes(Pkcs12.write([Pkcs12Entry(key, chain, "server")], "password"))
+//
+// PKCS#12 (RFC 7292), the ".p12" or ".pfx" file: private keys, each with its certificate chain, and
+// certificates trusted alone, under a password. Written as OpenSSL 3 and Java's keytool write them,
+// so that both read it: keys and certificates encrypted with PBES2 (PBKDF2 with HMAC-SHA-256,
+// AES-256-CBC), and the whole checked with an HMAC-SHA-256 MAC whose key comes from the password
+// by RFC 7292's own derivation. Read: the same, with AES-128 or AES-192, HMAC-SHA-384 or -512 in
+// PBES2, and MACs of SHA-384 or SHA-512 too. The older forms (SHA-1 with RC2 or triple DES, SHA-1
+// MACs) are refused with the reason: OpenSSL 3 and Java have not written them by default since
+// 2020 and 2021.
+
+// One entry of a PKCS#12 file: a private key with its certificate chain (the key's own
+// certificate first, then its issuers), or a certificate trusted alone (no key, one certificate,
+// as keytool's trusted certificate entries are). `name` is the friendly name, keytool's alias.
+data Pkcs12Entry(val key : PrivateKey?, val certificates : List<Certificate>, val name : string? = null)
+
+object Pkcs12 {
+  // The entries of a PKCS#12 file. A CertificateException where the password is wrong (or the
+  // file damaged), or the file is not PKCS#12 in a form read here.
+  fun read(der : Bytes, password : string) : List<Pkcs12Entry> throws CertificateException {
+    try {
+      val pfx = DerReader(der).sequence()
+      val version = pfx.integer()
+      if (version != 3) { throw DerException("PKCS#12 version $version (3 is the one there is)") }
+      val authSafe = pfx.sequence()
+      if (authSafe.oid() != __P12Oid.data) { throw DerException("a PKCS#12 file signed with public keys, which is not read here") }
+      val content = __explicitOf(authSafe).octetString()
+      authSafe.done()
+      if (pfx.isEmpty) { throw DerException("no MAC, so the file cannot be checked") }
+      val macData = pfx.sequence()
+      pfx.done()
+      val digestInfo = macData.sequence()
+      val alg = digestInfo.sequence()
+      val hashOid = alg.oid()
+      if (!alg.isEmpty) { alg.nul() }
+      val digest = digestInfo.octetString()
+      digestInfo.done()
+      val salt = macData.octetString()
+      val iterations = macData.isEmpty ? 1 : macData.integer()
+      macData.done()
+      if (hashOid == __P12Oid.sha1) { throw DerException("a MAC of SHA-1, the older form, which is not read here") }
+      if (hashOid != X509Oid.sha256 and hashOid != X509Oid.sha384 and hashOid != X509Oid.sha512) { throw DerException("a MAC of a hash not known here: $hashOid") }
+      if (iterations < 1 or iterations > 10000000) { throw DerException("a MAC of $iterations iterations") }
+      val macKey = __pkcs12Key(hashOid, password, salt, iterations, 3)
+      if (!Secrets.equal(Hmac.mac(__p12Hash(hashOid), macKey, content), digest)) {
+        throw CertificateException("the password is wrong (or the file damaged)")
+      }
+
+      val found = __P12Found()
+      val safes = DerReader(content).sequence()
+      while (!safes.isEmpty) {
+        val info = safes.sequence()
+        val type = info.oid()
+        val inner = __explicitOf(info)
+        info.done()
+        when (type) {
+          __P12Oid.data -> found.bags(inner.octetString(), password)
+          __P12Oid.encryptedData -> {
+            val ed = inner.sequence()
+            ed.integer()
+            val eci = ed.sequence()
+            if (eci.oid() != __P12Oid.data) { throw DerException("encrypted content that is not data") }
+            val encryption = eci.raw()
+            val encrypted = eci.implicit(0)
+            if (encrypted == null) { throw DerException("encrypted data with nothing in it") }
+            val bytes = (encrypted!!.tag & 0x20) == 0 ? encrypted!!.contents : __joinedOctets(eci.over(encrypted!!))
+            found.bags(__p12Decrypt(encryption, bytes, password), password)
+          }
+          else -> throw DerException("content of a kind not read here (an envelope for public keys?): $type")
+        }
+      }
+      return found.entries()
+    } catch (e : DerException) {
+      throw CertificateException("not a PKCS#12 file read here: ${e.message}")
+    }
+  }
+
+  // A PKCS#12 file of `entries` under `password`: keys and certificates encrypted (PBES2 with
+  // `iterations` rounds of PBKDF2-HMAC-SHA-256, AES-256-CBC), the whole under an HMAC-SHA-256 MAC
+  // of as many rounds. The default is OWASP's for PBKDF2-HMAC-SHA-256 (2023); reading and writing
+  // then take about a quarter of a second.
+  fun write(entries : List<Pkcs12Entry>, password : string, iterations : int = 600000) : Bytes {
+    if (iterations < 1) { throw IllegalArgumentException("iterations are 1 or more, not $iterations") }
+    val keyBags : open List<Bytes> = []
+    val certBags : open List<Bytes> = []
+    for (entry in entries) {
+      val key = entry.key
+      if (key == null) {
+        if (entry.certificates.size != 1) { throw IllegalArgumentException("an entry with no key is one certificate, not ${entry.certificates.size}") }
+        // Trusted alone: keytool's mark (Oracle's trusted key usage, for any purpose) with it.
+        val trusted = DerWriter().sequence { a ->
+          a.oid(__P12Oid.trustedKeyUsage)
+          a.set { it.oid(ExtendedKeyUsage.any) }
+        }.toBytes()
+        certBags.add(__certBag(entry.certificates[0], __attributes(entry.name, null, trusted)))
+      } else {
+        if (entry.certificates.isEmpty()) { throw IllegalArgumentException("a key's entry has its certificate") }
+        val leaf = entry.certificates[0]
+        if (PublicKeys.toDer(__publicOf(key!!)) != leaf.publicKeyDer) { throw IllegalArgumentException("the first certificate is not the key's (its public key differs)") }
+        val id = __crypto.sha1(leaf.der)
+        val attributes = __attributes(entry.name, id, null)
+        keyBags.add(DerWriter().sequence { b ->
+          b.oid(__P12Oid.shroudedKeyBag)
+          b.explicit(0) { it.raw(PrivateKeys.toDer(key!!, password, iterations)) }
+          if (attributes != null) { b.raw(attributes!!) }
+        }.toBytes())
+        certBags.add(__certBag(leaf, attributes))
+        for (c in entry.certificates.drop(1)) { certBags.add(__certBag(c, null)) }
+      }
+    }
+    val content = DerWriter().sequence { safes ->
+      if (!certBags.isEmpty()) {
+        val sealed = __pbes2Seal(__safeContents(certBags), password, iterations)
+        safes.sequence { info ->
+          info.oid(__P12Oid.encryptedData)
+          info.explicit(0) { e ->
+            e.sequence { ed ->
+              ed.integer(0)
+              ed.sequence { eci ->
+                eci.oid(__P12Oid.data)
+                eci.raw(sealed[0])
+                eci.value(0x80, sealed[1])
+              }
+            }
+          }
+        }
+      }
+      if (!keyBags.isEmpty()) {
+        safes.sequence { info ->
+          info.oid(__P12Oid.data)
+          info.explicit(0) { it.octetString(__safeContents(keyBags)) }
+        }
+      }
+    }.toBytes()
+    val salt = SecureRandom.bytes(32)
+    val mac = Hmac.mac(Sha256(), __pkcs12Key(X509Oid.sha256, password, salt, iterations, 3), content)
+    return DerWriter().sequence { pfx ->
+      pfx.integer(3)
+      pfx.sequence { info ->
+        info.oid(__P12Oid.data)
+        info.explicit(0) { it.octetString(content) }
+      }
+      pfx.sequence { m ->
+        m.sequence { d ->
+          d.sequence { it.oid(X509Oid.sha256).nul() }
+          d.octetString(mac)
+        }
+        m.octetString(salt)
+        m.integer(iterations)
+      }
+    }.toBytes()
+  }
+}
+
+object __P12Oid {
+  const data = "1.2.840.113549.1.7.1"
+  const encryptedData = "1.2.840.113549.1.7.6"
+  const keyBag = "1.2.840.113549.1.12.10.1.1"
+  const shroudedKeyBag = "1.2.840.113549.1.12.10.1.2"
+  const certBag = "1.2.840.113549.1.12.10.1.3"
+  const safeContentsBag = "1.2.840.113549.1.12.10.1.6"
+  const x509Certificate = "1.2.840.113549.1.9.22.1"
+  const friendlyName = "1.2.840.113549.1.9.20"
+  const localKeyId = "1.2.840.113549.1.9.21"
+  const trustedKeyUsage = "2.16.840.1.113894.746875.1.1"
+  const sha1 = "1.3.14.3.2.26"
+}
+
+// What a file's bags hold, as they are read.
+class __P12Found {
+  val keys : open List<PrivateKey> = []
+  val keyIds : open List<Bytes?> = []
+  val keyNames : open List<string?> = []
+  val certs : open List<Certificate> = []
+  val certIds : open List<Bytes?> = []
+  val certNames : open List<string?> = []
+
+  // The bags of a SafeContents.
+  fun bags(safeContents : Bytes, password : string) throws DerException {
+    val r = DerReader(safeContents).sequence()
+    while (!r.isEmpty) {
+      val bag = r.sequence()
+      val type = bag.oid()
+      val value = __explicitOf(bag)
+      var id : Bytes? = null
+      var name : string? = null
+      if (!bag.isEmpty) {
+        val attributes = bag.set()
+        while (!attributes.isEmpty) {
+          val a = attributes.sequence()
+          val oid = a.oid()
+          val values = a.set()
+          if (oid == __P12Oid.localKeyId) { id = values.octetString() }
+          if (oid == __P12Oid.friendlyName) { name = values.text() }
+        }
+      }
+      bag.done()
+      when (type) {
+        __P12Oid.keyBag, __P12Oid.shroudedKeyBag -> {
+          val der = value.raw()
+          try {
+            keys.add(type == __P12Oid.keyBag ? PrivateKeys.fromDer(der) : PrivateKeys.fromDer(der, password))
+          } catch (e : IllegalArgumentException) {
+            throw DerException("a key that cannot be decrypted: ${e.message}")
+          }
+          keyIds.add(id)
+          keyNames.add(name)
+        }
+        __P12Oid.certBag -> {
+          val c = value.sequence()
+          if (c.oid() == __P12Oid.x509Certificate) {
+            try {
+              certs.add(Certificate(__explicitOf(c).octetString()))
+            } catch (e : CertificateException) {
+              throw DerException("a certificate in it: ${e.message}")
+            }
+            certIds.add(id)
+            certNames.add(name)
+          }
+        }
+        __P12Oid.safeContentsBag -> bags(value.raw(), password)
+        else -> { }   // CRLs and secrets: not kept
+      }
+    }
+  }
+
+  // Each key with its chain, then the certificates in no key's chain.
+  fun entries() : List<Pkcs12Entry> {
+    val out : open List<Pkcs12Entry> = []
+    val used = Set<int>()
+    for (k in 0..<keys.size) {
+      val publicDer = PublicKeys.toDer(__publicOf(keys[k]))
+      var leaf = -1
+      for (i in 0..<certs.size) {
+        if (keyIds[k] != null and certIds[i] == keyIds[k] and certs[i].publicKeyDer == publicDer) { leaf = i }
+      }
+      if (leaf < 0) { leaf = certs.indexOfFirst { it.publicKeyDer == publicDer } }
+      val chain : open List<Certificate> = []
+      if (leaf >= 0) {
+        var at = leaf
+        while (true) {
+          chain.add(certs[at])
+          used.add(at)
+          if (certs[at].isSelfIssued or chain.size > 10) { break }
+          val issuer = certs.indexOfFirst { c -> c.subject == certs[at].issuer and !chain.contains(c) }
+          if (issuer < 0) { break }
+          at = issuer
+        }
+      }
+      out.add(Pkcs12Entry(keys[k], chain, keyNames[k] ?: (leaf >= 0 ? certNames[leaf] : null)))
+    }
+    for (i in 0..<certs.size) {
+      if (!used.contains(i)) { out.add(Pkcs12Entry(null, [certs[i]], certNames[i])) }
+    }
+    return out
+  }
+}
+
+// A key derived from the password by RFC 7292 (appendix B.2), as its MAC's key needs: the
+// password as BMPString with two zero bytes after it, `id` 3 for a MAC. The hash's own size.
+fun __pkcs12Key(hashOid : string, password : string, salt : Bytes, iterations : int, id : int) : Bytes {
+  val v = hashOid == X509Oid.sha256 ? 64 : 128
+  val units = password.toBytes(Charset.utf16be)
+  val pw = Bytes(units.size + 2)
+  pw.copyFrom(units, 0, 1, 0, 1, units.size)
+  val s = __filledTo(salt, v)
+  val p = __filledTo(pw, v)
+  val input = Bytes(v + s.size + p.size)
+  for (i in 0..<v) { input[i] = id.toByte() }
+  input.copyFrom(s, 0, 1, v, 1, s.size)
+  input.copyFrom(p, 0, 1, v + s.size, 1, p.size)
+  var a = __p12Digest(hashOid, input)
+  for (i in 1..<iterations) { a = __p12Digest(hashOid, a) }
+  return a
+}
+
+// `b` repeated to the next whole number of `v`-byte blocks (none for no bytes).
+fun __filledTo(b : Bytes, v : int) : Bytes {
+  val out = Bytes((b.size + v - 1) / v * v)
+  for (i in 0..<out.size) { out[i] = b[i % b.size] }
+  return out
+}
+
+fun __p12Digest(hashOid : string, data : Bytes) : Bytes => when (hashOid) {
+  X509Oid.sha256 -> Sha256.hash(data)
+  X509Oid.sha384 -> Sha384.hash(data)
+  else -> Sha512.hash(data)
+}
+
+fun __p12Hash(hashOid : string) : Hash => when (hashOid) {
+  X509Oid.sha256 -> Sha256()
+  X509Oid.sha384 -> Sha384()
+  else -> Sha512()
+}
+
+fun __p12Decrypt(alg : Bytes, data : Bytes, password : string) : Bytes throws DerException {
+  try {
+    return __pbes2Decrypt(alg, data, password)
+  } catch (e : IllegalArgumentException) {
+    throw DerException("contents that cannot be decrypted: ${e.message}")
+  }
+}
+
+// What an [0] EXPLICIT holds, which must be there.
+fun __explicitOf(r : DerReader) : DerReader throws DerException {
+  val inner = r.explicit(0)
+  if (inner == null) { throw DerException("[0] missing where it belongs") }
+  return inner!!
+}
+
+// The OCTET STRINGs of a constructed [0], joined.
+fun __joinedOctets(r : DerReader) : Bytes throws DerException {
+  val w = DerWriter()
+  while (!r.isEmpty) { w.raw(r.octetString()) }
+  return w.toBytes()
+}
+
+fun __publicOf(key : PrivateKey) : PublicKey => when (key) {
+  is RsaPrivateKey -> key.publicKey
+  is EcPrivateKey -> key.publicKey
+  is Ed25519PrivateKey -> key.publicKey
+  is X25519PrivateKey -> key.publicKey
+  else -> throw IllegalArgumentException("a private key of a kind not known here")
+}
+
+// A bag's attributes: its friendly name, its local key id, one more already DER; null for none.
+// A SET OF in DER is in the order of its members' bytes.
+fun __attributes(name : string?, id : Bytes?, extra : Bytes?) : Bytes? {
+  val members : open List<Bytes> = []
+  if (name != null) {
+    members.add(DerWriter().sequence { a -> a.oid(__P12Oid.friendlyName).set { it.bmp(name!!) } }.toBytes())
+  }
+  if (id != null) {
+    members.add(DerWriter().sequence { a -> a.oid(__P12Oid.localKeyId).set { it.octetString(id!!) } }.toBytes())
+  }
+  if (extra != null) { members.add(extra!!) }
+  if (members.isEmpty()) { return null }
+  members.sortWith { a, b -> __compareBytes(a, b) }
+  return DerWriter().set { s -> for (m in members) { s.raw(m) } }.toBytes()
+}
+
+fun __compareBytes(a : Bytes, b : Bytes) : int {
+  for (i in 0..<Math.min(a.size, b.size)) {
+    val d = a[i].toInt() - b[i].toInt()
+    if (d != 0) { return d }
+  }
+  return a.size - b.size
+}
+
+fun __certBag(c : Certificate, attributes : Bytes?) : Bytes => DerWriter().sequence { b ->
+  b.oid(__P12Oid.certBag)
+  b.explicit(0) { v ->
+    v.sequence { cb ->
+      cb.oid(__P12Oid.x509Certificate)
+      cb.explicit(0) { it.octetString(c.der) }
+    }
+  }
+  if (attributes != null) { b.raw(attributes!!) }
+}.toBytes()
+
+fun __safeContents(bags : List<Bytes>) : Bytes => DerWriter().sequence { s -> for (b in bags) { s.raw(b) } }.toBytes()

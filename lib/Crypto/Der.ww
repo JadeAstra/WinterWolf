@@ -1,0 +1,421 @@
+// ---- DER and PEM (networking plan, part 4, 2026-11-20) ----
+// ASN.1 in its Distinguished Encoding (X.690): each value a tag, a length and its contents, read
+// strictly, as X.509 and PKCS need (a length in its fewest bytes and never indefinite, a boolean
+// 00 or FF, an integer in its fewest bytes); and written so. PEM is DER in Base64 between
+// "-----BEGIN label-----" and "-----END label-----" lines.
+//
+//   val reader = DerReader(der)
+//   val cert = reader.sequence()                 // a DerReader over the SEQUENCE's contents
+//   val version = cert.explicit(0)?.integer()    // [0] EXPLICIT, where present
+//   val writer = DerWriter()
+//   writer.sequence { it.integer(Bytes([1])); it.oid("1.2.840.113549.1.1.1"); it.nul() }
+
+// Bytes that are not the DER they should be: why, and where. An IOException, as reading a file
+// that is not what it should be is.
+class DerException(message : string) : IOException(message)
+
+// The universal tags X.509 and PKCS use.
+object DerTag {
+  const boolean = 0x01
+  const integer = 0x02
+  const bitString = 0x03
+  const octetString = 0x04
+  const nul = 0x05
+  const oid = 0x06
+  const utf8String = 0x0C
+  const sequence = 0x30
+  const set = 0x31
+  const printableString = 0x13
+  const t61String = 0x14
+  const ia5String = 0x16
+  const utcTime = 0x17
+  const generalizedTime = 0x18
+  const universalString = 0x1C
+  const bmpString = 0x1E
+}
+
+// One value read: its tag (the whole first byte), and where its contents are in the bytes.
+data DerValue(val tag : int, val bytes : Bytes, val start : int, val size : int) {
+  // Its contents, a copy.
+  val contents : Bytes
+    get() => bytes[start..<start + size]
+  // The whole of it, tag and length too, a copy (what a signature covers).
+  fun encoded(headerStart : int) : Bytes => bytes[headerStart..<start + size]
+}
+
+// Reads DER values one after another from part of some bytes.
+class DerReader {
+  private val bytes : Bytes
+  private var at : int
+  private val end : int
+
+  // Over `size` bytes of `bytes` from `start` (all of them unless said).
+  fun init(bytes : Bytes, start : int = 0, size : int = bytes.size - start) {
+    this.bytes = bytes
+    this.at = start
+    this.end = start + size
+  }
+
+  // Whether every value has been read.
+  val isEmpty : bool
+    get() => at >= end
+  // Where the next value starts.
+  val position : int
+    get() => at
+  // The tag of the next value, or -1 at the end.
+  fun peekTag() : int => at < end ? bytes[at].toInt() : -1
+
+  // The next value, whatever it is. A DerException where it is cut short or its length is not
+  // in DER's form; tags of more than one byte are not taken (nothing here uses them).
+  fun next() : DerValue throws DerException {
+    if (at >= end) { throw DerException("DER ends where a value should start") }
+    val tag = bytes[at].toInt()
+    if ((tag & 0x1F) == 0x1F) { throw DerException("a DER tag of more than one byte, at $at") }
+    if (at + 1 >= end) { throw DerException("DER ends inside a value's header, at $at") }
+    var length = bytes[at + 1].toInt()
+    var header = 2
+    if (length >= 0x80) {
+      val count = length & 0x7F
+      if (count == 0) { throw DerException("an indefinite length, which DER has not, at $at") }
+      if (count > 4) { throw DerException("a length of $count bytes, at $at") }
+      if (at + 2 + count > end) { throw DerException("DER ends inside a length, at $at") }
+      length = 0
+      for (i in 0..<count) { length = length * 256 + bytes[at + 2 + i].toInt() }
+      if (length < 0x80 or bytes[at + 2].toInt() == 0) { throw DerException("a length not in its fewest bytes, at $at") }
+      header = 2 + count
+    }
+    val start = at + header
+    if (length > end - start) { throw DerException("a value of $length bytes where ${end - start} are left, at $at") }
+    at = start + length
+    return DerValue(tag, bytes, start, length)
+  }
+
+  // The next value, which must have `tag`.
+  fun expect(tag : int) : DerValue throws DerException {
+    val here = at
+    val value = next()
+    if (value.tag != tag) { throw DerException("tag 0x${value.tag.toString(16)} where 0x${tag.toString(16)} belongs, at $here") }
+    return value
+  }
+
+  // A SEQUENCE (or a SET), as a reader over its contents.
+  fun sequence() : DerReader throws DerException => over(expect(DerTag.sequence))
+  fun set() : DerReader throws DerException => over(expect(DerTag.set))
+  // The whole of the next value as it is in the bytes, tag and length too.
+  fun raw() : Bytes throws DerException {
+    val from = at
+    val value = next()
+    return value.encoded(from)
+  }
+
+  // An INTEGER's bytes, two's complement, checked to be in its fewest bytes.
+  fun integerBytes() : Bytes throws DerException {
+    val v = expect(DerTag.integer)
+    if (v.size == 0) { throw DerException("an INTEGER of no bytes") }
+    if (v.size > 1) {
+      val first = bytes[v.start].toInt()
+      val second = bytes[v.start + 1].toInt()
+      if ((first == 0 and second < 0x80) or (first == 0xFF and second >= 0x80)) { throw DerException("an INTEGER not in its fewest bytes") }
+    }
+    return v.contents
+  }
+  // A non-negative INTEGER's magnitude, big-endian, with no leading zero (a key's numbers).
+  fun unsigned() : Bytes throws DerException {
+    val b = integerBytes()
+    if (b[0].toInt() >= 0x80) { throw DerException("a negative INTEGER where a number of 0 or more belongs") }
+    return b.size > 1 and b[0].toInt() == 0 ? b[1..] : b
+  }
+  // A small INTEGER as an int.
+  fun integer() : int throws DerException {
+    val b = integerBytes()
+    if (b.size > 7) { throw DerException("an INTEGER too large for an int") }
+    var v = b[0].toInt() >= 0x80 ? -1 : 0
+    for (x in b.toList()) { v = (v << 8) | x.toInt() }
+    return v
+  }
+  fun boolean() : bool throws DerException {
+    val v = expect(DerTag.boolean)
+    if (v.size != 1) { throw DerException("a BOOLEAN not of one byte") }
+    val b = bytes[v.start].toInt()
+    if (b != 0 and b != 0xFF) { throw DerException("a BOOLEAN that is neither 00 nor FF") }
+    return b == 0xFF
+  }
+  fun nul() throws DerException {
+    if (expect(DerTag.nul).size != 0) { throw DerException("a NULL with contents") }
+  }
+  fun octetString() : Bytes throws DerException => expect(DerTag.octetString).contents
+  // A BIT STRING's bytes; an error where it has unused bits (keys and signatures have none).
+  fun bitString() : Bytes throws DerException {
+    val v = expect(DerTag.bitString)
+    if (v.size == 0 or bytes[v.start].toInt() != 0) { throw DerException("a BIT STRING with unused bits where whole bytes belong") }
+    return bytes[v.start + 1..<v.start + v.size]
+  }
+  // A BIT STRING as flags (key usage): bit 0 is the first byte's highest.
+  fun bitFlags() : List<bool> throws DerException {
+    val v = expect(DerTag.bitString)
+    if (v.size == 0) { throw DerException("a BIT STRING of no bytes") }
+    val unused = bytes[v.start].toInt()
+    if (unused > 7 or (v.size == 1 and unused != 0)) { throw DerException("a BIT STRING's unused bits out of range") }
+    val flags : open List<bool> = []
+    for (i in 1..<v.size) {
+      val b = bytes[v.start + i].toInt()
+      for (k in 7 downTo 0) { flags.add(((b >> k) & 1) == 1) }
+    }
+    for (i in 0..<unused) { flags.removeLast() }
+    return flags
+  }
+  // An OBJECT IDENTIFIER, as "1.2.840.113549.1.1.11".
+  fun oid() : string throws DerException {
+    val v = expect(DerTag.oid)
+    return __oidText(bytes, v.start, v.size)
+  }
+  // A string of any of the kinds names use, as text.
+  fun text() : string throws DerException {
+    val v = next()
+    return __derText(v)
+  }
+  // A UTCTime or GeneralizedTime, as seconds since 1970 (UTC).
+  fun time() : int throws DerException {
+    val v = next()
+    if (v.tag != DerTag.utcTime and v.tag != DerTag.generalizedTime) { throw DerException("a time where tag 0x${v.tag.toString(16)} is") }
+    return __derTime(v.contents.decodeToString(Charset.ascii), v.tag == DerTag.utcTime)
+  }
+
+  // A context-specific [n] EXPLICIT value, as a reader over what it holds; null where the next
+  // value is not [n].
+  fun explicit(n : int) : DerReader? throws DerException {
+    if (peekTag() != (0xA0 | n)) { return null }
+    return over(next())
+  }
+  // A context-specific [n] value given IMPLICIT (its own tag replaced): its contents; null where
+  // the next value is not [n], either form.
+  fun implicit(n : int) : DerValue? throws DerException {
+    val t = peekTag()
+    if (t != (0x80 | n) and t != (0xA0 | n)) { return null }
+    return next()
+  }
+
+  // A reader over a value's contents.
+  fun over(v : DerValue) : DerReader => DerReader(v.bytes, v.start, v.size)
+  // An error where something is left over: a structure must hold just what it should.
+  fun done() throws DerException {
+    if (at != end) { throw DerException("${end - at} bytes left over where a structure should end") }
+  }
+}
+
+// Writes DER: each value's contents first, then its header before them.
+class DerWriter {
+  private val parts : open List<Bytes> = []
+
+  // What has been written, as one Bytes.
+  fun toBytes() : Bytes {
+    var size = 0
+    for (p in parts) { size += p.size }
+    val out = Bytes(size)
+    var at = 0
+    for (p in parts) {
+      out.copyFrom(p, 0, 1, at, 1, p.size)
+      at += p.size
+    }
+    return out
+  }
+
+  // A value of `tag` with `contents`.
+  fun value(tag : int, contents : Bytes) : DerWriter {
+    parts.add(__derHeader(tag, contents.size))
+    parts.add(contents)
+    return this
+  }
+  // Bytes already DER, as they are.
+  fun raw(der : Bytes) : DerWriter {
+    parts.add(der)
+    return this
+  }
+  // A SEQUENCE, SET or [n] holding what `fill` writes.
+  fun sequence(fill : (DerWriter) -> unit) : DerWriter => value(DerTag.sequence, __writtenBy(fill))
+  fun set(fill : (DerWriter) -> unit) : DerWriter => value(DerTag.set, __writtenBy(fill))
+  fun explicit(n : int, fill : (DerWriter) -> unit) : DerWriter => value(0xA0 | n, __writtenBy(fill))
+  // A non-negative INTEGER from its big-endian bytes (leading zeros dropped, one 0 put first where
+  // the top bit is set).
+  fun integer(magnitude : Bytes) : DerWriter {
+    var first = 0
+    while (first < magnitude.size - 1 and magnitude[first].toInt() == 0) { first++ }
+    val pad = magnitude.size == 0 or magnitude[first].toInt() >= 0x80 ? 1 : 0
+    val out = Bytes(pad + magnitude.size - first)
+    if (magnitude.size > 0) { out.copyFrom(magnitude, first, 1, pad, 1, magnitude.size - first) }
+    return value(DerTag.integer, out)
+  }
+  fun integer(n : int) : DerWriter {
+    if (n < 0) { throw IllegalArgumentException("only numbers of 0 or more are written here") }
+    val b = Bytes(8)
+    b.putInt64(0, n, true)
+    return integer(b)
+  }
+  fun boolean(v : bool) : DerWriter => value(DerTag.boolean, Bytes([v ? 255 : 0]))
+  fun nul() : DerWriter => value(DerTag.nul, Bytes(0))
+  fun octetString(b : Bytes) : DerWriter => value(DerTag.octetString, b)
+  fun bitString(b : Bytes) : DerWriter {
+    val out = Bytes(b.size + 1)
+    out.copyFrom(b, 0, 1, 1, 1, b.size)
+    return value(DerTag.bitString, out)
+  }
+  fun oid(text : string) : DerWriter => value(DerTag.oid, __oidBytes(text))
+  fun utf8(text : string) : DerWriter => value(DerTag.utf8String, text.toBytes())
+  fun bmp(text : string) : DerWriter {
+    val units = text.toBytes(Charset.utf16be)
+    return value(DerTag.bmpString, units)
+  }
+}
+
+// ---- PEM ----
+
+// One PEM block: its label ("CERTIFICATE", "PRIVATE KEY") and its DER bytes.
+data PemBlock(val label : string, val der : Bytes)
+
+object Pem {
+  // Every block in the text, in order; text outside them is passed over. A DerException where a
+  // block has no end or its Base64 is bad.
+  fun read(text : string) : List<PemBlock> throws DerException {
+    val blocks : open List<PemBlock> = []
+    var at = 0
+    while (true) {
+      val begin = text.indexOf("-----BEGIN ", at)
+      if (begin < 0) { break }
+      val labelEnd = text.indexOf("-----", begin + 11)
+      if (labelEnd < 0) { throw DerException("a PEM BEGIN line with no end") }
+      val label = text[begin + 11..<labelEnd]
+      val endLine = "-----END $label-----"
+      val end = text.indexOf(endLine, labelEnd + 5)
+      if (end < 0) { throw DerException("a PEM block '$label' with no END line") }
+      val body = text[labelEnd + 5..<end]
+      try {
+        blocks.add(PemBlock(label, Base64.decode(body)))
+      } catch (e : IllegalArgumentException) {
+        throw DerException("a PEM block '$label' whose Base64 is bad: ${e.message}")
+      }
+      at = end + endLine.size
+    }
+    return blocks
+  }
+  // The DER of a block, in PEM, its Base64 in lines of 64.
+  fun write(label : string, der : Bytes) : string {
+    val b64 = Base64.encode(der)
+    val out = StringBuilder()
+    out.append("-----BEGIN $label-----\n")
+    var at = 0
+    while (at < b64.size) {
+      val upTo = Math.min(at + 64, b64.size)
+      out.append(b64[at..<upTo])
+      out.append("\n")
+      at = upTo
+    }
+    out.append("-----END $label-----\n")
+    return out.toString()
+  }
+}
+
+// ---- Helpers ----
+
+fun __writtenBy(fill : (DerWriter) -> unit) : Bytes {
+  val inner = DerWriter()
+  fill(inner)
+  return inner.toBytes()
+}
+
+fun __derHeader(tag : int, size : int) : Bytes {
+  if (size < 0x80) { return Bytes([tag, size]) }
+  var count = 0
+  var rest = size
+  while (rest > 0) {
+    count++
+    rest = rest >> 8
+  }
+  val out = Bytes(2 + count)
+  out[0] = tag.toByte()
+  out[1] = (0x80 | count).toByte()
+  for (i in 0..<count) { out[2 + i] = ((size >> (8 * (count - 1 - i))) & 255).toByte() }
+  return out
+}
+
+fun __oidText(bytes : Bytes, start : int, size : int) : string throws DerException {
+  if (size == 0) { throw DerException("an OBJECT IDENTIFIER of no bytes") }
+  val arcs : open List<int> = []
+  var v = 0
+  var started = false
+  for (i in start..<start + size) {
+    val b = bytes[i].toInt()
+    if (!started and b == 0x80) { throw DerException("an OBJECT IDENTIFIER arc not in its fewest bytes") }
+    started = true
+    if (v > (int.maxValue >> 7)) { throw DerException("an OBJECT IDENTIFIER arc too large") }
+    v = (v << 7) | (b & 0x7F)
+    if (b < 0x80) {
+      arcs.add(v)
+      v = 0
+      started = false
+    }
+  }
+  if (started) { throw DerException("an OBJECT IDENTIFIER cut short") }
+  val first = arcs[0]
+  val head = first < 40 ? "0.$first" : first < 80 ? "1.${first - 40}" : "2.${first - 80}"
+  return arcs.size == 1 ? head : head + "." + arcs[1..].map { "$it" }.join(".")
+}
+
+fun __oidBytes(text : string) : Bytes {
+  val arcs = text.split('.').map { it.toInt() }
+  if (arcs.size < 2) { throw IllegalArgumentException("an object identifier has two arcs or more: $text") }
+  val values : open List<int> = [arcs[0] * 40 + arcs[1]]
+  values.addAll(arcs[2..])
+  val out : open List<int> = []
+  for (v in values) {
+    val groups : open List<int> = []
+    var rest = v
+    groups.add(rest & 0x7F)
+    rest = rest >> 7
+    while (rest > 0) {
+      groups.add((rest & 0x7F) | 0x80)
+      rest = rest >> 7
+    }
+    for (k in groups.size - 1 downTo 0) { out.add(groups[k]) }
+  }
+  return Bytes(out)
+}
+
+fun __derText(v : DerValue) : string throws DerException {
+  val b = v.contents
+  return when (v.tag) {
+    DerTag.utf8String -> b.decodeToString()
+    DerTag.printableString, DerTag.ia5String -> b.decodeToString(Charset.ascii)
+    DerTag.t61String -> b.decodeToString(Charset.latin1)
+    DerTag.bmpString -> b.decodeToString(Charset.utf16be)
+    else -> throw DerException("a string of tag 0x${v.tag.toString(16)}")
+  }
+}
+
+// "YYMMDDHHMMSSZ" (UTCTime, 1950 to 2049) or "YYYYMMDDHHMMSSZ", as seconds since 1970.
+fun __derTime(text : string, utc : bool) : int throws DerException {
+  val size = utc ? 13 : 15
+  if (text.size != size or !text.endsWith("Z")) { throw DerException("a time not in DER's form: $text") }
+  for (i in 0..<size - 1) {
+    if (!text[i].isDigit()) { throw DerException("a time not in DER's form: $text") }
+  }
+  val yy = utc ? text[0..<2].toInt() : 0
+  val year = utc ? (yy < 50 ? 2000 + yy : 1900 + yy) : text[0..<4].toInt()
+  val at = utc ? 2 : 4
+  val month = text[at..<at + 2].toInt()
+  val day = text[at + 2..<at + 4].toInt()
+  val hour = text[at + 4..<at + 6].toInt()
+  val minute = text[at + 6..<at + 8].toInt()
+  val second = text[at + 8..<at + 10].toInt()
+  if (month < 1 or month > 12 or day < 1 or day > 31 or hour > 23 or minute > 59 or second > 59) { throw DerException("a time out of range: $text") }
+  return __daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
+}
+
+// Days from 1970-01-01 to the date (Howard Hinnant's days_from_civil).
+fun __daysFromCivil(y0 : int, m : int, d : int) : int {
+  val y = m <= 2 ? y0 - 1 : y0
+  val era = (y >= 0 ? y : y - 399) / 400
+  val yoe = y - era * 400
+  val doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1
+  val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  return era * 146097 + doe - 719468
+}

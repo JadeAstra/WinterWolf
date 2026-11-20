@@ -1,0 +1,51 @@
+// Keys in files (tests/data/keys, made by OpenSSL): PKCS#8, SubjectPublicKeyInfo, encrypted PKCS#8
+// (PBES2), and the older PKCS#1 and SEC 1 forms, read as OpenSSL wrote them and written back the
+// same, byte for byte; a key written encrypted here reads back (tools/crypto/pkcs12.sh check has
+// OpenSSL and keytool read keys encrypted here, inside PKCS#12 files).
+import Crypto.*
+
+fun text(name : string) : string => FilePath("data/keys/$name").readText()
+fun publicOf(key : PrivateKey) : PublicKey => when (key) {
+  is RsaPrivateKey -> key.publicKey
+  is EcPrivateKey -> key.publicKey
+  is Ed25519PrivateKey -> key.publicKey
+  is X25519PrivateKey -> key.publicKey
+  else -> throw IllegalStateException()
+}
+
+for (k in ["rsa", "p256", "p384", "ed", "x"]) {
+  val key = PrivateKeys.fromPem(text("$k.pem"))
+  val pub = PublicKeys.fromPem(text("$k.pub"))
+  val sameText = PrivateKeys.toPem(key) == text("$k.pem") and PublicKeys.toPem(pub) == text("$k.pub")
+  val matches = PublicKeys.toDer(publicOf(key)) == PublicKeys.toDer(pub)
+  val decrypted = PrivateKeys.toDer(PrivateKeys.fromPem(text("$k.enc"), "sesame")) == PrivateKeys.toDer(key)
+  val own = PrivateKeys.toPem(key, "pass wörd", 1000)
+  val roundTrip = own.startsWith("-----BEGIN ENCRYPTED PRIVATE KEY-----") and PrivateKeys.toDer(PrivateKeys.fromPem(own, "pass wörd")) == PrivateKeys.toDer(key)
+  print(k, key.toString(), sameText, matches, decrypted, roundTrip)
+}
+// expect: rsa <RsaPrivateKey instance> true true true true
+// expect: p256 <P256PrivateKey instance> true true true true
+// expect: p384 <P384PrivateKey instance> true true true true
+// expect: ed <Ed25519PrivateKey instance> true true true true
+// expect: x <X25519PrivateKey instance> true true true true
+
+// The older forms.
+print(PrivateKeys.toDer(PrivateKeys.fromPem(text("rsa.trad"))) == PrivateKeys.toDer(PrivateKeys.fromPem(text("rsa.pem"))),
+      PrivateKeys.toDer(PrivateKeys.fromPem(text("p256.trad"))) == PrivateKeys.toDer(PrivateKeys.fromPem(text("p256.pem"))),
+      PublicKeys.toDer(PublicKeys.fromPem(text("rsa.rsapub"))) == PublicKeys.toDer(PublicKeys.fromPem(text("rsa.pub"))))
+// expect: true true true
+
+// What is refused.
+for (bad in [{ PrivateKeys.fromPem(text("p256.enc"), "wrong") }, { PrivateKeys.fromPem(text("p256.enc")) }]) {
+  try { bad() } catch (e : IllegalArgumentException) { print(e.message) }
+}
+// expect: the password is wrong (or the data damaged)
+// expect: the private key is encrypted: give its password
+for (bad in [{ PublicKeys.fromPem(text("p256.pem")) }, { PrivateKeys.fromPem("nothing") }, { PublicKeys.fromDer(Bytes(3)) },
+             { PrivateKeys.fromDer(PublicKeys.toDer(PublicKeys.fromPem(text("p256.pub")))) }]) {
+  try { bad() } catch (e : DerException) { print(e.message) }
+}
+// expect: no PUBLIC KEY block in the text
+// expect: no PRIVATE KEY block in the text
+// expect: tag 0x0 where 0x30 belongs, at 0
+// expect: not a private key (a public key's SubjectPublicKeyInfo?)

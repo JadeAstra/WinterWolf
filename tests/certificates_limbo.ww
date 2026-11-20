@@ -1,0 +1,70 @@
+// x509-limbo's cases (tests/data/limbo, from https://github.com/C2SP/x509-limbo): chains, good and
+// bad in each of the ways that certificate checkers have got wrong, each with the answer it
+// should get. import Crypto's TrustStore.verify gives that answer for every case but those listed
+// under notTaken below, each with the reason; where limbo's RFC 5280 profile and its web profile
+// disagree, the web profile is the one followed.
+//
+// Quick (WW_TEST_QUICK=1, under GC stress): 51 of the 685 cases.
+import Crypto.*
+
+val quick = Program.environment["WW_TEST_QUICK"] == "1"
+val data = Json.read(FilePath(quick ? "data/limbo/limbo_quick.json" : "data/limbo/limbo_subset.json").readText()) as Map<string, any?>
+val cases = (data["testcases"] as List<any?>).map { it as Map<string, any?> }
+
+val ruleForCas = "a rule for how a CA makes certificates that browsers do not hold a verifier to; a root is trusted as given"
+val notTaken = {
+  "pathlen::validation-ignores-pathlen-in-leaf": "a CA is not taken as a server's certificate (the web profile's rule, as webpki::ca-as-leaf)",
+  "rfc5280::ca-as-leaf": "a CA is not taken as a server's certificate (the web profile's rule, as webpki::ca-as-leaf)",
+  "rfc5280::aki::leaf-missing-aki": "key identifiers only help find a path; private CAs leave them out, and browsers take that",
+  "rfc5280::aki::intermediate-missing-aki": "key identifiers only help find a path; private CAs leave them out, and browsers take that",
+  "rfc5280::aki::cross-signed-root-missing-aki": "key identifiers only help find a path; older roots leave them out, and browsers take that",
+  "rfc5280::ski::root-missing-ski": "key identifiers only help find a path; older roots leave them out, and browsers take that",
+  "rfc5280::ski::intermediate-missing-ski": "key identifiers only help find a path; private CAs leave them out, and browsers take that",
+  "rfc5280::root-non-critical-basic-constraints": ruleForCas,
+  "webpki::aki::root-with-aki-missing-keyidentifier": ruleForCas,
+  "webpki::aki::root-with-aki-authoritycertissuer": ruleForCas,
+  "webpki::aki::root-with-aki-authoritycertserialnumber": ruleForCas,
+  "webpki::aki::root-with-aki-all-fields": ruleForCas,
+  "webpki::aki::root-with-aki-ski-mismatch": ruleForCas,
+  "webpki::eku::root-has-eku": ruleForCas,
+  "webpki::san::san-critical-with-nonempty-subject": ruleForCas,
+  "webpki::eku::ee-critical-eku": "private CAs mark the extended key usage critical; browsers take that",
+  "webpki::eku::ee-without-eku": "private CAs make leaves with no extended key usage; browsers take that",
+  "webpki::san::public-suffix-multi-label-wildcard-san": "needs the public suffix list, which is not here",
+  "webpki::san::public-suffix-private-namespace-wildcard-san": "needs the public suffix list, which is not here",
+}
+// The common name is not used for anything here (only the subject alternative names), so what
+// it holds is not checked: webpki::cn::* are not taken.
+
+fun certs(c : Map<string, any?>, key : string) : List<Certificate> => (c[key] as List<any?>).flatMap { Certificate.allFromPem(it as string) }
+
+var wrong = 0
+var checked = 0
+for (c in cases) {
+  val id = c["id"] as string
+  if (notTaken[id] != null or id.startsWith("webpki::cn::")) { continue }
+  if ((c["conflicts_with"] as List<any?>).any { (it as string).startsWith("webpki::") }) { continue }
+  checked++
+  val expected = c["expected_result"] == "SUCCESS"
+  var why = ""
+  var got = false
+  try {
+    val store = TrustStore(certs(c, "trusted_certs"))
+    val chain = Certificate.allFromPem(c["peer_certificate"] as string) + certs(c, "untrusted_intermediates")
+    val time = c["validation_time"] == null ? Instant.now() : Instant.parse(c["validation_time"] as string)
+    val client = c["validation_kind"] == "CLIENT"
+    val name = c["expected_peer_name"] as Map<string, any?>?
+    val host = name == null or client ? null : name!!["value"] as string
+    val depth = c["max_chain_depth"] == null ? 8 : c["max_chain_depth"] as int
+    store.verify(chain, host, time, client ? ExtendedKeyUsage.clientAuth : ExtendedKeyUsage.serverAuth, depth)
+    got = true
+  } catch (e : CertificateException) {
+    why = e.message ?: ""
+  }
+  if (got != expected) {
+    wrong++
+    print("$id: should be ${expected ? "taken" : "refused"}${why.isEmpty() ? "" : "; refused: $why"}")
+  }
+}
+print(wrong == 0 and checked > (quick ? 40 : 600) ? "all as expected" : "$wrong of $checked not as expected")
+// expect: all as expected

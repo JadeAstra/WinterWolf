@@ -3,6 +3,13 @@
 // state is wiped. The work that takes long (PBKDF2, Argon2id) runs through VM::blocking on copies
 // of its inputs, so the program's other threads go on meanwhile.
 
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <wincrypt.h>
+#endif
+
 #include <cstring>
 #include <memory>
 #include <string>
@@ -85,6 +92,13 @@ std::unique_ptr<Hash> hashFor(VM& vm, const Value& kindValue, const Value& sizeV
     if ((kind == HashKind::Shake128 || kind == HashKind::Shake256) && size < 1)
         throw vm.runtimeError(Thrown::IllegalArgumentException, "a SHAKE's size is 1 byte or more, not " + std::to_string(size));
     return newHash(kind, static_cast<size_t>(size));
+}
+
+// Whether a curve's size names P-384 (true) or P-256 (false); an IllegalArgumentException else.
+bool curveOf(VM& vm, const Value& v) {
+    const int64_t bits = vm.toInt(v, "curve");
+    if (bits != 256 && bits != 384) throw vm.runtimeError(Thrown::IllegalArgumentException, "no curve P-" + std::to_string(bits));
+    return bits == 384;
 }
 
 // Bytes of exactly `size`: a key or point of a fixed size.
@@ -373,53 +387,64 @@ void registerCrypto(VM& vm) {
         if (key.size != 32 || sig.size != 64) return Value::boolean(false);
         return Value::boolean(ed25519Verify(key.data, m.data, m.size, sig.data));
     });
-    // p256Point(bytes): the point as 04 X Y, checked on the curve; null where it is none.
-    def("p256Point", 1, 1, [](VM& vm, int, Value* args) -> Value {
-        const Span b = wholeOf(vm, args[0], "a point");
-        uint8_t out[65];
-        if (!p256Point(b.data, b.size, out)) return Value::null();
-        return newBytes(vm, out, 65);
+    // The prime curves, P-256 or P-384 by `curve` (256 or 384): ecPoint(curve, bytes), the point
+    // as 04 X Y, checked on the curve, or null; ecValidPrivate(curve, bytes); ecPublic(curve, d);
+    // ecEcdh(curve, d, point), the shared x or null for infinity; ecSign(curve, d, hash kind,
+    // message), r and s; ecVerify(curve, point, hash kind, message, r and s).
+    def("ecPoint", 2, 2, [](VM& vm, int, Value* args) -> Value {
+        const bool big = curveOf(vm, args[0]);
+        const Span b = wholeOf(vm, args[1], "a point");
+        uint8_t out[97];
+        if (!(big ? p384Point(b.data, b.size, out) : p256Point(b.data, b.size, out))) return Value::null();
+        return newBytes(vm, out, big ? 97 : 65);
     });
-    def("p256ValidPrivate", 1, 1, [](VM& vm, int, Value* args) -> Value {
-        const Span d = wholeOf(vm, args[0], "a private key");
-        return Value::boolean(d.size == 32 && p256ValidPrivate(d.data));
+    def("ecValidPrivate", 2, 2, [](VM& vm, int, Value* args) -> Value {
+        const bool big = curveOf(vm, args[0]);
+        const Span d = wholeOf(vm, args[1], "a private key");
+        return Value::boolean(d.size == (big ? 48u : 32u) && (big ? p384ValidPrivate(d.data) : p256ValidPrivate(d.data)));
     });
-    def("p256Public", 1, 1, [](VM& vm, int, Value* args) -> Value {
-        const Span d = exactly(vm, args[0], 32, "a P-256 private key");
-        uint8_t out[65];
-        p256Public(out, d.data);
-        return newBytes(vm, out, 65);
+    def("ecPublic", 2, 2, [](VM& vm, int, Value* args) -> Value {
+        const bool big = curveOf(vm, args[0]);
+        const Span d = exactly(vm, args[1], big ? 48 : 32, "a private key");
+        uint8_t out[97];
+        if (big) p384Public(out, d.data);
+        else p256Public(out, d.data);
+        return newBytes(vm, out, big ? 97 : 65);
     });
-    // p256Ecdh(private, point65): the shared x, or null where the result is infinity.
-    def("p256Ecdh", 2, 2, [](VM& vm, int, Value* args) -> Value {
-        const Span d = exactly(vm, args[0], 32, "a P-256 private key"), q = exactly(vm, args[1], 65, "a P-256 point");
-        uint8_t out[32];
-        if (!p256Ecdh(out, d.data, q.data)) return Value::null();
-        const Value made = newBytes(vm, out, 32);
-        wipe(out, 32);
+    def("ecEcdh", 3, 3, [](VM& vm, int, Value* args) -> Value {
+        const bool big = curveOf(vm, args[0]);
+        const Span d = exactly(vm, args[1], big ? 48 : 32, "a private key"), q = exactly(vm, args[2], big ? 97 : 65, "a point");
+        uint8_t out[48];
+        if (!(big ? p384Ecdh(out, d.data, q.data) : p256Ecdh(out, d.data, q.data))) return Value::null();
+        const Value made = newBytes(vm, out, big ? 48 : 32);
+        wipe(out, sizeof(out));
         return made;
     });
-    // p256Sign(private, hash kind, message): r and s, 64 bytes.
-    def("p256Sign", 3, 3, [](VM& vm, int, Value* args) -> Value {
-        const Span d = exactly(vm, args[0], 32, "a P-256 private key");
-        std::unique_ptr<Hash> h = hashFor(vm, args[1], Value::integer(32));
-        const Span m = wholeOf(vm, args[2], "a message");
+    def("ecSign", 4, 4, [](VM& vm, int, Value* args) -> Value {
+        const bool big = curveOf(vm, args[0]);
+        const Span d = exactly(vm, args[1], big ? 48 : 32, "a private key");
+        std::unique_ptr<Hash> h = hashFor(vm, args[2], Value::integer(32));
+        const Span m = wholeOf(vm, args[3], "a message");
         h->update(m.data, m.size);
         std::vector<uint8_t> digest(h->size());
         h->finish(digest.data());
-        uint8_t sig[64];
-        p256Sign(sig, sig + 32, d.data, digest.data(), digest.size(), *h);
-        return newBytes(vm, sig, 64);
+        uint8_t sig[96];
+        const size_t half = big ? 48 : 32;
+        if (big) p384Sign(sig, sig + half, d.data, digest.data(), digest.size(), *h);
+        else p256Sign(sig, sig + half, d.data, digest.data(), digest.size(), *h);
+        return newBytes(vm, sig, 2 * half);
     });
-    // p256Verify(point65, hash kind, message, signature64)
-    def("p256Verify", 4, 4, [](VM& vm, int, Value* args) -> Value {
-        const Span q = wholeOf(vm, args[0], "a point"), m = wholeOf(vm, args[2], "a message"), sig = wholeOf(vm, args[3], "a signature");
-        std::unique_ptr<Hash> h = hashFor(vm, args[1], Value::integer(32));
-        if (q.size != 65 || sig.size != 64) return Value::boolean(false);
+    def("ecVerify", 5, 5, [](VM& vm, int, Value* args) -> Value {
+        const bool big = curveOf(vm, args[0]);
+        const Span q = wholeOf(vm, args[1], "a point"), m = wholeOf(vm, args[3], "a message"), sig = wholeOf(vm, args[4], "a signature");
+        std::unique_ptr<Hash> h = hashFor(vm, args[2], Value::integer(32));
+        const size_t half = big ? 48 : 32;
+        if (q.size != 2 * half + 1 || sig.size != 2 * half) return Value::boolean(false);
         h->update(m.data, m.size);
         std::vector<uint8_t> digest(h->size());
         h->finish(digest.data());
-        return Value::boolean(p256Verify(q.data, digest.data(), digest.size(), sig.data, sig.data + 32));
+        return Value::boolean(big ? p384Verify(q.data, digest.data(), digest.size(), sig.data, sig.data + half)
+                                  : p256Verify(q.data, digest.data(), digest.size(), sig.data, sig.data + half));
     });
     // rsaGenerate(bits, e): [n, e, d, p, q, dp, dq, qinv], waiting on its thread as a read does.
     def("rsaGenerate", 2, 2, [](VM& vm, int, Value* args) -> Value {
@@ -475,6 +500,108 @@ void registerCrypto(VM& vm) {
         if (saltLen < 0 || n.data == nullptr || e.data == nullptr || sig.data == nullptr) return Value::boolean(false);
         return Value::boolean(rsaVerify(std::vector<uint8_t>(n.data, n.data + n.size), std::vector<uint8_t>(e.data, e.data + e.size), kind, m.data, m.size,
                                         std::vector<uint8_t>(sig.data, sig.data + sig.size), args[5].truthy(), static_cast<size_t>(saltLen), mgf));
+    });
+
+    // ---- Certificates (networking plan, part 4) ----
+
+    // aesCbc(key, iv, data, encrypt): AES-CBC with PKCS#7 padding, for encrypted private keys and
+    // PKCS#12 files; decrypting, null where the padding is wrong (a wrong password, mostly).
+    def("aesCbc", 4, 4, [](VM& vm, int, Value* args) -> Value {
+        const Span key = wholeOf(vm, args[0], "a key"), iv = exactly(vm, args[1], 16, "an IV"), data = wholeOf(vm, args[2], "data");
+        if (key.size != 16 && key.size != 24 && key.size != 32) throw vm.runtimeError(Thrown::IllegalArgumentException, "an AES key is 16, 24 or 32 bytes");
+        std::vector<uint8_t> out;
+        if (!aesCbc(key.data, key.size, iv.data, data.data, data.size, args[3].truthy(), out)) return Value::null();
+        const Value made = newBytes(vm, out.data(), out.size());
+        wipe(out.data(), out.size());
+        return made;
+    });
+
+    // systemRoots(): the certificates the system trusts as roots, as DER; on Windows from its
+    // store of roots (what the "Trusted Root Certification Authorities" show), elsewhere null:
+    // lib/Crypto reads Linux's files itself.
+    def("systemRoots", 0, 0, [](VM& vm, int, Value*) -> Value {
+#ifdef _WIN32
+        HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
+        if (store == nullptr) throw vm.errorOf("IOException", "cannot open the system's store of root certificates");
+        ObjList* list = newList(vm);
+        TempRoot keep(vm, Value::object(list));
+        for (PCCERT_CONTEXT cert = CertEnumCertificatesInStore(store, nullptr); cert != nullptr; cert = CertEnumCertificatesInStore(store, cert)) {
+            if (cert->dwCertEncodingType != X509_ASN_ENCODING) continue;
+            list->values().push_back(newBytes(vm, cert->pbCertEncoded, cert->cbCertEncoded));
+        }
+        CertCloseStore(store, 0);
+        return Value::object(list);
+#else
+        (void)vm;
+        return Value::null();
+#endif
+    });
+
+    // systemRootFor(chain): the chain Windows builds to a root it trusts for a chain (the
+    // certificates' DER one after another, the leaf first), as the same, the root last; null
+    // where it finds none. Windows keeps only some of its trusted roots in the store
+    // systemRoots() reads and fetches the others as a chain needs them (and intermediates its
+    // certificates name); building the chain fetches them. What it gives is only a candidate:
+    // lib/Crypto checks the chain itself. Elsewhere null.
+    def("systemRootFor", 1, 1, [](VM& vm, int, Value* args) -> Value {
+#ifdef _WIN32
+        const Span all = wholeOf(vm, args[0], "chain");
+        std::vector<std::pair<const uint8_t*, DWORD>> certs;
+        size_t at = 0;
+        while (at < all.size) {
+            if (all.size - at < 2 || all.data[at] != 0x30) return Value::null();
+            size_t length = all.data[at + 1], header = 2;
+            if (length & 0x80) {
+                const size_t count = length & 0x7F;
+                if (count < 1 || count > 4 || all.size - at < 2 + count) return Value::null();
+                length = 0;
+                for (size_t i = 0; i < count; i++) length = (length << 8) | all.data[at + 2 + i];
+                header = 2 + count;
+            }
+            if (length > all.size - at - header) return Value::null();
+            certs.emplace_back(all.data + at, static_cast<DWORD>(header + length));
+            at += header + length;
+        }
+        if (certs.empty()) return Value::null();
+        PCCERT_CONTEXT leaf = CertCreateCertificateContext(X509_ASN_ENCODING, certs[0].first, certs[0].second);
+        if (leaf == nullptr) return Value::null();
+        HCERTSTORE given = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, nullptr);
+        for (size_t i = 1; i < certs.size() && given != nullptr; i++)
+            CertAddEncodedCertificateToStore(given, X509_ASN_ENCODING, certs[i].first, certs[i].second, CERT_STORE_ADD_ALWAYS, nullptr);
+        CERT_CHAIN_PARA para{};
+        para.cbSize = sizeof(para);
+        PCCERT_CHAIN_CONTEXT chain = nullptr;
+        Value result = Value::null();
+        if (CertGetCertificateChain(nullptr, leaf, nullptr, given, &para, 0, nullptr, &chain) && chain != nullptr && chain->cChain > 0) {
+            const CERT_SIMPLE_CHAIN* simple = chain->rgpChain[0];
+            const DWORD refused = CERT_TRUST_IS_UNTRUSTED_ROOT | CERT_TRUST_IS_PARTIAL_CHAIN | CERT_TRUST_IS_EXPLICIT_DISTRUST;
+            if (simple->cElement > 0 && (simple->TrustStatus.dwErrorStatus & refused) == 0) {
+                std::vector<uint8_t> joined;
+                for (DWORD i = 0; i < simple->cElement; i++) {
+                    PCCERT_CONTEXT c = simple->rgpElement[i]->pCertContext;
+                    joined.insert(joined.end(), c->pbCertEncoded, c->pbCertEncoded + c->cbCertEncoded);
+                }
+                result = newBytes(vm, joined.data(), joined.size());
+            }
+        }
+        if (chain != nullptr) CertFreeCertificateChain(chain);
+        if (given != nullptr) CertCloseStore(given, 0);
+        CertFreeCertificateContext(leaf);
+        return result;
+#else
+        (void)vm;
+        (void)args;
+        return Value::null();
+#endif
+    });
+
+    // sha1(data): SHA-1, for what X.509 names with it alone (key identifiers, the fingerprints
+    // people quote); never for a signature or a MAC here.
+    def("sha1", 1, 1, [](VM& vm, int, Value* args) -> Value {
+        const Span d = wholeOf(vm, args[0], "data");
+        uint8_t out[20];
+        sha1(out, d.data, d.size);
+        return newBytes(vm, out, 20);
     });
 
     // ---- What every secret needs ----

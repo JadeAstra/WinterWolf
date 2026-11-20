@@ -17,10 +17,17 @@
 // their raw numbers; reading and writing them as DER, PEM and PKCS#8 comes with the
 // certificates (part 4).
 
+// Any kind of public key: RsaPublicKey, P256PublicKey, P384PublicKey, Ed25519PublicKey or
+// X25519PublicKey. PublicKeys reads and writes them as files.
+interface PublicKey
+
+// Any kind of private key, whose publicKey is its pair; PrivateKeys reads and writes them as files.
+interface PrivateKey
+
 // ---- X25519 ----
 
 // An X25519 private key: 32 random bytes (RFC 7748).
-class X25519PrivateKey {
+class X25519PrivateKey : PrivateKey {
   private val secret : Bytes
 
   // From its 32 bytes; an IllegalArgumentException for another size.
@@ -52,7 +59,7 @@ class X25519PrivateKey {
 }
 
 // An X25519 public key: 32 bytes.
-class X25519PublicKey {
+class X25519PublicKey : PublicKey {
   private val value : Bytes
   // From its 32 bytes; an IllegalArgumentException for another size.
   fun init(bytes : Bytes) {
@@ -68,7 +75,7 @@ class X25519PublicKey {
 
 // An Ed25519 private key: a 32-byte seed (RFC 8032). Its signatures are 64 bytes, and the same
 // message always gives the same signature.
-class Ed25519PrivateKey {
+class Ed25519PrivateKey : PrivateKey {
   private val seed : Bytes
 
   // From its 32-byte seed; an IllegalArgumentException for another size.
@@ -94,7 +101,7 @@ class Ed25519PrivateKey {
 }
 
 // An Ed25519 public key: 32 bytes.
-class Ed25519PublicKey {
+class Ed25519PublicKey : PublicKey {
   private val value : Bytes
   // From its 32 bytes; an IllegalArgumentException for another size.
   fun init(bytes : Bytes) {
@@ -109,87 +116,124 @@ class Ed25519PublicKey {
   fun verify(message : Bytes, signature : Bytes) : bool => __crypto.ed25519Verify(value, message, signature)
 }
 
-// ---- P-256 ----
+// ---- P-256 and P-384 ----
 
 // How an ECDSA signature is written: der, the ASN.1 SEQUENCE of two INTEGERs that X.509 and TLS
-// use; raw, r and s of 32 bytes each one after the other (IEEE P1363, as JOSE and WebCrypto use).
+// use; raw, r and s one after the other, each the curve's size (IEEE P1363, as JOSE and WebCrypto
+// use).
 enum EcdsaFormat { der, raw }
 
-// A P-256 private key (secp256r1): a number from 1 to n - 1, as 32 bytes, for ECDH and ECDSA.
-class P256PrivateKey {
-  private val secret : Bytes
+// A private key of a NIST prime curve: a number from 1 to n - 1, for ECDH and ECDSA. P256PrivateKey
+// and P384PrivateKey are the two kinds.
+abstract class EcPrivateKey(internal val curve : int, bytes : Bytes) : PrivateKey {
+  internal val secret : Bytes = Bytes(bytes)
 
-  // From its 32 bytes, big-endian; an IllegalArgumentException where they are no key.
-  fun init(bytes : Bytes) {
-    if (!__crypto.p256ValidPrivate(bytes)) { throw IllegalArgumentException("a P-256 private key is 32 bytes, a number from 1 to n - 1") }
-    this.secret = Bytes(bytes)
-  }
-
-  static {
-    // A new key, from SecureRandom.
-    fun generate() : P256PrivateKey {
-      while (true) {
-        val candidate = SecureRandom.bytes(32)
-        if (__crypto.p256ValidPrivate(candidate)) { return P256PrivateKey(candidate) }
-      }
+  init {
+    if (!__crypto.ecValidPrivate(curve, bytes)) {
+      throw IllegalArgumentException("a P-$curve private key is ${curve / 8} bytes, a number from 1 to n - 1")
     }
   }
 
-  // Its public key.
-  val publicKey : P256PublicKey
-    get() => P256PublicKey(__crypto.p256Public(secret))
-  // Its 32 bytes, a copy.
+  // Its bytes, big-endian, a copy.
   val bytes : Bytes
     get() => Bytes(secret)
+  // Its public key.
+  abstract val publicKey : EcPublicKey
 
-  // ECDH: the shared secret (the x of the shared point, 32 bytes) with the holder of `peer`'s
-  // private key.
-  fun agree(peer : P256PublicKey) : Bytes {
-    val shared = __crypto.p256Ecdh(secret, peer.bytes)
+  // ECDH: the shared secret (the x of the shared point) with the holder of `peer`'s private key,
+  // which must be of the same curve.
+  fun agree(peer : EcPublicKey) : Bytes {
+    if (peer.curve != curve) { throw IllegalArgumentException("a P-$curve key cannot agree with a P-${peer.curve} one") }
+    val shared = __crypto.ecEcdh(curve, secret, peer.point)
     if (shared == null) { throw IllegalArgumentException("the shared point is at infinity") }
     return shared!!
   }
 
-  // An ECDSA signature of the message hashed with `hash` (SHA-256 unless said), its nonce
-  // made from the key and the message (RFC 6979): the same message gives the same signature.
-  fun sign(message : Bytes, hash : Hash = Sha256(), format : EcdsaFormat = EcdsaFormat.der) : Bytes {
-    val rs = __crypto.p256Sign(secret, hash.kind, message)
+  // An ECDSA signature of the message hashed with `hash` (by default SHA-256 for P-256, SHA-384
+  // for P-384), its nonce made from the key and the message (RFC 6979): the same message gives
+  // the same signature.
+  fun sign(message : Bytes, hash : Hash? = null, format : EcdsaFormat = EcdsaFormat.der) : Bytes {
+    val used = hash ?: __curveHash(curve)
+    val rs = __crypto.ecSign(curve, secret, used.kind, message)
     return format == EcdsaFormat.raw ? rs : __derSignature(rs)
   }
 }
 
-// A P-256 public key: a point on the curve.
-class P256PublicKey {
-  private val point : Bytes
+// A public key of a NIST prime curve: a point on it.
+abstract class EcPublicKey(internal val curve : int, bytes : Bytes) : PublicKey {
+  internal val point : Bytes = __checkedPoint(curve, bytes)
 
-  // From its encoding: 65 bytes 04 X Y, or 33 bytes 02 X or 03 X (compressed). An
-  // IllegalArgumentException where it is no point of the curve.
-  fun init(bytes : Bytes) {
-    val checked = __crypto.p256Point(bytes)
-    if (checked == null) { throw IllegalArgumentException("not a point of P-256") }
-    this.point = checked!!
-  }
-
-  // Its 65 bytes, 04 X Y, a copy.
+  // Its bytes, 04 X Y (65 for P-256, 97 for P-384), a copy.
   val bytes : Bytes
     get() => Bytes(point)
-  // Its 33 bytes, compressed: 02 or 03 (y even or odd), then X.
+  // Its bytes compressed: 02 or 03 (y even or odd), then X.
   val compressed : Bytes
     get() {
-      val out = Bytes(33)
-      out[0] = (2 + (point[64].toInt() & 1)).toByte()
-      out.copyFrom(point, 1, 1, 1, 1, 32)
+      val size = curve / 8
+      val out = Bytes(size + 1)
+      out[0] = (2 + (point[2 * size].toInt() & 1)).toByte()
+      out.copyFrom(point, 1, 1, 1, 1, size)
       return out
     }
 
-  // Whether `signature` is this key's ECDSA signature of the message hashed with `hash`. A DER
-  // signature is read strictly: anything but the one encoding of the numbers is false.
-  fun verify(message : Bytes, signature : Bytes, hash : Hash = Sha256(), format : EcdsaFormat = EcdsaFormat.der) : bool {
-    val rs = format == EcdsaFormat.raw ? signature : __rawSignature(signature)
-    if (rs == null or rs!!.size != 64) { return false }
-    return __crypto.p256Verify(point, hash.kind, message, rs!!)
+  // Whether `signature` is this key's ECDSA signature of the message hashed with `hash` (by
+  // default the curve's). A DER signature is read strictly: anything but the one encoding of the
+  // numbers is false.
+  fun verify(message : Bytes, signature : Bytes, hash : Hash? = null, format : EcdsaFormat = EcdsaFormat.der) : bool {
+    val used = hash ?: __curveHash(curve)
+    val rs = format == EcdsaFormat.raw ? signature : __rawSignature(signature, curve / 8)
+    if (rs == null or rs!!.size != curve / 4) { return false }
+    return __crypto.ecVerify(curve, point, used.kind, message, rs!!)
   }
 }
+
+// A P-256 private key (secp256r1): 32 bytes.
+class P256PrivateKey(bytes : Bytes) : EcPrivateKey(256, bytes) {
+  static {
+    // A new key, from SecureRandom.
+    fun generate() : P256PrivateKey => P256PrivateKey(__newEcKey(256))
+  }
+  // Its public key.
+  override val publicKey : P256PublicKey
+    get() => P256PublicKey(__crypto.ecPublic(256, secret))
+}
+
+// A P-256 public key: 65 bytes 04 X Y, or 33 bytes 02 X or 03 X (compressed). An
+// IllegalArgumentException where it is no point of the curve.
+class P256PublicKey(bytes : Bytes) : EcPublicKey(256, bytes)
+
+// A P-384 private key (secp384r1): 48 bytes.
+class P384PrivateKey(bytes : Bytes) : EcPrivateKey(384, bytes) {
+  static {
+    // A new key, from SecureRandom.
+    fun generate() : P384PrivateKey => P384PrivateKey(__newEcKey(384))
+  }
+  // Its public key.
+  override val publicKey : P384PublicKey
+    get() => P384PublicKey(__crypto.ecPublic(384, secret))
+}
+
+// A P-384 public key: 97 bytes 04 X Y, or 49 bytes 02 X or 03 X (compressed). An
+// IllegalArgumentException where it is no point of the curve.
+class P384PublicKey(bytes : Bytes) : EcPublicKey(384, bytes)
+
+// The point, checked on the curve, as 04 X Y.
+fun __checkedPoint(curve : int, bytes : Bytes) : Bytes {
+  val checked = __crypto.ecPoint(curve, bytes)
+  if (checked == null) { throw IllegalArgumentException("not a point of P-$curve") }
+  return checked!!
+}
+
+// A new private key of the curve, from SecureRandom.
+fun __newEcKey(curve : int) : Bytes {
+  while (true) {
+    val candidate = SecureRandom.bytes(curve / 8)
+    if (__crypto.ecValidPrivate(curve, candidate)) { return candidate }
+  }
+}
+
+// The hash a curve's signatures use by default.
+fun __curveHash(curve : int) : Hash => curve == 384 ? Sha384() : Sha256()
 
 // ---- RSA ----
 
@@ -220,7 +264,7 @@ class RsaPadding {
 }
 
 // An RSA private key: its numbers, big-endian (n, e, d, and for speed p, q, dP, dQ and qInv).
-class RsaPrivateKey {
+class RsaPrivateKey : PrivateKey {
   internal val parts : List<Bytes?>
 
   // From its numbers; p, q, dp, dq and qinv may be left out (signing is then about four times
@@ -262,7 +306,7 @@ class RsaPrivateKey {
 }
 
 // An RSA public key: its modulus n and exponent e, big-endian.
-class RsaPublicKey {
+class RsaPublicKey : PublicKey {
   private val n : Bytes
   private val e : Bytes
 
@@ -301,10 +345,11 @@ class RsaPublicKey {
 
 // ---- ECDSA's DER form ----
 
-// r and s (32 bytes each) as DER: SEQUENCE { INTEGER r, INTEGER s }, each in its fewest bytes.
+// r and s (each half of `rs`) as DER: SEQUENCE { INTEGER r, INTEGER s }, each in its fewest bytes.
 fun __derSignature(rs : Bytes) : Bytes {
-  val r = __derInteger(rs, 0)
-  val s = __derInteger(rs, 32)
+  val half = rs.size / 2
+  val r = __derInteger(rs, 0, half)
+  val s = __derInteger(rs, half, half)
   val out = Bytes(2 + r.size + s.size)
   out[0] = 0x30.toByte()
   out[1] = (r.size + s.size).toByte()
@@ -313,43 +358,43 @@ fun __derSignature(rs : Bytes) : Bytes {
   return out
 }
 
-// The 32 bytes at `at` as a DER INTEGER: leading zeros dropped, one 0 put back where the first
+// The `size` bytes at `at` as a DER INTEGER: leading zeros dropped, one 0 put back where the first
 // byte left would read as negative.
-fun __derInteger(rs : Bytes, at : int) : Bytes {
+fun __derInteger(rs : Bytes, at : int, size : int) : Bytes {
   var first = at
-  while (first < at + 31 and rs[first].toInt() == 0) { first++ }
+  while (first < at + size - 1 and rs[first].toInt() == 0) { first++ }
   val pad = rs[first].toInt() >= 0x80 ? 1 : 0
-  val size = at + 32 - first
-  val out = Bytes(2 + pad + size)
+  val count = at + size - first
+  val out = Bytes(2 + pad + count)
   out[0] = 0x02.toByte()
-  out[1] = (pad + size).toByte()
-  out.copyFrom(rs, first, 1, 2 + pad, 1, size)
+  out[1] = (pad + count).toByte()
+  out.copyFrom(rs, first, 1, 2 + pad, 1, count)
   return out
 }
 
-// r and s, 32 bytes each, from DER read strictly (one encoding of the numbers alone, nothing
+// r and s, `size` bytes each, from DER read strictly (one encoding of the numbers alone, nothing
 // after it); null where it is not that.
-fun __rawSignature(der : Bytes) : Bytes? {
+fun __rawSignature(der : Bytes, size : int) : Bytes? {
   if (der.size < 8 or der[0].toInt() != 0x30 or der[1].toInt() >= 0x80 or der[1].toInt() != der.size - 2) { return null }
-  val out = Bytes(64)
+  val out = Bytes(2 * size)
   var at = 2
   for (k in 0..<2) {
     if (at + 2 > der.size or der[at].toInt() != 0x02) { return null }
-    val size = der[at + 1].toInt()
-    if (size == 0 or size >= 0x80 or at + 2 + size > der.size) { return null }
+    val length = der[at + 1].toInt()
+    if (length == 0 or length >= 0x80 or at + 2 + length > der.size) { return null }
     val start = at + 2
     // Negative, or a needless leading zero: not DER.
     if (der[start].toInt() >= 0x80) { return null }
-    if (size > 1 and der[start].toInt() == 0 and der[start + 1].toInt() < 0x80) { return null }
+    if (length > 1 and der[start].toInt() == 0 and der[start + 1].toInt() < 0x80) { return null }
     var from = start
-    var count = size
-    if (der[start].toInt() == 0 and size > 1) {
+    var count = length
+    if (der[start].toInt() == 0 and length > 1) {
       from++
       count--
     }
-    if (count > 32) { return null }
-    out.copyFrom(der, from, 1, 32 * k + 32 - count, 1, count)
-    at = start + size
+    if (count > size) { return null }
+    out.copyFrom(der, from, 1, size * k + size - count, 1, count)
+    at = start + length
   }
   return at == der.size ? out : null
 }

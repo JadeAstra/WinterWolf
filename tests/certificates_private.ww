@@ -1,0 +1,92 @@
+// A private CA's chains (tests/data/certs/private, made by tools/crypto/private_ca.sh with
+// OpenSSL), checked at 2027-01-01: what is taken (P-256 and P-384 roots, an RSA intermediate,
+// RSA-PSS, Ed25519, wildcards, IP addresses, name constraints) and what is refused, each with the
+// reason given.
+import Crypto.*
+
+val dir = "data/certs/private"
+val at = Instant.parse("2027-01-01T00:00:00Z")
+fun read(name : string) : List<Certificate> => Certificate.allFromPem(FilePath("$dir/$name.pem").readText())
+val store = TrustStore(read("root") + read("root384"))
+val p256Only = TrustStore(read("root"))
+
+fun check(name : string, host : string? = "www.example.test", purpose : string = ExtendedKeyUsage.serverAuth, trust : TrustStore = store) {
+  try {
+    val path = trust.verify(read(name), host, at, purpose)
+    print("$name${host == null ? "" : " for " + host!!}: taken, ${path.size} long, to ${path.last().subject.commonName}")
+  } catch (e : CertificateException) {
+    print("$name${host == null ? "" : " for " + host!!}: ${e.message}")
+  }
+}
+
+check("good")
+check("good", "EXAMPLE.test")
+check("good", "192.0.2.7")
+check("good", "[2001:db8::7]")
+check("good", "192.0.2.8")
+check("good", null)
+check("wildcard", "a.apps.example.test")
+check("wildcard", "apps.example.test")
+check("wildcard", "a.b.apps.example.test")
+check("ed25519")
+check("pss")
+check("client", "client.example.test")
+check("client", "client.example.test", ExtendedKeyUsage.clientAuth)
+check("ncok", "a.example.test")
+check("ed25519", "www.example.test", ExtendedKeyUsage.serverAuth, p256Only)
+
+check("sha1")
+check("expired")
+check("future")
+check("unknown")
+check("nosan")
+check("weak")
+check("byleaf")
+check("pathlen")
+check("nokeycertsign")
+check("ca-as-leaf", null)
+check("ncevil", "evil.test")
+check("ncsecret", "x.secret.example.test")
+
+// Not certificates.
+val good = read("good")
+for (bad in [good[0].der[0..<100], Bytes(0), "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".toBytes()]) {
+  try {
+    if (bad.size > 20 and bad[0].toInt() == '-'.code) { Certificate.fromPem(bad.decodeToString()) } else { Certificate(bad) }
+    print("read")
+  } catch (e : CertificateException) {
+    print(e.message)
+  }
+}
+try { Certificate.fromPem("no PEM here") } catch (e : CertificateException) { print(e.message) }
+// expect: good for www.example.test: taken, 3 long, to Test Root P-256
+// expect: good for EXAMPLE.test: taken, 3 long, to Test Root P-256
+// expect: good for 192.0.2.7: taken, 3 long, to Test Root P-256
+// expect: good for [2001:db8::7]: taken, 3 long, to Test Root P-256
+// expect: good for 192.0.2.8: the certificate CN=www.example.test, O=WinterWolf Test: it is not for 192.0.2.8 (it is for www.example.test, example.test, 192.0.2.7, 2001:db8::7)
+// expect: good: taken, 3 long, to Test Root P-256
+// expect: wildcard for a.apps.example.test: taken, 3 long, to Test Root P-256
+// expect: wildcard for apps.example.test: the certificate CN=apps, O=WinterWolf Test: it is not for apps.example.test (it is for *.apps.example.test)
+// expect: wildcard for a.b.apps.example.test: the certificate CN=apps, O=WinterWolf Test: it is not for a.b.apps.example.test (it is for *.apps.example.test)
+// expect: ed25519 for www.example.test: taken, 2 long, to Test Root P-384
+// expect: pss for www.example.test: taken, 3 long, to Test Root P-256
+// expect: client for client.example.test: the certificate CN=client.example.test, O=WinterWolf Test: its extended key usage does not have serverAuth
+// expect: client for client.example.test: taken, 3 long, to Test Root P-256
+// expect: ncok for a.example.test: taken, 3 long, to Test Root P-256
+// expect: ed25519 for www.example.test: no issuer of CN=www.example.test, O=WinterWolf Test (CN=Test Root P-384, O=WinterWolf Test) is trusted or given
+// expect: sha1 for www.example.test: the certificate CN=www.example.test, O=WinterWolf Test: it is signed with SHA-1, which is no longer trusted
+// expect: expired for www.example.test: the certificate CN=www.example.test, O=WinterWolf Test: it expired at 2026-12-01T00:00:00Z
+// expect: future for www.example.test: the certificate CN=www.example.test, O=WinterWolf Test: it is not good until 2028-01-01T00:00:00Z
+// expect: unknown for www.example.test: the certificate CN=www.example.test, O=WinterWolf Test: a critical extension not known here: 1.2.3.4
+// expect: nosan for www.example.test: the certificate CN=www.example.test, O=WinterWolf Test: it has no subject alternative names (the common name is not looked at)
+// expect: weak for www.example.test: the certificate CN=www.example.test, O=WinterWolf Test: its RSA key has 1024 bits (2048 or more are trusted)
+// expect: byleaf for www.example.test: the CA CN=www.example.test, O=WinterWolf Test: it is not a CA (its basic constraints do not make it one)
+// expect: pathlen for www.example.test: the CA CN=Test Intermediate RSA, O=WinterWolf Test: its path length is 0, and 1 CA is below it
+// expect: nokeycertsign for www.example.test: the CA CN=Test No keyCertSign, O=WinterWolf Test: its key usage does not have keyCertSign
+// expect: ca-as-leaf: the certificate CN=Test Intermediate RSA, O=WinterWolf Test: it is a CA, not a server's certificate
+// expect: ncevil for evil.test: the certificate CN=evil.test, O=WinterWolf Test: the name evil.test is not permitted (name constraints of CN=Test Constrained, O=WinterWolf Test)
+// expect: ncsecret for x.secret.example.test: the certificate CN=x.secret.example.test, O=WinterWolf Test: the name x.secret.example.test is excluded (name constraints of CN=Test Constrained, O=WinterWolf Test)
+// expect: not a certificate: a value of 740 bytes where 96 are left, at 0
+// expect: not a certificate: DER ends where a value should start
+// expect: not a certificate: tag 0x0 where 0x30 belongs, at 0
+// expect: no CERTIFICATE in the PEM text

@@ -1,0 +1,65 @@
+// PKCS#12 files (tests/data/certs/pkcs12, made by tools/crypto/pkcs12.sh make): OpenSSL's and
+// keytool's are read, keys and chains as they wrote them; the older form and a wrong password are
+// refused; what ww writes reads back the same. (tools/crypto/pkcs12.sh check has OpenSSL and keytool
+// read what ww writes.)
+import Crypto.*
+
+val dir = "data/certs/pkcs12"
+fun bytes(name : string) : Bytes => FilePath("$dir/$name").readBytes()
+fun keyDer(k : PrivateKey?) : Bytes => PrivateKeys.toDer(k!!)
+
+val fromOpenSsl = Pkcs12.read(bytes("openssl.p12"), "sesame")
+val server = fromOpenSsl[0]
+print(fromOpenSsl.size, server.name, server.key is P384PrivateKey, server.certificates.map { it.subject.commonName })
+// expect: 1 server true ["server.example.test", "PKCS12 Test Intermediate", "PKCS12 Test Root"]
+print(keyDer(server.key) == keyDer(PrivateKeys.fromPem(FilePath("$dir/openssl-key.pem").readText())))
+// expect: true
+// The chain checks up to its root.
+val root = Certificate.fromPem(FilePath("$dir/root.pem").readText())
+print(TrustStore([root]).verify(server.certificates, "server.example.test", server.certificates[0].notBefore + 60.seconds).size)
+// expect: 3
+
+val fromKeytool = Pkcs12.read(bytes("keytool.p12"), "sesame")
+for (e in fromKeytool) { print(e.name, e.key == null ? "no key" : e.key is RsaPrivateKey ? "RSA" : e.key is P256PrivateKey ? "P-256" : "?", e.certificates.map { it.subject.commonName }) }
+// expect: ec P-256 ["keytool EC"]
+// expect: rsa RSA ["keytool RSA"]
+// expect: root no key ["PKCS12 Test Root"]
+val keytoolKeys = Pem.read(FilePath("$dir/keytool-keys.pem").readText()).map { PrivateKeys.fromDer(it.der) }
+print(fromKeytool.filter { it.key != null }.map { keyDer(it.key) } == keytoolKeys.map { keyDer(it) })
+// expect: true
+
+fun refusal(block : () -> unit) : string {
+  try {
+    block()
+    return "read"
+  } catch (e : CertificateException) {
+    return e.message ?: ""
+  }
+}
+print(refusal { Pkcs12.read(bytes("openssl.p12"), "Sesame") })
+// expect: the password is wrong (or the file damaged)
+print(refusal { Pkcs12.read(bytes("openssl-legacy.p12"), "sesame") })
+// expect: not a PKCS#12 file read here: a MAC of SHA-1, the older form, which is not read here
+val damaged = bytes("keytool.p12")
+damaged[damaged.size / 2] = (damaged[damaged.size / 2].toInt() ^ 0x40).toByte()
+print(refusal { Pkcs12.read(damaged, "sesame") }.startsWith("the password is wrong") or refusal { Pkcs12.read(damaged, "sesame") }.startsWith("not a PKCS#12"))
+// expect: true
+print(refusal { Pkcs12.read(Bytes(10), "sesame") })
+// expect: not a PKCS#12 file read here: tag 0x0 where 0x30 belongs, at 0
+
+// Written here, read back: the same keys, chains and names, under a password not in ASCII.
+val all = fromOpenSsl + fromKeytool
+val written = Pkcs12.write(all, "pass wörd", 1000)
+val back = Pkcs12.read(written, "pass wörd")
+print(back.map { it.name }, back.map { it.key == null ? null : keyDer(it.key) } == all.map { it.key == null ? null : keyDer(it.key) },
+      back.map { it.certificates } == all.map { it.certificates })
+// expect: ["server", "ec", "rsa", "root"] true true
+val key = P256PrivateKey.generate()
+for (bad in [{ Pkcs12.write([Pkcs12Entry(key, [server.certificates[0]])], "x", 1) }, { Pkcs12.write([Pkcs12Entry(null, server.certificates)], "x", 1) },
+             { Pkcs12.write([Pkcs12Entry(key, [])], "x", 1) }, { Pkcs12.write([], "x", 0) }]) {
+  try { bad() } catch (e : IllegalArgumentException) { print(e.message) }
+}
+// expect: the first certificate is not the key's (its public key differs)
+// expect: an entry with no key is one certificate, not 3
+// expect: a key's entry has its certificate
+// expect: iterations are 1 or more, not 0

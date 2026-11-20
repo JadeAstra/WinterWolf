@@ -297,3 +297,43 @@ std::unique_ptr<Hash> newHash(HashKind kind, size_t shakeSize) {
 
 }  // namespace crypto
 }  // namespace ww
+
+namespace ww {
+namespace crypto {
+
+// SHA-1 (FIPS 180-4), whole messages only: for what X.509 names with it (key identifiers, the
+// fingerprints people quote). Broken for signatures, and used for none here.
+void sha1(uint8_t out[20], const uint8_t* data, size_t size) {
+    uint32_t h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    auto block = [&h](const uint8_t* p) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; i++) w[i] = load32be(p + 4 * i);
+        for (int i = 16; i < 80; i++) w[i] = rotl32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; i++) {
+            const uint32_t f = i < 20 ? (b & c) | (~b & d) : i < 40 ? b ^ c ^ d : i < 60 ? (b & c) | (b & d) | (c & d) : b ^ c ^ d;
+            const uint32_t k = i < 20 ? 0x5A827999 : i < 40 ? 0x6ED9EBA1 : i < 60 ? 0x8F1BBCDC : 0xCA62C1D6;
+            const uint32_t t = rotl32(a, 5) + f + e + k + w[i];
+            e = d;
+            d = c;
+            c = rotl32(b, 30);
+            b = a;
+            a = t;
+        }
+        h[0] += a, h[1] += b, h[2] += c, h[3] += d, h[4] += e;
+    };
+    size_t at = 0;
+    for (; at + 64 <= size; at += 64) block(data + at);
+    uint8_t last[128] = {};
+    const size_t rest = size - at;
+    std::memcpy(last, data + at, rest);
+    last[rest] = 0x80;
+    const size_t total = rest + 9 <= 64 ? 64 : 128;
+    store64be(last + total - 8, uint64_t(size) * 8);
+    block(last);
+    if (total == 128) block(last + 64);
+    for (int i = 0; i < 5; i++) store32be(out + 4 * i, h[i]);
+}
+
+}  // namespace crypto
+}  // namespace ww

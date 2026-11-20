@@ -81,6 +81,9 @@ public:
 
 // A new hash of the kind, or null for a number that is none; `shakeSize` is a SHAKE's digest size.
 std::unique_ptr<Hash> newHash(HashKind kind, size_t shakeSize = 0);
+// SHA-1 of a whole message, for what X.509 names with it (key identifiers, fingerprints); never for
+// signatures.
+void sha1(uint8_t out[20], const uint8_t* data, size_t size);
 
 // ---- MACs and key derivation ----
 
@@ -144,12 +147,18 @@ public:
     // Counter mode from `counter` (its last 4 bytes counting up, wrapping as GCM's do): `size`
     // bytes of `in` to `out`.
     void ctr32(uint8_t counter[16], const uint8_t* in, uint8_t* out, size_t size) const;
+    // One 16-byte block decrypted (the inverse cipher), for CBC.
+    void decrypt(const uint8_t in[16], uint8_t out[16]) const;
     int rounds() const { return rounds_; }
 
 private:
     alignas(16) uint8_t schedule_[15 * 16];
     int rounds_;
 };
+
+// AES-CBC with PKCS#7 padding, as encrypted private keys and PKCS#12 files use it (part 4); not an
+// AEAD, and not offered as one. Decrypting: false where the padding is wrong (a wrong password).
+bool aesCbc(const uint8_t* key, size_t keySize, const uint8_t iv[16], const uint8_t* in, size_t size, bool encrypt, std::vector<uint8_t>& out);
 
 // ChaCha20 (RFC 8439): the keystream from block `counter` XORed over `size` bytes.
 void chacha20(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter, const uint8_t* in, uint8_t* out, size_t size);
@@ -177,6 +186,13 @@ void p256Public(uint8_t out65[65], const uint8_t d[32]);
 bool p256Ecdh(uint8_t out32[32], const uint8_t d[32], const uint8_t point65[65]);
 void p256Sign(uint8_t r32[32], uint8_t s32[32], const uint8_t d[32], const uint8_t* hash, size_t hashSize, const Hash& prototype);
 bool p256Verify(const uint8_t point65[65], const uint8_t* hash, size_t hashSize, const uint8_t r32[32], const uint8_t s32[32]);
+// The same for P-384 (part 4: certificates are signed with it): 48-byte numbers, 97-byte points.
+bool p384Point(const uint8_t* bytes, size_t size, uint8_t out97[97]);
+bool p384ValidPrivate(const uint8_t d[48]);
+void p384Public(uint8_t out97[97], const uint8_t d[48]);
+bool p384Ecdh(uint8_t out48[48], const uint8_t d[48], const uint8_t point97[97]);
+void p384Sign(uint8_t r48[48], uint8_t s48[48], const uint8_t d[48], const uint8_t* hash, size_t hashSize, const Hash& prototype);
+bool p384Verify(const uint8_t point97[97], const uint8_t* hash, size_t hashSize, const uint8_t r48[48], const uint8_t s48[48]);
 
 // RSA (RFC 8017): a private key's numbers, big-endian with no leading zeros; p, q, dp, dq and
 // qinv may be empty (d alone is then used, without CRT).

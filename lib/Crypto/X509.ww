@@ -1,0 +1,1116 @@
+// ---- Certificates: X.509 (networking plan, part 4, 2026-11-20) ----
+//
+//   val chain = Certificate.allFromPem(FilePath("chain.pem").readText())   // the leaf first
+//   val path = TrustStore.system().verify(chain, host = "example.com")     // leaf to root
+//
+// Certificates are read as RFC 5280 has them (DER only), and a chain is checked as the web's public
+// key infrastructure checks it (RFC 5280's path rules with the CA/Browser Forum's choices): every
+// certificate's dates; basic constraints, path lengths and key usage of each CA; extended key usage;
+// name constraints; and the host name by RFC 6125, from the subject alternative names alone (never
+// the common name), with a wildcard only as the whole first label. Signatures: RSA PKCS#1 v1.5 and
+// PSS with SHA-256, SHA-384 or SHA-512 (keys of 2048 bits or more), ECDSA on P-256 or P-384,
+// Ed25519. SHA-1 and MD5 are refused, as browsers refuse them. Every refusal says why.
+
+// A certificate that cannot be read, or a chain that is not trusted: the message says why.
+class CertificateException(message : string) : IOException(message)
+
+// What a certificate's key may be used for (the key usage extension).
+enum KeyUsage { digitalSignature, contentCommitment, keyEncipherment, dataEncipherment, keyAgreement, keyCertSign, crlSign, encipherOnly, decipherOnly }
+
+// The purposes of the extended key usage extension, as the object identifiers it holds.
+object ExtendedKeyUsage {
+  // A TLS server (what TrustStore.verify checks for unless told otherwise).
+  const serverAuth = "1.3.6.1.5.5.7.3.1"
+  // A TLS client.
+  const clientAuth = "1.3.6.1.5.5.7.3.2"
+  const codeSigning = "1.3.6.1.5.5.7.3.3"
+  const emailProtection = "1.3.6.1.5.5.7.3.4"
+  const timeStamping = "1.3.6.1.5.5.7.3.8"
+  const ocspSigning = "1.3.6.1.5.5.7.3.9"
+  // Any purpose; not taken in place of a named one (the CA/Browser Forum forbids it).
+  const any = "2.5.29.37.0"
+}
+
+// The object identifiers of names' attributes, extensions and signature algorithms.
+object X509Oid {
+  const commonName = "2.5.4.3"
+  const surname = "2.5.4.4"
+  const serialNumber = "2.5.4.5"
+  const country = "2.5.4.6"
+  const locality = "2.5.4.7"
+  const state = "2.5.4.8"
+  const street = "2.5.4.9"
+  const organization = "2.5.4.10"
+  const organizationalUnit = "2.5.4.11"
+  const title = "2.5.4.12"
+  const givenName = "2.5.4.42"
+  const domainComponent = "0.9.2342.19200300.100.1.25"
+  const userId = "0.9.2342.19200300.100.1.1"
+  const emailAddress = "1.2.840.113549.1.9.1"
+
+  const subjectKeyId = "2.5.29.14"
+  const keyUsage = "2.5.29.15"
+  const subjectAltName = "2.5.29.17"
+  const issuerAltName = "2.5.29.18"
+  const basicConstraints = "2.5.29.19"
+  const nameConstraints = "2.5.29.30"
+  const crlDistributionPoints = "2.5.29.31"
+  const certificatePolicies = "2.5.29.32"
+  const policyMappings = "2.5.29.33"
+  const authorityKeyId = "2.5.29.35"
+  const policyConstraints = "2.5.29.36"
+  const extendedKeyUsage = "2.5.29.37"
+  const inhibitAnyPolicy = "2.5.29.54"
+  const authorityInfoAccess = "1.3.6.1.5.5.7.1.1"
+  const signedCertificateTimestamps = "1.3.6.1.4.1.11129.2.4.2"
+
+  const md5WithRsa = "1.2.840.113549.1.1.4"
+  const sha1WithRsa = "1.2.840.113549.1.1.5"
+  const rsaPss = "1.2.840.113549.1.1.10"
+  const sha256WithRsa = "1.2.840.113549.1.1.11"
+  const sha384WithRsa = "1.2.840.113549.1.1.12"
+  const sha512WithRsa = "1.2.840.113549.1.1.13"
+  const ecdsaWithSha1 = "1.2.840.10045.4.1"
+  const ecdsaWithSha256 = "1.2.840.10045.4.3.2"
+  const ecdsaWithSha384 = "1.2.840.10045.4.3.3"
+  const ecdsaWithSha512 = "1.2.840.10045.4.3.4"
+  const ed25519 = "1.3.101.112"
+  const sha256 = "2.16.840.1.101.3.4.2.1"
+  const sha384 = "2.16.840.1.101.3.4.2.2"
+  const sha512 = "2.16.840.1.101.3.4.2.3"
+  const mgf1 = "1.2.840.113549.1.1.8"
+}
+
+// ---- Names ----
+
+// One attribute of a name: CN=example.com is X509Oid.commonName and "example.com".
+data NameAttribute(val oid : string, val value : string) {
+  // Its short name as RFC 4514 writes it (CN, O, OU, C, L, ST, ...), or its object identifier.
+  val label : string
+    get() => __attributeLabel(oid)
+}
+
+// A distinguished name (an issuer or a subject): relative names from the most general (often
+// the country) to the most particular (often CN), each of one attribute or more. Two names are
+// equal as RFC 5280 compares them: case, and spaces at the ends and inside, do not count.
+class DistinguishedName {
+  // The name as DER, as the certificate has it.
+  val der : Bytes
+  // The relative names, most general first.
+  val parts : List<List<NameAttribute>>
+  private val key : string
+
+  // From its DER (a SEQUENCE of SETs). A DerException where it is not a name.
+  fun init(der : Bytes) throws DerException {
+    this.der = der
+    val all : open List<List<NameAttribute>> = []
+    val r = DerReader(der).sequence()
+    while (!r.isEmpty) {
+      val set = r.set()
+      val rdn : open List<NameAttribute> = []
+      while (!set.isEmpty) {
+        val pair = set.sequence()
+        val oid = pair.oid()
+        val v = pair.next()
+        pair.done()
+        rdn.add(NameAttribute(oid, __attributeValue(v)))
+      }
+      if (rdn.isEmpty()) { throw DerException("a relative name with no attributes") }
+      all.add(rdn)
+    }
+    parts = all
+    key = all.map { rdn -> rdn.map { it.oid + "=" + __foldName(it.value) }.sorted().join("+") }.join("\u{1}")
+  }
+
+  // Whether it has no relative names (a leaf may have an empty subject and its names in the
+  // subject alternative names).
+  val isEmpty : bool
+    get() => parts.isEmpty()
+  // The values of an attribute, most general first.
+  fun valuesOf(oid : string) : List<string> => parts.flatMap { rdn -> rdn.filter { it.oid == oid }.map { it.value } }
+  // The most particular common name (CN), or null.
+  val commonName : string?
+    get() => valuesOf(X509Oid.commonName).lastOrNull()
+
+  // Whether `other` starts with this name's relative names (a name constraint's subtree).
+  fun contains(other : DistinguishedName) : bool {
+    if (other.parts.size < parts.size) { return false }
+    for (i in 0..<parts.size) {
+      val a = parts[i].map { it.oid + "=" + __foldName(it.value) }.sorted()
+      val b = other.parts[i].map { it.oid + "=" + __foldName(it.value) }.sorted()
+      if (a != b) { return false }
+    }
+    return true
+  }
+
+  op ==(other : any?) : bool => other is DistinguishedName and other.key == key
+  fun hashCode() : int => key.hashCode()
+
+  // As RFC 4514 writes it, the most particular first: CN=example.com, O=Example, C=US.
+  override fun toString() : string =>
+    parts.reversed().map { rdn -> rdn.map { it.label + "=" + __escapeName(it.value) }.join("+") }.join(", ")
+}
+
+// What kind of name a GeneralName is (RFC 5280's choices).
+enum GeneralNameKind { other, email, dns, x400, directory, edi, uri, ip, registeredId }
+
+// A name in a subject alternative name or a name constraint.
+class GeneralName {
+  val kind : GeneralNameKind
+  // The name's bytes: the text of an email, dns or uri name; an ip name's address (and, in a
+  // name constraint, its mask after it); the DER of the others.
+  val bytes : Bytes
+  // A directory name's name, else null.
+  val directory : DistinguishedName?
+
+  internal fun init(kind : GeneralNameKind, bytes : Bytes, directory : DistinguishedName? = null) {
+    this.kind = kind
+    this.bytes = bytes
+    this.directory = directory
+  }
+
+  // The name as text: an email, dns or uri name's own text, an address in its usual form (with
+  // "/" and the mask's bits in a constraint), a directory name as RFC 4514 has it, else hex.
+  val text : string
+    get() {
+      return when (kind) {
+        GeneralNameKind.email, GeneralNameKind.dns, GeneralNameKind.uri -> bytes.decodeToString(Charset.ascii)
+        GeneralNameKind.ip -> {
+          if (bytes.size == 4 or bytes.size == 16) {
+            IpAddress(bytes).toString()
+          } else if (bytes.size == 8 or bytes.size == 32) {
+            val half = bytes.size / 2
+            IpAddress(bytes[0..<half]).toString() + "/" + __maskBits(bytes[half..])
+          } else {
+            bytes.toHex()
+          }
+        }
+        GeneralNameKind.directory -> directory.toString()
+        else -> bytes.toHex()
+      }
+    }
+
+  override fun toString() : string => "$kind:$text"
+}
+
+// One extension as the certificate has it.
+data CertificateExtension(val oid : string, val critical : bool, val value : Bytes)
+
+// ---- Certificates ----
+
+// An X.509 certificate, read from DER or PEM. Reading checks its form; whether it is to be trusted
+// is TrustStore.verify's question.
+class Certificate {
+  // The certificate as DER.
+  val der : Bytes
+  // 1, 2 or 3.
+  val version : int
+  // The serial number's bytes, two's complement, as the certificate has them.
+  val serialNumber : Bytes
+  // The signature algorithm's object identifier (X509Oid.sha256WithRsa, ...).
+  val signatureAlgorithm : string
+  val issuer : DistinguishedName
+  val subject : DistinguishedName
+  // When it starts and stops being good. A time after 2262 (9999-12-31 is RFC 5280's "no end")
+  // is the last moment an Instant holds.
+  val notBefore : Instant
+  val notAfter : Instant
+  // The subject's public key as SubjectPublicKeyInfo DER (the key itself is publicKey).
+  val publicKeyDer : Bytes
+  // Every extension, in the certificate's order.
+  val extensions : List<CertificateExtension>
+  // Whether the basic constraints extension makes it a CA.
+  val isCa : bool
+  // The basic constraints' path length: how many CAs may come below it (not counting the
+  // leaf); null where there is no limit.
+  val pathLength : int?
+  // The key usage extension's uses, or null where there is none.
+  val keyUsage : Set<KeyUsage>?
+  // The extended key usage extension's purposes (ExtendedKeyUsage), or null where there is none.
+  val extendedKeyUsage : List<string>?
+  // The subject alternative names (empty where there are none).
+  val subjectAltNames : List<GeneralName>
+  // The key identifiers, where the extensions give them.
+  val subjectKeyId : Bytes?
+  val authorityKeyId : Bytes?
+  // The name constraints: the subtrees names below it must be in, and must not be in; null where
+  // it has none of the kind.
+  val permittedSubtrees : List<GeneralName>?
+  val excludedSubtrees : List<GeneralName>?
+
+  internal val tbs : Bytes
+  internal val signatureAlgorithmDer : Bytes
+  internal val signature : Bytes
+  // Why a chain with it is refused whatever else is right (an extension that cannot be read, a
+  // critical one not known here, ...); null where there is nothing.
+  internal val problem : string?
+  private var key : PublicKey? = null
+
+  // From its DER. A CertificateException where it is not a certificate in DER.
+  fun init(der : Bytes) throws CertificateException {
+    this.der = der
+    try {
+      val outer = DerReader(der).sequence()
+      val tbsAt = outer.position
+      val tbsValue = outer.expect(DerTag.sequence)
+      tbs = tbsValue.encoded(tbsAt)
+      signatureAlgorithmDer = outer.raw()
+      signature = outer.bitString()
+      outer.done()
+      signatureAlgorithm = DerReader(signatureAlgorithmDer).sequence().oid()
+
+      val r = outer.over(tbsValue)
+      val versionReader = r.explicit(0)
+      if (versionReader != null) {
+        val v = versionReader!!.integer()
+        versionReader!!.done()
+        if (v < 0 or v > 2) { throw DerException("version ${v + 1}, which X.509 has not") }
+        if (v == 0) { throw DerException("version 1 written out, which DER leaves out") }
+        version = v + 1
+      } else {
+        version = 1
+      }
+      serialNumber = r.integerBytes()
+      if (r.raw() != signatureAlgorithmDer) { throw DerException("the signature algorithm inside differs from the one outside") }
+      issuer = DistinguishedName(r.raw())
+      val validity = r.sequence()
+      notBefore = __instantOf(validity.time())
+      notAfter = __instantOf(validity.time())
+      validity.done()
+      subject = DistinguishedName(r.raw())
+      publicKeyDer = r.raw()
+      if (r.implicit(1) != null or r.implicit(2) != null) {
+        if (version < 2) { throw DerException("unique identifiers in a version 1 certificate") }
+      }
+      val all : open List<CertificateExtension> = []
+      val extReader = r.explicit(3)
+      r.done()
+      if (extReader != null) {
+        if (version != 3) { throw DerException("extensions in a version $version certificate") }
+        val list = extReader!!.sequence()
+        extReader!!.done()
+        if (list.isEmpty) { throw DerException("an empty list of extensions") }
+        while (!list.isEmpty) {
+          val e = list.sequence()
+          val oid = e.oid()
+          val critical = e.peekTag() == DerTag.boolean ? e.boolean() : false
+          val value = e.octetString()
+          e.done()
+          if (all.any { it.oid == oid }) { throw DerException("the extension $oid twice") }
+          all.add(CertificateExtension(oid, critical, value))
+        }
+      }
+      extensions = all
+    } catch (e : DerException) {
+      throw CertificateException("not a certificate: ${e.message}")
+    }
+
+    // The extensions known here, read; one that cannot be read refuses the certificate's chains
+    // (not its reading, so that what it holds can still be looked at).
+    var ca = false
+    var pathLimit : int? = null
+    var usage : Set<KeyUsage>? = null
+    var purposes : List<string>? = null
+    var names : List<GeneralName> = []
+    var ski : Bytes? = null
+    var aki : Bytes? = null
+    var permitted : List<GeneralName>? = null
+    var excluded : List<GeneralName>? = null
+    var trouble : string? = null
+    for (e in extensions) {
+      try {
+        // RFC 5280 has these never critical, and policy constraints always.
+        if (e.critical and (e.oid == X509Oid.authorityKeyId or e.oid == X509Oid.subjectKeyId or e.oid == X509Oid.authorityInfoAccess)) {
+          throw DerException("it is marked critical, which RFC 5280 forbids")
+        }
+        if (!e.critical and e.oid == X509Oid.policyConstraints) { throw DerException("it is not marked critical, which RFC 5280 asks") }
+        when (e.oid) {
+          X509Oid.basicConstraints -> {
+            val r = DerReader(e.value).sequence()
+            ca = r.peekTag() == DerTag.boolean ? r.boolean() : false
+            if (!r.isEmpty) {
+              val n = r.integer()
+              if (n < 0) { throw DerException("a negative path length") }
+              pathLimit = n
+            }
+            r.done()
+            if (pathLimit != null and !ca) { throw DerException("a path length on a certificate that is not a CA") }
+          }
+          X509Oid.keyUsage -> {
+            val flags = DerReader(e.value).bitFlags()
+            val set = Set<KeyUsage>()
+            for (i in 0..<flags.size) {
+              if (flags[i] and i < __keyUsages.size) { set.add(__keyUsages[i]) }
+            }
+            if (set.isEmpty()) { throw DerException("a key usage with no uses") }
+            usage = set
+          }
+          X509Oid.extendedKeyUsage -> {
+            val r = DerReader(e.value).sequence()
+            val list : open List<string> = []
+            while (!r.isEmpty) { list.add(r.oid()) }
+            if (list.isEmpty()) { throw DerException("an extended key usage with no purposes") }
+            purposes = list
+          }
+          X509Oid.subjectAltName -> {
+            names = __generalNames(DerReader(e.value).sequence())
+            if (names.isEmpty()) { throw DerException("an empty subject alternative name") }
+          }
+          X509Oid.subjectKeyId -> {
+            val r = DerReader(e.value)
+            ski = r.octetString()
+            r.done()
+          }
+          X509Oid.authorityKeyId -> {
+            val r = DerReader(e.value).sequence()
+            val id = r.implicit(0)
+            if (id != null) { aki = id!!.contents }
+            r.implicit(1)
+            r.implicit(2)
+            r.done()
+          }
+          X509Oid.nameConstraints -> {
+            val r = DerReader(e.value).sequence()
+            val p = r.implicit(0)
+            if (p != null) { permitted = __subtrees(r.over(p!!)) }
+            val x = r.implicit(1)
+            if (x != null) { excluded = __subtrees(r.over(x!!)) }
+            r.done()
+            if (p == null and x == null) { throw DerException("name constraints with no subtrees") }
+          }
+          X509Oid.authorityInfoAccess -> {
+            // One access description or more: a method and where.
+            val r = DerReader(e.value).sequence()
+            if (r.isEmpty) { throw DerException("no access descriptions") }
+            while (!r.isEmpty) {
+              val d = r.sequence()
+              d.oid()
+              __generalName(d)
+              d.done()
+            }
+          }
+          X509Oid.certificatePolicies, X509Oid.policyMappings, X509Oid.policyConstraints, X509Oid.inhibitAnyPolicy,
+          X509Oid.crlDistributionPoints, X509Oid.signedCertificateTimestamps, X509Oid.issuerAltName -> {
+            // Known; nothing here depends on them.
+          }
+          else -> {
+            if (e.critical and trouble == null) { trouble = "a critical extension not known here: ${e.oid}" }
+          }
+        }
+      } catch (x : DerException) {
+        if (trouble == null) { trouble = "its extension ${e.oid}: ${x.message}" }
+      }
+    }
+    // What RFC 5280 asks of the whole, where the extensions are each right.
+    if (trouble == null) { trouble = __formProblem(subject, extensions, ca, usage, names, permitted != null or excluded != null) }
+    isCa = ca
+    pathLength = pathLimit
+    keyUsage = usage
+    extendedKeyUsage = purposes
+    subjectAltNames = names
+    subjectKeyId = ski
+    authorityKeyId = aki
+    permittedSubtrees = permitted
+    excludedSubtrees = excluded
+    problem = trouble
+  }
+
+  // The subject's public key. A CertificateException where it is of a kind not known here.
+  val publicKey : PublicKey
+    get() throws CertificateException {
+      val known = key
+      if (known != null) { return known!! }
+      try {
+        val made = PublicKeys.fromDer(publicKeyDer)
+        key = made
+        return made
+      } catch (e : DerException) {
+        throw CertificateException("its public key: ${e.message}")
+      }
+    }
+
+  // The subject alternative names of one kind, as text.
+  fun namesOf(kind : GeneralNameKind) : List<string> => subjectAltNames.filter { it.kind == kind }.map { it.text }
+  // The DNS names it is for.
+  val dnsNames : List<string>
+    get() => namesOf(GeneralNameKind.dns)
+  // The IP addresses it is for.
+  val ipAddresses : List<IpAddress>
+    get() => subjectAltNames.filter { it.kind == GeneralNameKind.ip and (it.bytes.size == 4 or it.bytes.size == 16) }.map { IpAddress(it.bytes) }
+
+  // Whether its issuer and subject are the same name.
+  val isSelfIssued : bool
+    get() => issuer == subject
+  // Whether it is good at `at`: from notBefore to the end of notAfter's second.
+  fun isValidAt(at : Instant) : bool => at >= notBefore and at - 1.seconds < notAfter
+
+  // Whether `host` (a DNS name, or an IP address) is one of its subject alternative names, as
+  // RFC 6125 matches them: case does not count, a wildcard is the whole first label and stands
+  // for one label, and the common name is not looked at.
+  fun matchesHost(host : string) : bool {
+    val address = IpAddress.parse(host.removeSurrounding("[", "]"))
+    if (address != null) {
+      val b = address!!.bytes
+      return subjectAltNames.any { it.kind == GeneralNameKind.ip and it.bytes == b }
+    }
+    return subjectAltNames.any { it.kind == GeneralNameKind.dns and __hostMatches(it.text, host) }
+  }
+
+  // Whether `issuer`'s key made this certificate's signature.
+  fun isSignedBy(issuer : Certificate) : bool => __signatureProblemOf(this, issuer) == null
+
+  // SHA-256 of the DER, as browsers show it.
+  val fingerprint : Bytes
+    get() => Sha256.hash(der)
+
+  // As PEM: "-----BEGIN CERTIFICATE-----", base64, "-----END CERTIFICATE-----".
+  fun toPem() : string => Pem.write("CERTIFICATE", der)
+
+  op ==(other : any?) : bool => other is Certificate and other.der == der
+  fun hashCode() : int => der.hashCode()
+  override fun toString() : string => "Certificate($subject, issued by $issuer, $notBefore to $notAfter)"
+
+  static {
+    // From DER; the same as Certificate(der).
+    fun fromDer(der : Bytes) : Certificate throws CertificateException => Certificate(der)
+    // The first certificate in PEM text. A CertificateException where there is none.
+    fun fromPem(text : string) : Certificate throws CertificateException {
+      val all = allFromPem(text)
+      if (all.isEmpty()) { throw CertificateException("no CERTIFICATE in the PEM text") }
+      return all[0]
+    }
+    // Every certificate in PEM text, in order (a chain file's leaf first); other blocks are passed
+    // over.
+    fun allFromPem(text : string) : List<Certificate> throws CertificateException {
+      try {
+        return Pem.read(text).filter { it.label == "CERTIFICATE" or it.label == "TRUSTED CERTIFICATE" or it.label == "X509 CERTIFICATE" }.map { Certificate(it.der) }
+      } catch (e : DerException) {
+        throw CertificateException("not PEM: ${e.message}")
+      }
+    }
+  }
+}
+
+// ---- Trust ----
+
+// Roots trusted, and the check of a chain up to one of them.
+class TrustStore {
+  // The roots, as given.
+  val roots : List<Certificate>
+  private val bySubject : Map<DistinguishedName, List<Certificate>>
+  // Whether Windows is asked for a root it has not yet fetched (the system's store on Windows).
+  internal var asksWindows = false
+
+  fun init(roots : List<Certificate>) {
+    this.roots = roots
+    bySubject = __bySubject(roots)
+  }
+
+  static {
+    // The roots the system trusts: on Windows its store of trusted roots, and those Windows
+    // fetches as a chain needs them (it keeps only some in the store); on Linux the bundle
+    // its packages keep (/etc/ssl/certs/ca-certificates.crt on Debian and Ubuntu,
+    // /etc/pki/tls/certs/ca-bundle.crt on Fedora and Red Hat). Roots that cannot be read are
+    // passed over. A CertificateException where there is no store.
+    fun system() : TrustStore throws IOException {
+      val fromSystem = __crypto.systemRoots()
+      if (fromSystem != null) {
+        val roots : open List<Certificate> = []
+        for (der in fromSystem!!) {
+          try { roots.add(Certificate(der)) } catch (e : CertificateException) { }
+        }
+        val store = TrustStore(roots)
+        store.asksWindows = true
+        return store
+      }
+      for (path in ["/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem"]) {
+        val file = FilePath(path)
+        if (file.exists()) { return fromPem(file.readText()) }
+      }
+      throw CertificateException("no store of trusted roots found on this system")
+    }
+    // The roots in PEM text.
+    fun fromPem(text : string) : TrustStore throws CertificateException => TrustStore(Certificate.allFromPem(text))
+  }
+
+  // Checks `chain` (the leaf first, then any certificates that may help, in any order) up to one
+  // of the roots, at `at`, for `purpose` (an ExtendedKeyUsage) and, where given, `host`. Gives the
+  // path it found, the leaf first and the root last. A CertificateException that says why where
+  // there is no good path. At most `maxDepth` CAs come between the leaf and the root.
+  fun verify(chain : List<Certificate>, host : string? = null, at : Instant = Instant.now(),
+             purpose : string = ExtendedKeyUsage.serverAuth, maxDepth : int = 8) : List<Certificate> throws CertificateException {
+    if (chain.isEmpty()) { throw CertificateException("no certificate to check") }
+    val leaf = chain[0]
+    val leafTrouble = __leafProblem(leaf, host, at, purpose)
+    if (leafTrouble != null) { throw CertificateException("the certificate ${leaf.subject}: ${leafTrouble!!}") }
+    val search = __PathSearch(bySubject, __bySubject(chain.drop(1)), at, purpose, maxDepth)
+    val path = search.find([leaf].toOpenList())
+    if (path != null) { return path!! }
+    if (asksWindows) {
+      // A root Windows trusts and has not fetched yet: fetched, then checked here like the others.
+      val all = DerWriter()
+      for (c in chain) { all.raw(c.der) }
+      val fetched = __crypto.systemRootFor(all.toBytes())
+      if (fetched != null) {
+        try {
+          val built : open List<Certificate> = []
+          val r = DerReader(fetched!!)
+          while (!r.isEmpty) { built.add(Certificate(r.raw())) }
+          val root = built.last()
+          val anchors = roots.contains(root) ? bySubject : __bySubject(roots + [root])
+          val again = __PathSearch(anchors, __bySubject(chain.drop(1) + built.drop(1).dropLast(1)), at, purpose, maxDepth)
+          val found = again.find([leaf].toOpenList())
+          if (found != null) { return found!! }
+          throw CertificateException(again.reason ?: "no path from ${leaf.subject} to a trusted root")
+        } catch (e : DerException) { }
+      }
+    }
+    throw CertificateException(search.reason ?: "no path from ${leaf.subject} to a trusted root")
+  }
+}
+
+fun __bySubject(certs : List<Certificate>) : Map<DistinguishedName, List<Certificate>> {
+  val map : open Map<DistinguishedName, open List<Certificate>> = {:}
+  for (c in certs) {
+    val list = map[c.subject]
+    if (list == null) { map[c.subject] = [c] } else if (!list!!.contains(c)) { list!!.add(c) }
+  }
+  return map
+}
+
+// Why a leaf is refused before any path is looked for, or null.
+fun __leafProblem(leaf : Certificate, host : string?, at : Instant, purpose : string) : string? {
+  if (leaf.problem != null) { return leaf.problem }
+  if (!leaf.isValidAt(at)) { return __datesProblem(leaf, at) }
+  val eku = leaf.extendedKeyUsage
+  if (eku != null and !eku!!.contains(purpose)) { return "its extended key usage does not have ${__purposeName(purpose)}" }
+  if (eku != null and eku!!.contains(ExtendedKeyUsage.any)) { return "its extended key usage has anyExtendedKeyUsage, which the CA/Browser Forum forbids" }
+  if (leaf.isCa and purpose == ExtendedKeyUsage.serverAuth) { return "it is a CA, not a server's certificate" }
+  // RFC 5280's serial numbers (not asked of roots: some trusted ones have 0).
+  val serial = leaf.serialNumber
+  if (serial[0].toInt() >= 0x80) { return "its serial number is negative" }
+  if (serial.toList().all { it.toInt() == 0 }) { return "its serial number is zero" }
+  if (serial.size > (serial[0].toInt() == 0 ? 21 : 20)) { return "its serial number is longer than 20 bytes" }
+  val keyTrouble = __keyProblem(leaf)
+  if (keyTrouble != null) { return keyTrouble }
+  if (host != null) {
+    if (leaf.subjectAltNames.isEmpty()) { return "it has no subject alternative names (the common name is not looked at)" }
+    if (!leaf.matchesHost(host!!)) {
+      val names = leaf.subjectAltNames.map { it.text }
+      val shown = names.size <= 4 ? names.join(", ") : names.take(4).join(", ") + " and ${names.size - 4} more"
+      return "it is not for $host (it is for $shown)"
+    }
+  }
+  return null
+}
+
+// Why a leaf's key is not one to trust, or null: a kind known here, RSA of 2048 bits or more in
+// whole bytes.
+fun __keyProblem(leaf : Certificate) : string? {
+  try {
+    val key = leaf.publicKey
+    if (key is RsaPublicKey) {
+      val bits = (key as RsaPublicKey).bits
+      if (bits < 2048) { return "its RSA key has $bits bits (2048 or more are trusted)" }
+      if (bits % 8 != 0) { return "its RSA key has $bits bits, not whole bytes" }
+    }
+    return null
+  } catch (e : CertificateException) {
+    return e.message
+  }
+}
+
+fun __datesProblem(c : Certificate, at : Instant) : string =>
+  at < c.notBefore ? "it is not good until ${c.notBefore}" : "it expired at ${c.notAfter}"
+
+fun __purposeName(purpose : string) : string => when (purpose) {
+  ExtendedKeyUsage.serverAuth -> "serverAuth"
+  ExtendedKeyUsage.clientAuth -> "clientAuth"
+  else -> purpose
+}
+
+// The search for a path from a leaf to a root: depth first, roots before other certificates at
+// each step, never a certificate twice, and a limit on the signatures checked so that a tangle of
+// cross-signed CAs cannot make it run long.
+class __PathSearch(val anchors : Map<DistinguishedName, List<Certificate>>, val others : Map<DistinguishedName, List<Certificate>>,
+                   val at : Instant, val purpose : string, val maxDepth : int) {
+  // Why the last path tried was refused; the reason given where no path is found.
+  var reason : string? = null
+  private var budget = 100
+
+  fun find(path : open List<Certificate>) : List<Certificate>? {
+    val child = path.last()
+    for (pass in 0..<2) {
+      val candidates = (pass == 0 ? anchors : others)[child.issuer] ?: []
+      for (ca in candidates) {
+        if (path.contains(ca) or path.any { it.subject == ca.subject and it.publicKeyDer == ca.publicKeyDer }) { continue }
+        if (child.authorityKeyId != null and ca.subjectKeyId != null and child.authorityKeyId != ca.subjectKeyId) { continue }
+        if (budget <= 0) {
+          reason = "too many certificates to try (more than 100 signatures)"
+          return null
+        }
+        budget--
+        val trouble = __caProblem(ca, path, at, purpose, maxDepth, pass == 0)
+        if (trouble != null) {
+          reason = "the CA ${ca.subject}: ${trouble!!}"
+          continue
+        }
+        val bad = __signatureProblemOf(child, ca)
+        if (bad != null) {
+          reason = "the certificate ${child.subject}: ${bad!!}"
+          continue
+        }
+        path.add(ca)
+        if (pass == 0) {
+          val constrained = __constraintsProblem(path)
+          if (constrained == null) { return path.toList() }
+          reason = constrained
+        } else {
+          val found = find(path)
+          if (found != null) { return found }
+        }
+        path.removeLast()
+      }
+    }
+    if (reason == null) { reason = "no issuer of ${child.subject} (${child.issuer}) is trusted or given" }
+    return null
+  }
+}
+
+// Why `ca` cannot issue the last certificate of `path`, or null.
+fun __caProblem(ca : Certificate, path : List<Certificate>, at : Instant, purpose : string, maxDepth : int, anchor : bool) : string? {
+  if (ca.problem != null) { return ca.problem }
+  if (!ca.isValidAt(at)) { return __datesProblem(ca, at) }
+  if (!ca.isCa) { return "it is not a CA (its basic constraints do not make it one)" }
+  val usage = ca.keyUsage
+  if (usage != null and !usage!!.contains(KeyUsage.keyCertSign)) { return "its key usage does not have keyCertSign" }
+  // CAs below it in the path, not counting the leaf and those issued by themselves.
+  var below = 0
+  for (i in 1..<path.size) {
+    if (!path[i].isSelfIssued) { below++ }
+  }
+  if (below + (anchor or ca.isSelfIssued ? 0 : 1) > maxDepth) { return "the path would have more than $maxDepth CAs" }
+  val limit = ca.pathLength
+  if (limit != null and below > limit!!) { return "its path length is $limit, and $below ${below == 1 ? "CA is" : "CAs are"} below it" }
+  val eku = ca.extendedKeyUsage
+  if (eku != null and !eku!!.contains(purpose)) { return "its extended key usage does not have ${__purposeName(purpose)}" }
+  return null
+}
+
+// Why the name constraints of a path's CAs refuse a certificate below them, or null.
+fun __constraintsProblem(path : List<Certificate>) : string? {
+  // A limit on the work, so that a CA of thousands of constraints and a leaf of thousands of names
+  // cannot make it run long (Go and rustls have one too).
+  var work = 0
+  for (i in 1..<path.size) {
+    val count = (path[i].permittedSubtrees?.size ?: 0) + (path[i].excludedSubtrees?.size ?: 0)
+    for (j in 0..<i) { work += count * (path[j].subjectAltNames.size + 1) }
+  }
+  if (work > 250000) { return "too many name constraints to check against too many names ($work checks)" }
+  for (i in 1..<path.size) {
+    val ca = path[i]
+    if (ca.permittedSubtrees == null and ca.excludedSubtrees == null) { continue }
+    for (j in 0..<i) {
+      val c = path[j]
+      if (j > 0 and c.isSelfIssued) { continue }
+      val trouble = __namesProblem(c, ca.permittedSubtrees, ca.excludedSubtrees)
+      if (trouble != null) { return "the certificate ${c.subject}: ${trouble!!} (name constraints of ${ca.subject})" }
+    }
+  }
+  return null
+}
+
+// Why a certificate's names are not in what `permitted` allows, or are in what `excluded` forbids.
+fun __namesProblem(c : Certificate, permitted : List<GeneralName>?, excluded : List<GeneralName>?) : string? {
+  val names : open List<GeneralName> = c.subjectAltNames.toOpenList()
+  if (!c.subject.isEmpty) {
+    names.add(GeneralName(GeneralNameKind.directory, c.subject.der, c.subject))
+    for (email in c.subject.valuesOf(X509Oid.emailAddress)) {
+      names.add(GeneralName(GeneralNameKind.email, email.toBytes()))
+    }
+  }
+  for (n in names) {
+    if (excluded != null) {
+      for (x in excluded!!) {
+        if (x.kind == n.kind and __inSubtree(n, x, true)) { return "the name ${n.text} is excluded" }
+      }
+    }
+    if (permitted != null) {
+      val same = permitted!!.filter { it.kind == n.kind }
+      if (!same.isEmpty() and !same.any { __inSubtree(n, it, false) }) { return "the name ${n.text} is not permitted" }
+    }
+  }
+  return null
+}
+
+// Whether name `n` is in the subtree `base` (the same kind). For an excluded subtree a wildcard
+// DNS name counts as in it where it could stand for a name in it.
+fun __inSubtree(n : GeneralName, base : GeneralName, excluding : bool) : bool {
+  return when (n.kind) {
+    GeneralNameKind.dns -> {
+      val name = n.text.lower().removeSuffix(".")
+      val within = __dnsWithin(name, base.text.lower())
+      if (within or !excluding or !name.startsWith("*.")) {
+        within
+      } else {
+        val rest = name[1..]
+        val b = base.text.lower().removePrefix(".")
+        b.endsWith(rest) and b.size > rest.size and !b[0..<b.size - rest.size].contains('.')
+      }
+    }
+    GeneralNameKind.email -> __emailWithin(n.text, base.text)
+    GeneralNameKind.ip -> __ipWithin(n.bytes, base.bytes)
+    GeneralNameKind.directory -> base.directory!!.contains(n.directory!!)
+    GeneralNameKind.uri -> {
+      val host = __uriHost(n.text)
+      host != null and __uriWithin(host!!, base.text.lower())
+    }
+    // Kinds not checked here: a constraint of the kind takes in, and shuts out, every such name.
+    else -> true
+  }
+}
+
+// Whether DNS name `name` is `base` or below it (RFC 5280: adding labels to the left); a base
+// with a leading dot takes in only names below it, and an empty one every name.
+fun __dnsWithin(name : string, base : string) : bool {
+  if (base.isEmpty()) { return true }
+  if (base.startsWith(".")) { return name.endsWith(base) }
+  return name == base or name.endsWith("." + base)
+}
+
+// Whether an email address is in a constraint: a whole mailbox, a host (every mailbox there), or
+// a domain with a leading dot (every host below it).
+fun __emailWithin(email : string, base : string) : bool {
+  val at = email.lastIndexOf('@')
+  if (at < 0) { return false }
+  if (base.contains('@')) {
+    val bAt = base.lastIndexOf('@')
+    return email[0..<at] == base[0..<bAt] and email[at + 1..].lower() == base[bAt + 1..].lower()
+  }
+  val host = email[at + 1..].lower()
+  val b = base.lower()
+  return b.startsWith(".") ? host.endsWith(b) : host == b
+}
+
+// Whether an address is in an address-and-mask constraint of its own size.
+fun __ipWithin(address : Bytes, base : Bytes) : bool {
+  if (base.size != address.size * 2) { return false }
+  for (i in 0..<address.size) {
+    val mask = base[address.size + i].toInt()
+    if ((address[i].toInt() & mask) != (base[i].toInt() & mask)) { return false }
+  }
+  return true
+}
+
+fun __uriWithin(host : string, base : string) : bool => base.startsWith(".") ? host.endsWith(base) : host == base
+
+// The host of a URI (scheme://[user@]host[:port]/...), lower case; null where it has none.
+fun __uriHost(uri : string) : string? {
+  val start = uri.indexOf("://")
+  if (start < 0) { return null }
+  var rest = uri[start + 3..]
+  for (stop in ['/', '?', '#']) {
+    val i = rest.indexOf(stop)
+    if (i >= 0) { rest = rest[0..<i] }
+  }
+  val at = rest.lastIndexOf('@')
+  if (at >= 0) { rest = rest[at + 1..] }
+  if (rest.startsWith("[")) { return null }
+  val colon = rest.lastIndexOf(':')
+  if (colon >= 0) { rest = rest[0..<colon] }
+  return rest.isEmpty() ? null : rest.lower()
+}
+
+// Whether a DNS name of a certificate matches a host, as RFC 6125 and the CA/Browser Forum have
+// it: case does not count, nor one dot at the end of the host; a wildcard is the whole first label
+// of a name of three labels or more, and stands for one label that is not empty.
+fun __hostMatches(pattern : string, host : string) : bool {
+  val p = pattern.lower()
+  val h = host.lower().removeSuffix(".")
+  if (h.isEmpty() or p.isEmpty() or p.endsWith(".")) { return false }
+  if (!p.startsWith("*.")) { return !p.contains('*') and p == h }
+  val rest = p[1..]
+  if (rest.contains('*') or rest.count { it == '.' } < 2) { return false }
+  val dot = h.indexOf('.')
+  return dot > 0 and h[dot..] == rest
+}
+
+// ---- Signatures ----
+
+// Why `cert`'s signature is not good for `ca`'s key, or null where it is.
+fun __signatureProblemOf(cert : Certificate, ca : Certificate) : string? {
+  try {
+    return __signatureProblem(cert, ca.publicKey)
+  } catch (e : CertificateException) {
+    return e.message
+  }
+}
+
+// Why `cert`'s signature is not good for `key`, or null where it is.
+fun __signatureProblem(cert : Certificate, key : PublicKey) : string? {
+  val alg = cert.signatureAlgorithm
+  val tbs = cert.tbs
+  val sig = cert.signature
+  try {
+    when (alg) {
+      X509Oid.md5WithRsa, X509Oid.sha1WithRsa, X509Oid.ecdsaWithSha1 -> return "it is signed with ${alg == X509Oid.md5WithRsa ? "MD5" : "SHA-1"}, which is no longer trusted"
+      X509Oid.sha256WithRsa, X509Oid.sha384WithRsa, X509Oid.sha512WithRsa -> {
+        if (key !is RsaPublicKey) { return "an RSA signature from a key that is not RSA" }
+        val rsa = key as RsaPublicKey
+        if (rsa.bits < 2048 or rsa.bits % 8 != 0) { return "an RSA key of ${rsa.bits} bits signed it (2048 or more, in whole bytes, are trusted)" }
+        val hash = alg == X509Oid.sha256WithRsa ? Sha256() as Hash : alg == X509Oid.sha384WithRsa ? Sha384() as Hash : Sha512() as Hash
+        return rsa.verify(tbs, sig, hash) ? null : "its signature is not good"
+      }
+      X509Oid.rsaPss -> {
+        if (key !is RsaPublicKey) { return "an RSA signature from a key that is not RSA" }
+        val rsa = key as RsaPublicKey
+        if (rsa.bits < 2048 or rsa.bits % 8 != 0) { return "an RSA key of ${rsa.bits} bits signed it (2048 or more, in whole bytes, are trusted)" }
+        val hash = __pssHash(cert.signatureAlgorithmDer)
+        if (hash == null) { return "RSA-PSS with parameters not taken here (SHA-256, SHA-384 or SHA-512, MGF1 with the same hash, a salt of the hash's size)" }
+        return rsa.verify(tbs, sig, hash!!, RsaPadding.pss()) ? null : "its signature is not good"
+      }
+      X509Oid.ecdsaWithSha256, X509Oid.ecdsaWithSha384, X509Oid.ecdsaWithSha512 -> {
+        if (key !is EcPublicKey) { return "an ECDSA signature from a key that is not an elliptic curve's" }
+        val params = DerReader(cert.signatureAlgorithmDer).sequence()
+        params.oid()
+        if (!params.isEmpty) { return "ECDSA with parameters, which it has not" }
+        val hash = alg == X509Oid.ecdsaWithSha256 ? Sha256() as Hash : alg == X509Oid.ecdsaWithSha384 ? Sha384() as Hash : Sha512() as Hash
+        return (key as EcPublicKey).verify(tbs, sig, hash) ? null : "its signature is not good"
+      }
+      X509Oid.ed25519 -> {
+        if (key !is Ed25519PublicKey) { return "an Ed25519 signature from a key that is not Ed25519" }
+        return (key as Ed25519PublicKey).verify(tbs, sig) ? null : "its signature is not good"
+      }
+      else -> return "a signature algorithm not known here: $alg"
+    }
+  } catch (e : DerException) {
+    return "its signature algorithm cannot be read: ${e.message}"
+  } catch (e : IllegalArgumentException) {
+    return "its signature is not good (${e.message})"
+  }
+}
+
+// The hash of RSA-PSS parameters that are taken here (the hash, MGF1 with the same hash, a salt of
+// the hash's size, the usual trailer), or null.
+fun __pssHash(algorithmDer : Bytes) : Hash? throws DerException {
+  val r = DerReader(algorithmDer).sequence()
+  r.oid()
+  val p = r.sequence()
+  r.done()
+  val hashReader = p.explicit(0)
+  if (hashReader == null) { return null }   // SHA-1, the default
+  val hashOid = hashReader!!.sequence().oid()
+  val mgfReader = p.explicit(1)
+  if (mgfReader == null) { return null }
+  val mgf = mgfReader!!.sequence()
+  if (mgf.oid() != X509Oid.mgf1) { return null }
+  if (mgf.sequence().oid() != hashOid) { return null }
+  val saltReader = p.explicit(2)
+  if (saltReader == null) { return null }
+  val salt = saltReader!!.integer()
+  val trailer = p.explicit(3)
+  if (trailer != null and trailer!!.integer() != 1) { return null }
+  p.done()
+  return when (hashOid) {
+    X509Oid.sha256 -> salt == 32 ? Sha256() : null
+    X509Oid.sha384 -> salt == 48 ? Sha384() : null
+    X509Oid.sha512 -> salt == 64 ? Sha512() : null
+    else -> null
+  }
+}
+
+// ---- Reading helpers ----
+
+val __keyUsages = [KeyUsage.digitalSignature, KeyUsage.contentCommitment, KeyUsage.keyEncipherment, KeyUsage.dataEncipherment,
+                   KeyUsage.keyAgreement, KeyUsage.keyCertSign, KeyUsage.crlSign, KeyUsage.encipherOnly, KeyUsage.decipherOnly]
+
+val __generalNameKinds = [GeneralNameKind.other, GeneralNameKind.email, GeneralNameKind.dns, GeneralNameKind.x400, GeneralNameKind.directory,
+                          GeneralNameKind.edi, GeneralNameKind.uri, GeneralNameKind.ip, GeneralNameKind.registeredId]
+
+// GeneralNames: every name in a reader.
+fun __generalNames(r : DerReader) : List<GeneralName> throws DerException {
+  val names : open List<GeneralName> = []
+  while (!r.isEmpty) { names.add(__generalName(r)) }
+  return names
+}
+
+fun __generalName(r : DerReader) : GeneralName throws DerException {
+  val v = r.next()
+  if ((v.tag & 0xC0) != 0x80) { throw DerException("a general name of tag 0x${v.tag.toString(16)}") }
+  val choice = v.tag & 0x1F
+  if (choice > 8) { throw DerException("a general name of kind $choice") }
+  val kind = __generalNameKinds[choice]
+  val constructed = (v.tag & 0x20) != 0
+  return when (kind) {
+    GeneralNameKind.email, GeneralNameKind.dns, GeneralNameKind.uri, GeneralNameKind.ip -> {
+      if (constructed) { throw DerException("a $kind name that is constructed") }
+      val b = v.contents
+      if (kind != GeneralNameKind.ip) {
+        for (x in b.toList()) {
+          if (x.toInt() >= 0x80) { throw DerException("a $kind name that is not ASCII") }
+        }
+      }
+      GeneralName(kind, b)
+    }
+    GeneralNameKind.directory -> {
+      if (!constructed) { throw DerException("a directory name that is not constructed") }
+      val inner = r.over(v)
+      val name = DistinguishedName(inner.raw())
+      inner.done()
+      GeneralName(kind, name.der, name)
+    }
+    else -> GeneralName(kind, v.contents)
+  }
+}
+
+// GeneralSubtrees: the bases (a minimum other than 0 and a maximum are not used, as RFC 5280 says).
+fun __subtrees(r : DerReader) : List<GeneralName> throws DerException {
+  val bases : open List<GeneralName> = []
+  while (!r.isEmpty) {
+    val s = r.sequence()
+    val base = __generalName(s)
+    val minimum = s.implicit(0)
+    if (minimum != null and !(minimum!!.size == 1 and minimum!!.bytes[minimum!!.start].toInt() == 0)) { throw DerException("a subtree with a minimum") }
+    if (s.implicit(1) != null) { throw DerException("a subtree with a maximum") }
+    s.done()
+    if (base.kind == GeneralNameKind.dns and base.bytes.size != 0 and !__validDnsName(base.text, false)) {
+      throw DerException("a DNS name constraint '${base.text}' not in a DNS name's form")
+    }
+    if (base.kind == GeneralNameKind.ip) {
+      val b = base.bytes
+      if (b.size != 8 and b.size != 32) { throw DerException("an address constraint of ${b.size} bytes (8 or 32 belong)") }
+      if (__maskBits(b[b.size / 2..]) < 0) { throw DerException("an address constraint whose mask is not one run of ones") }
+    }
+    bases.add(base)
+  }
+  if (bases.isEmpty()) { throw DerException("no subtrees") }
+  return bases
+}
+
+// The bits of a mask that is ones then zeros; -1 where it is not.
+fun __maskBits(mask : Bytes) : int {
+  var bits = 0
+  var ended = false
+  for (x in mask.toList()) {
+    val b = x.toInt()
+    for (k in 7 downTo 0) {
+      if (((b >> k) & 1) == 1) {
+        if (ended) { return -1 }
+        bits++
+      } else {
+        ended = true
+      }
+    }
+  }
+  return bits
+}
+
+// An attribute's value as text: the string kinds as their text, anything else as RFC 4514's "#"
+// and its DER in hex.
+fun __attributeValue(v : DerValue) : string {
+  try {
+    return __derText(v)
+  } catch (e : DerException) {
+    return "#" + v.encoded(v.start - __derHeader(v.tag, v.size).size).toHex()
+  }
+}
+
+fun __attributeLabel(oid : string) : string => when (oid) {
+  X509Oid.commonName -> "CN"
+  X509Oid.country -> "C"
+  X509Oid.locality -> "L"
+  X509Oid.state -> "ST"
+  X509Oid.street -> "STREET"
+  X509Oid.organization -> "O"
+  X509Oid.organizationalUnit -> "OU"
+  X509Oid.domainComponent -> "DC"
+  X509Oid.userId -> "UID"
+  X509Oid.emailAddress -> "emailAddress"
+  X509Oid.serialNumber -> "serialNumber"
+  X509Oid.surname -> "SN"
+  X509Oid.givenName -> "GN"
+  X509Oid.title -> "title"
+  else -> oid
+}
+
+// A value as names compare it (RFC 5280 7.1): lower case, spaces at the ends dropped and runs of
+// them inside made one.
+fun __foldName(value : string) : string {
+  val out = StringBuilder()
+  var space = false
+  for (c in value.trim().lower()) {
+    if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+      space = true
+    } else {
+      if (space) { out.append(' ') }
+      space = false
+      out.append(c)
+    }
+  }
+  return out.toString()
+}
+
+// A value escaped as RFC 4514 writes it.
+fun __escapeName(value : string) : string {
+  if (value.startsWith("#") and value.size > 1 and value[1..].all { it.isDigit() or (it >= 'a' and it <= 'f') }) { return value }
+  val out = StringBuilder()
+  for (i in 0..<value.size) {
+    val c = value[i]
+    if (c == ',' or c == '+' or c == '"' or c == '\\' or c == '<' or c == '>' or c == ';' or c == '=' or
+        (i == 0 and (c == '#' or c == ' ')) or (i == value.size - 1 and c == ' ')) {
+      out.append('\\')
+    }
+    out.append(c)
+  }
+  return out.toString()
+}
+
+// Seconds since 1970 as an Instant; beyond what an Instant holds (2262, either way from 1970), its
+// last or first moment.
+fun __instantOf(seconds : int) : Instant {
+  if (seconds >= 9223372036) { return Instant(9223372036854775807) }
+  if (seconds <= -9223372036) { return Instant(-9223372036854775807 - 1) }
+  return Instant.fromEpochSeconds(seconds)
+}
+
+// Why a certificate is not in RFC 5280's form as a whole, or null: its subject, and what its
+// extensions say together.
+fun __formProblem(subject : DistinguishedName, extensions : List<CertificateExtension>, ca : bool,
+                  usage : Set<KeyUsage>?, names : List<GeneralName>, constrained : bool) : string? {
+  if (!ca and usage != null and usage!!.contains(KeyUsage.keyCertSign)) { return "its key usage has keyCertSign, and it is not a CA" }
+  if (!ca and constrained) { return "it has name constraints, and it is not a CA" }
+  if (subject.isEmpty) {
+    if (ca) { return "it is a CA with an empty subject" }
+    val san = extensions.firstOrNull { it.oid == X509Oid.subjectAltName }
+    if (san == null) { return "its subject is empty, and it has no subject alternative names" }
+    if (!san!!.critical) { return "its subject is empty, and its subject alternative names are not marked critical" }
+  }
+  for (n in names) {
+    if (n.kind == GeneralNameKind.dns and !__validDnsName(n.text, true)) { return "the DNS name '${n.text}' is not in a DNS name's form" }
+    if (n.kind == GeneralNameKind.email and !__validEmail(n.text)) { return "the email address '${n.text}' is not in an address's form" }
+    if (n.kind == GeneralNameKind.ip and n.bytes.size != 4 and n.bytes.size != 16) { return "an IP address of ${n.bytes.size} bytes" }
+  }
+  return null
+}
+
+// Whether a name is a DNS name (letters, digits and hyphens, in labels of 1 to 63 between dots,
+// 253 at most in all), with a wildcard as its whole first label where `wildcard` allows.
+fun __validDnsName(name : string, wildcard : bool) : bool {
+  if (name.isEmpty() or name.size > 253) { return false }
+  val labels = name.split('.')
+  for (i in 0..<labels.size) {
+    val label = labels[i]
+    if (wildcard and i == 0 and label == "*" and labels.size > 1) { continue }
+    if (label.isEmpty() or label.size > 63 or label.startsWith("-") or label.endsWith("-")) { return false }
+    for (c in label) {
+      if (!((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '-')) { return false }
+    }
+  }
+  return true
+}
+
+// Whether a name is an email address: one '@', something before it, a DNS name after it.
+fun __validEmail(address : string) : bool {
+  val at = address.indexOf('@')
+  return at > 0 and address.lastIndexOf('@') == at and __validDnsName(address[at + 1..], false)
+}

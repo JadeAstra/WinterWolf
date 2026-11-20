@@ -423,6 +423,113 @@ void Aes::ctr32(uint8_t counter[16], const uint8_t* in, uint8_t* out, size_t siz
     wipe(stream, sizeof(stream));
 }
 
+namespace {
+
+// The inverse S-box, 8 bytes at once: the inverse affine map, then b^254.
+uint64_t invSbox8(uint64_t x) {
+    const uint64_t y = rotl8(x, 1) ^ rotl8(x, 3) ^ rotl8(x, 6) ^ (kOnes * 0x05);
+    const uint64_t y2 = gfMul8(y, y);
+    const uint64_t y3 = gfMul8(y2, y);
+    const uint64_t y6 = gfMul8(y3, y3);
+    const uint64_t y12 = gfMul8(y6, y6);
+    const uint64_t y15 = gfMul8(y12, y3);
+    const uint64_t y30 = gfMul8(y15, y15);
+    const uint64_t y60 = gfMul8(y30, y30);
+    const uint64_t y120 = gfMul8(y60, y60);
+    const uint64_t y240 = gfMul8(y120, y120);
+    const uint64_t y252 = gfMul8(y240, y12);
+    return gfMul8(y252, y2);
+}
+
+// The inverse cipher (FIPS 197, 5.3), portable: the state in column order, s[row + 4 * column].
+void decryptPortable(const uint8_t* rk, int rounds, const uint8_t in[16], uint8_t out[16]) {
+    uint8_t s[16], t[16];
+    for (int i = 0; i < 16; i++) s[i] = in[i] ^ rk[16 * rounds + i];
+    for (int round = rounds - 1; round >= 0; round--) {
+        // InvShiftRows: row r turns right by r.
+        for (int c = 0; c < 4; c++)
+            for (int r = 0; r < 4; r++) t[r + 4 * ((c + r) % 4)] = s[r + 4 * c];
+        store64le(t, invSbox8(load64le(t)));
+        store64le(t + 8, invSbox8(load64le(t + 8)));
+        for (int i = 0; i < 16; i++) t[i] ^= rk[16 * round + i];
+        if (round > 0) {
+            // InvMixColumns: 14 11 13 9 around the column.
+            for (int c = 0; c < 4; c++) {
+                uint8_t* col = t + 4 * c;
+                uint8_t m[4][4];
+                for (int i = 0; i < 4; i++) {
+                    const uint8_t a = col[i], a2 = xtime(a), a4 = xtime(a2), a8 = xtime(a4);
+                    m[i][0] = a8 ^ a4 ^ a2;  // 14
+                    m[i][1] = a8 ^ a2 ^ a;   // 11
+                    m[i][2] = a8 ^ a4 ^ a;   // 13
+                    m[i][3] = a8 ^ a;        // 9
+                }
+                for (int r = 0; r < 4; r++) col[r] = m[r][0] ^ m[(r + 1) % 4][1] ^ m[(r + 2) % 4][2] ^ m[(r + 3) % 4][3];
+            }
+        }
+        std::memcpy(s, t, 16);
+    }
+    std::memcpy(out, s, 16);
+    wipe(s, sizeof(s));
+    wipe(t, sizeof(t));
+}
+
+#ifdef WW_X86
+__attribute__((target("aes,sse2"))) void decryptNi(const uint8_t* rk, int rounds, const uint8_t in[16], uint8_t out[16]) {
+    __m128i b = _mm_xor_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in)), _mm_load_si128(reinterpret_cast<const __m128i*>(rk + 16 * rounds)));
+    for (int r = rounds - 1; r > 0; r--) b = _mm_aesdec_si128(b, _mm_aesimc_si128(_mm_load_si128(reinterpret_cast<const __m128i*>(rk + 16 * r))));
+    b = _mm_aesdeclast_si128(b, _mm_load_si128(reinterpret_cast<const __m128i*>(rk)));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out), b);
+}
+#endif
+
+}  // namespace
+
+void Aes::decrypt(const uint8_t in[16], uint8_t out[16]) const {
+#ifdef WW_X86
+    if (cpu().aes) return decryptNi(schedule_, rounds_, in, out);
+#endif
+    decryptPortable(schedule_, rounds_, in, out);
+}
+
+bool aesCbc(const uint8_t* key, size_t keySize, const uint8_t iv[16], const uint8_t* in, size_t size, bool encrypt, std::vector<uint8_t>& out) {
+    if (keySize != 16 && keySize != 24 && keySize != 32) return false;
+    const Aes aes(key, keySize);
+    uint8_t chain[16], block[16];
+    std::memcpy(chain, iv, 16);
+    out.clear();
+    if (encrypt) {
+        const size_t pad = 16 - size % 16;
+        std::vector<uint8_t> padded(in, in + size);
+        padded.insert(padded.end(), pad, uint8_t(pad));
+        out.resize(padded.size());
+        for (size_t at = 0; at < padded.size(); at += 16) {
+            for (int i = 0; i < 16; i++) block[i] = padded[at + size_t(i)] ^ chain[i];
+            aes.encrypt(block, chain);
+            std::memcpy(out.data() + at, chain, 16);
+        }
+        wipe(padded.data(), padded.size());
+        return true;
+    }
+    if (size == 0 || size % 16 != 0) return false;
+    out.resize(size);
+    for (size_t at = 0; at < size; at += 16) {
+        aes.decrypt(in + at, block);
+        for (int i = 0; i < 16; i++) out[at + size_t(i)] = block[i] ^ chain[i];
+        std::memcpy(chain, in + at, 16);
+    }
+    const uint8_t pad = out.back();
+    bool good = pad >= 1 && pad <= 16;
+    for (size_t i = 0; good && i < pad; i++) good = out[size - 1 - i] == pad;
+    if (!good) {
+        wipe(out.data(), out.size());
+        out.clear();
+        return false;
+    }
+    out.resize(size - pad);
+    return true;
+}
+
 std::unique_ptr<Aead> newAesGcm(const uint8_t* key, size_t keySize) {
     if (keySize != 16 && keySize != 24 && keySize != 32) return nullptr;
     return std::make_unique<AesGcm>(key, keySize);

@@ -29,15 +29,19 @@ external object __crypto {
   fun instructions() : List<string>
   fun setPortable(on : bool)
   fun portable() : bool
+  fun sha1(data : Bytes) : Bytes
+  fun systemRoots() : List<Bytes>?
+  fun systemRootFor(chain : Bytes) : Bytes?
+  fun aesCbc(key : Bytes, iv : Bytes, data : Bytes, encrypt : bool) : Bytes?
+  fun ecVerify(curve : int, point : Bytes, hash : int, message : Bytes, signature : Bytes) : bool
+  fun ecSign(curve : int, secret : Bytes, hash : int, message : Bytes) : Bytes
+  fun ecEcdh(curve : int, secret : Bytes, point : Bytes) : Bytes?
+  fun ecPublic(curve : int, secret : Bytes) : Bytes
+  fun ecValidPrivate(curve : int, bytes : Bytes) : bool
+  fun ecPoint(curve : int, bytes : Bytes) : Bytes?
   fun rsaVerify(n : Bytes, e : Bytes, hash : int, message : Bytes, signature : Bytes, pss : bool, saltLength : int, mgf : int) : bool
   fun rsaSign(key : List<Bytes?>, hash : int, message : Bytes, pss : bool, saltLength : int, mgf : int) : Bytes
   fun rsaGenerate(bits : int, e : int) : List<Bytes>
-  fun p256Verify(point : Bytes, hash : int, message : Bytes, signature : Bytes) : bool
-  fun p256Sign(secret : Bytes, hash : int, message : Bytes) : Bytes
-  fun p256Ecdh(secret : Bytes, point : Bytes) : Bytes?
-  fun p256Public(secret : Bytes) : Bytes
-  fun p256ValidPrivate(bytes : Bytes) : bool
-  fun p256Point(bytes : Bytes) : Bytes?
   fun ed25519Verify(key : Bytes, message : Bytes, signature : Bytes) : bool
   fun ed25519Sign(seed : Bytes, message : Bytes) : Bytes
   fun ed25519Public(seed : Bytes) : Bytes
