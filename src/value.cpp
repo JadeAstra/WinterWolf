@@ -1,5 +1,7 @@
 #include "value.h"
 
+#include "fmath.h"
+
 #include <cstdlib>
 #include <mutex>
 #include <new>
@@ -96,9 +98,7 @@ size_t hashValue(const Value& v) {
             // Integral floats must hash like the equal int so 1 and 1.0 are the same map key.
             double d = v.as.d;
             if (d >= -9.2e18 && d <= 9.2e18 && std::floor(d) == d) return static_cast<size_t>(static_cast<int64_t>(d));
-            uint64_t bits;
-            std::memcpy(&bits, &d, sizeof bits);
-            return static_cast<size_t>(bits);
+            return static_cast<size_t>(fmath::canonicalBits(d));  // every NaN the one NaN
         }
         case ValueKind::Obj:
             if (v.as.obj->type == ObjType::String) return asString(v)->hash();

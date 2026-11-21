@@ -1631,13 +1631,13 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <p>Writes <code>value</code> as an unsigned 32-bit number at <code>at</code>, and gives the bytes themselves. An ArithmeticException where it is outside 0 to 4294967295.</p>
 </div>
 <div class="entry" id="Bytes.putFloat32"><code class="sig">fun Bytes.putFloat32(at : int, value : Number, bigEndian : bool = false) : Bytes</code><a class="anchor" href="#Bytes.putFloat32">#</a>
-<p>Writes <code>value</code> as a 32-bit float at <code>at</code>, as near as one can hold it, and gives the bytes themselves.</p>
+<p>Writes <code>value</code> as a 32-bit float at <code>at</code>, as near as one can hold it, and gives the bytes themselves. A NaN is written as the one quiet NaN, 0x7FC00000, whatever made it.</p>
 </div>
 <div class="entry" id="Bytes.putInt64"><code class="sig">fun Bytes.putInt64(at : int, value : int, bigEndian : bool = false) : Bytes</code><a class="anchor" href="#Bytes.putInt64">#</a>
 <p>Writes <code>value</code> as a signed 64-bit number at <code>at</code>, and gives the bytes themselves.</p>
 </div>
 <div class="entry" id="Bytes.putFloat64"><code class="sig">fun Bytes.putFloat64(at : int, value : Number, bigEndian : bool = false) : Bytes</code><a class="anchor" href="#Bytes.putFloat64">#</a>
-<p>Writes <code>value</code> as a 64-bit float at <code>at</code>, and gives the bytes themselves.</p>
+<p>Writes <code>value</code> as a 64-bit float at <code>at</code>, and gives the bytes themselves. A NaN is written as the one quiet NaN, 0x7FF8000000000000, whatever made it: x86 and ARM make NaNs of other bits.</p>
 </div>
 <h4>Positions</h4>
 <div class="entry" id="Index.of"><code class="sig">fun Index.of(size : int) : int</code><a class="anchor" href="#Index.of">#</a>
@@ -1809,7 +1809,7 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 </div>
 <h4>Math</h4>
 <div class="entry" id="Math"><code class="sig">object Math</code><a class="anchor" href="#Math">#</a>
-<p>The mathematical functions. <code>pi</code> and <code>e</code> are constants, written in place of each read. The functions of floats are WinterWolf's own, not the system's: the same bits on every system and processor, each within an ulp of the true value and almost always the nearest float.</p>
+<p>The mathematical functions. <code>pi</code> and <code>e</code> are constants, written in place of each read. The functions of floats are WinterWolf's own, not the system's: the same bits on every system and processor (x86-64 and ARM64), each within an ulp of the true value and almost always the nearest float.</p>
 </div>
 <div class="entry member" id="Math.pi"><code class="sig">const pi = 3.141592653589793</code><a class="anchor" href="#Math.pi">#</a>
 <p>The ratio of a circle's circumference to its diameter.</p>

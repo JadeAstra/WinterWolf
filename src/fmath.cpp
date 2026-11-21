@@ -585,7 +585,8 @@ double logBase(double x, double base) {
 }
 
 double sin(double x) {
-    if (isNaN(x) || isInf(x)) return x - x;
+    if (isNaN(x)) return x + x;
+    if (isInf(x)) return kNaN;  // not inf - inf: x86 and ARM make that NaN with other bits
     if (absOf(x) < 0x1p-27) return x;
     DD y;
     switch (reduce(x, y)) {
@@ -597,7 +598,8 @@ double sin(double x) {
 }
 
 double cos(double x) {
-    if (isNaN(x) || isInf(x)) return x - x;
+    if (isNaN(x)) return x + x;
+    if (isInf(x)) return kNaN;  // not inf - inf: x86 and ARM make that NaN with other bits
     if (absOf(x) < 0x1p-27) return 1.0;
     DD y;
     switch (reduce(x, y)) {
@@ -609,7 +611,8 @@ double cos(double x) {
 }
 
 double tan(double x) {
-    if (isNaN(x) || isInf(x)) return x - x;
+    if (isNaN(x)) return x + x;
+    if (isInf(x)) return kNaN;  // not inf - inf: x86 and ARM make that NaN with other bits
     if (absOf(x) < 0x1p-27) return x;
     DD y;
     const int n = reduce(x, y);

@@ -4,3 +4,6 @@ build/
 .vs/
 spikes/m0/out/
 tools/cpucheck/*.zip
+
+# Python leaves these beside tools/fmath/check.py
+__pycache__/

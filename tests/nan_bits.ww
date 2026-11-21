@@ -1,0 +1,32 @@
+// A NaN's bits where a program can see them: every NaN is the one quiet NaN, 0x7FF8000000000000
+// (0x7FC00000 as 32 bits), whatever made it, so x86 and ARM write the same bytes (0.0 / 0.0 has
+// its sign set on x86 and not on ARM). The arithmetic itself is the processor's.
+
+fun big64(x : float) : string => Bytes(8).putFloat64(0, x, true).toHex()
+fun big32(x : float) : string => Bytes(4).putFloat32(0, x, true).toHex()
+
+val zero = 0.0
+val inf = 1.0 / zero
+val made = [zero / zero, inf - inf, -(zero / zero), Math.sqrt(-1.0), Math.sin(inf), Math.ln(-1.0), inf * zero]
+for (x in made) { print(x, big64(x), big32(x)) }
+// expect: nan 7ff8000000000000 7fc00000
+// expect: nan 7ff8000000000000 7fc00000
+// expect: nan 7ff8000000000000 7fc00000
+// expect: nan 7ff8000000000000 7fc00000
+// expect: nan 7ff8000000000000 7fc00000
+// expect: nan 7ff8000000000000 7fc00000
+// expect: nan 7ff8000000000000 7fc00000
+
+// One with a payload of its own, read from bytes: still NaN, and written as the one NaN.
+val odd = Bytes(8).putInt64(0, -4503599627370205, true).float64(0, true)   // fff0000000000123
+print(odd, big64(odd), odd.isNaN())   // expect: nan 7ff8000000000000 true
+
+// Other values keep their bits, the sign of zero too.
+print(big64(-0.0), big64(1.5), big64(-inf), big32(-0.0))   // expect: 8000000000000000 3ff8000000000000 fff0000000000000 80000000
+
+// A NaN's hash is the same however it was made, so a set of them is the same everywhere.
+print((zero / zero).hashCode() == (-(zero / zero)).hashCode())   // expect: true
+
+// An atomic float compares NaNs by the one NaN's bits.
+val cell = Atomic(zero / zero)
+print(cell.compareAndSet(-(zero / zero), 2.5), cell.get())   // expect: true 2.5

@@ -34,6 +34,7 @@
 #include <thread>
 
 #include "builtins.h"
+#include "fmath.h"
 #include "vm.h"
 
 namespace ww {
@@ -913,8 +914,7 @@ bool bitsFor(AtomicMode mode, const Value& v, int64_t& bits) {
         return true;
     }
     if (!v.isNumber()) return false;
-    const double d = v.toDouble();
-    std::memcpy(&bits, &d, sizeof bits);
+    bits = static_cast<int64_t>(fmath::canonicalBits(v.toDouble()));  // every NaN the one NaN
     return true;
 }
 

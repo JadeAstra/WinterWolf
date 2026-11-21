@@ -1106,15 +1106,11 @@ Value writeNumber(VM& vm, Value self, int argc, Value* args) {
     const size_t at = binaryAt(vm, data, args[0], Size);
     uint64_t bits;
     if constexpr (kind == Kind::Float && Size == 8) {
-        const double d = vm.toNumber(args[1], "number");
-        std::memcpy(&bits, &d, sizeof bits);
+        bits = fmath::canonicalBits(vm.toNumber(args[1], "number"));  // every NaN the one NaN
     } else if constexpr (kind == Kind::Signed && Size == 8) {
         bits = static_cast<uint64_t>(vm.toInt(args[1], "number"));  // every int fits
     } else if constexpr (kind == Kind::Float) {
-        const float f = static_cast<float>(vm.toNumber(args[1], "number"));
-        uint32_t word;
-        std::memcpy(&word, &f, sizeof word);
-        bits = word;
+        bits = fmath::canonicalBits(static_cast<float>(vm.toNumber(args[1], "number")));
     } else {
         const int64_t n = vm.toInt(args[1], "number");
         const int64_t low = kind == Kind::Unsigned ? 0 : Size == 2 ? -32768 : -2147483648LL;

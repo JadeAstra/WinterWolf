@@ -506,11 +506,12 @@ external fun Bytes.putInt32(at : int, value : int, bigEndian : bool = false) : B
 // ArithmeticException where it is outside 0 to 4294967295.
 external fun Bytes.putUint32(at : int, value : int, bigEndian : bool = false) : Bytes
 // Writes `value` as a 32-bit float at `at`, as near as one can hold it, and gives the bytes
-// themselves.
+// themselves. A NaN is written as the one quiet NaN, 0x7FC00000, whatever made it.
 external fun Bytes.putFloat32(at : int, value : Number, bigEndian : bool = false) : Bytes
 // Writes `value` as a signed 64-bit number at `at`, and gives the bytes themselves.
 external fun Bytes.putInt64(at : int, value : int, bigEndian : bool = false) : Bytes
-// Writes `value` as a 64-bit float at `at`, and gives the bytes themselves.
+// Writes `value` as a 64-bit float at `at`, and gives the bytes themselves. A NaN is written as
+// the one quiet NaN, 0x7FF8000000000000, whatever made it: x86 and ARM make NaNs of other bits.
 external fun Bytes.putFloat64(at : int, value : Number, bigEndian : bool = false) : Bytes
 
 // -- Positions --
@@ -665,7 +666,8 @@ external fun Number.isFinite() : bool
 
 // The mathematical functions. `pi` and `e` are constants, written in place of each read.
 // The functions of floats are WinterWolf's own, not the system's: the same bits on every system
-// and processor, each within an ulp of the true value and almost always the nearest float.
+// and processor (x86-64 and ARM64), each within an ulp of the true value and almost always the
+// nearest float.
 external object Math {
   // The ratio of a circle's circumference to its diameter.
   const pi = 3.141592653589793
