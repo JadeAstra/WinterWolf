@@ -135,30 +135,30 @@ void registerRegex(VM& vm) {
             auto* made = new Pattern(pattern, static_cast<uint32_t>(vm.toInt(args[1], "options")));
             return Value::object(vm.alloc<ObjResource>("regex", reinterpret_cast<int64_t>(made), &releasePattern));
         } catch (const regex::SyntaxError& e) {
-            // Python's syntax (RegexOption.python): the name it is about in quotes.
+            // Snippy's syntax (RegexOption.snippy): the name it is about in quotes.
             std::string description = e.description;
             std::string name = "'";
             for (char32_t c : e.arg) appendUtf8(name, static_cast<uint32_t>(c));
             name += "'";
-            for (const char* mark : {WW_PY_REPR, WW_PY_ASCII})
+            for (const char* mark : {WW_SNIPPY_REPR, WW_SNIPPY_ASCII})
                 for (size_t at; (at = description.find(mark)) != std::string::npos;) description.replace(at, std::strlen(mark), name);
             const Value what = vm.str(description);
             TempRoot keep(vm, what);
             return Value::object(newList(vm, {what, Value::integer(e.index)}));
         }
     });
-    // A pattern in Python's syntax (Snippy's re): `flags` CPython's (re.IGNORECASE...), `bytes`
+    // A pattern in Snippy's syntax (Snippy's re): `flags` CPython's (re.IGNORECASE...), `bytes`
     // for a bytes pattern given as a string of its bytes. The pattern compiled, or [what is wrong,
     // where (-1 for nowhere), what CPython raises (0 re.error, 1 OverflowError, 2 ValueError),
-    // the name a WW_PY_REPR or WW_PY_ASCII in it stands for].
-    def("compilePython", 3, 3, [](VM& vm, int, Value* args) -> Value {
+    // the name a WW_SNIPPY_REPR or WW_SNIPPY_ASCII in it stands for].
+    def("compileSnippy", 3, 3, [](VM& vm, int, Value* args) -> Value {
         const ObjString* source = textOf(vm, args[0]);
         std::u32string pattern;
         pattern.reserve(source->length);
         for (size_t i = 0; i < source->length; i++) pattern.push_back(static_cast<char32_t>(source->at(i)));
         const int64_t flags = vm.toInt(args[1], "flags");
-        uint32_t bits = regex::kPython | (static_cast<uint32_t>(flags & 0xFFFF) << regex::kPyFlagsShift);
-        if (args[2].truthy()) bits |= regex::kPyBytes;
+        uint32_t bits = regex::kSnippy | (static_cast<uint32_t>(flags & 0xFFFF) << regex::kSnippyFlagsShift);
+        if (args[2].truthy()) bits |= regex::kSnippyBytes;
         try {
             auto* made = new Pattern(pattern, bits);
             return Value::object(vm.alloc<ObjResource>("regex", reinterpret_cast<int64_t>(made), &releasePattern));
@@ -172,11 +172,11 @@ void registerRegex(VM& vm) {
             return Value::object(newList(vm, {what, Value::integer(e.index), Value::integer(e.kind), argText}));
         }
     });
-    def("pythonFlags", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::integer(patternOf(vm, args[0]).pythonFlags()); });
-    // A match of a pattern in Python's syntax from `from`, the text taken to end at `to`, as find
+    def("snippyFlags", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::integer(patternOf(vm, args[0]).snippyFlags()); });
+    // A match of a pattern in Snippy's syntax from `from`, the text taken to end at `to`, as find
     // gives it with the number of the group closed last after it (-1 for none); one that starts at
     // `notEmptyAt` may not be empty there. Mode as find's.
-    def("findPython", 6, 6, [](VM& vm, int, Value* args) -> Value {
+    def("findSnippy", 6, 6, [](VM& vm, int, Value* args) -> Value {
         const Pattern& pattern = patternOf(vm, args[0]);
         const std::function<void()> stop = [&vm] { vm.throwIfStopped(); };
         const ObjString* text = textOf(vm, args[1]);
@@ -237,7 +237,7 @@ void registerRegex(VM& vm) {
         std::vector<int64_t>& groups = scratchGroups();
         size_t from = static_cast<size_t>(start);
         while (static_cast<int64_t>(from) <= end && pattern.match(text, from, Pattern::Mode::Search, groups, &stop) && groups[1] <= end) {
-            all.insert(all.end(), groups.begin(), groups.begin() + 2 * (pattern.groupCount() + 1));  // not Python's lastindex
+            all.insert(all.end(), groups.begin(), groups.begin() + 2 * (pattern.groupCount() + 1));  // not CPython's lastindex
             const size_t b = static_cast<size_t>(groups[0]), e = static_cast<size_t>(groups[1]);
             from = e == b ? e + 1 : e;
         }

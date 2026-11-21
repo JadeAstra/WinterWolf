@@ -3,7 +3,7 @@ import Snippy.Text.*
 // accelerator (_json.c), which CPython runs: the scanner reads as the C scanner does, so each
 // mistake is found where CPython finds it and said in its words; the encoder writes as
 // _make_iterencode does, its pieces as it yields them (dump writes each), floats by repr; the
-// JSONEncoder and JSONDecoder classes are Python classes to be made subclasses of.
+// JSONEncoder and JSONDecoder classes are Snippy classes to be made subclasses of.
 
 // ---- JSONDecodeError ----
 

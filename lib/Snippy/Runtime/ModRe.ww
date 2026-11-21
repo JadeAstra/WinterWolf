@@ -1,6 +1,6 @@
 import Snippy.Text.*
 // re (the Snippy plan, part 5.3, step 4), in WinterWolf: patterns read and matched by the regex
-// engine's Python syntax (src/regex.cpp, as CPython's re/_parser.py and _sre read and match them),
+// engine's Snippy syntax (src/regex.cpp, as CPython's re/_parser.py and _sre read and match them),
 // with CPython's Pattern and Match objects around it, its searches one after another (an empty
 // match followed by one that may start where it ended, not be empty there: 3.7's rule), sub's
 // templates (re/_parser.py's parse_template), split, escape, the flags and PatternError.
@@ -242,7 +242,7 @@ internal fun __pyReRange(a : PyArgs, n : int) : Pair<int, int> {
 // The engine's match: [start, end, each group's start and end..., the group closed last], or null.
 internal fun __pyReFind(p : PyRePattern, text : string, from : int, to : int, mode : int, notEmptyAt : int) : List<int>? {
   if (from > to) { return null }
-  return __regex.findPython(p.compiled, text, from, to, mode, notEmptyAt)
+  return __regex.findSnippy(p.compiled, text, from, to, mode, notEmptyAt)
 }
 
 internal fun __pyReMatchCall(p : PyRePattern, a : PyArgs, mode : int) : any? {
@@ -573,7 +573,7 @@ internal fun __pyReCompile(pattern : any?, flagsArg : any?) : PyRePattern {
   val key = (isBytes ? "b" : "s") + flags + ":" + text
   val had = __pyReCache[key]
   if (had != null) { return had!! }
-  val made = __regex.compilePython(text, flags, isBytes)
+  val made = __regex.compileSnippy(text, flags, isBytes)
   if (made is List) {
     val e = made as List<any?>
     var msg = e[0] as string
@@ -587,7 +587,7 @@ internal fun __pyReCompile(pattern : any?, flagsArg : any?) : PyRePattern {
       else -> throw __pyReError(msg, (e[1] as int) >= 0 ? pattern : null, e[1] as int)
     }
   }
-  val p = PyRePattern(pattern, text, made, __regex.pythonFlags(made), isBytes)
+  val p = PyRePattern(pattern, text, made, __regex.snippyFlags(made), isBytes)
   if ((flags & 128) == 0) {
     if (__pyReCache.size >= 512) { __pyReCache.clear() }
     __pyReCache[key] = p
