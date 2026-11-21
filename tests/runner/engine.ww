@@ -626,7 +626,8 @@ class Suite(val options : Options) {
   // The start-up budgets of D145, timed on this machine: a first run, nothing cached, checked and
   // compiled in under 500 ms for each 20,000 lines of the program (the user, 2026-11-10: it grows
   // with the program, as a change's does); a second run with nothing changed in under 20 ms on top
-  // of ww starting; a run after a one-line change inside a function in under 100 ms for each
+  // of ww starting for each 131 files, the program's then (the user, 2026-11-21: it grows with the
+  // files a second run looks at, as the others grow with lines); a run after a one-line change inside a function in under 100 ms for each
   // 20,000 lines, the size the budgets were set on (the user, 2026-11-09: the program grew 2.7
   // times, and what a change costs grows with it, every unchanged file put back). Timed on the
   // tests, the examples, the standard library and Jade (some 20,000 lines), each test and example
@@ -689,8 +690,18 @@ class Suite(val options : Options) {
     }
     var lines = 0
     for (p in parts) { lines += linesOf[p]!! }
+    // And its files, which a second run looks at each of (the user, 2026-11-21: the second run's
+    // budget grows with them, as the others grow with lines).
+    var files = 0
+    fun filesIn(d : FilePath) : int throws IOException {
+      var n = wwFiles(d).size
+      for (sub in d.list()) { if (sub.isDirectory()) { n += filesIn(sub) } }
+      return n
+    }
+    for (p in parts) { files += filesIn(FilePath(program, p)) }
     for (d in [FilePath(t, "../src/std"), FilePath(t, "../lib/Jade")]) {
       for (f in wwFiles(d)) { lines += f.readLines().size }
+      files += wwFiles(d).size
     }
     val leftOut = dropped.isEmpty() ? "" : " (${dropped.size} left out that do not go with the rest: " +
                   dropped.map { p -> partOf.keys.firstOrNull { partOf[it] == p } ?: p }.join(", ") + ")"
@@ -746,17 +757,22 @@ class Suite(val options : Options) {
       item.results["budgets"] = problem
       return
     }
-    // 500 and 100 ms for each 20,000 lines, and never less than 500 and 100.
+    // 500 and 100 ms for each 20,000 lines, and never less than 500 and 100; 20 ms on top of ww
+    // starting for each 131 files, the program's when the budgets were set (2026-10-18: 98 tests
+    // and examples, 7 files of folders they import, 15 of the standard library, 11 of Jade), and
+    // never less than 20.
     val firstBudget = Math.max(500.0, 500.0 * lines.toFloat() / 20000.0)
     val changeBudget = Math.max(100.0, 100.0 * lines.toFloat() / 20000.0)
+    val secondBudget = Math.max(20.0, 20.0 * files.toFloat() / 131.0)
     fun ms(v : any) : string => "${Math.round((v as float) * 10.0) / 10.0} ms"
-    item.measured = "program: ${parts.size} tests and examples, the standard library and Jade, $lines lines$leftOut\n" +
+    item.measured = "program: ${parts.size} tests and examples, the standard library and Jade, $lines lines, $files files$leftOut\n" +
                     "ww starting:           ${ms(start)}\n" +
                     "first run:               ${ms(first[0])}  (budget ${firstBudget.toInt()}, 500 per 20,000 lines)    ${first[2]}\n" +
-                    "second run, unchanged:   ${ms(second[0])}, ${ms(second[1])} on top of ww starting (budget 20)    ${second[2]}\n" +
+                    "second run, unchanged:   ${ms(second[0])}, ${ms(second[1])} on top of ww starting (budget ${secondBudget.toInt()}, 20 per 131 files)    ${second[2]}\n" +
                     "after a one-line change: ${ms(edited[0])}  (budget ${changeBudget.toInt()}, 100 per 20,000 lines)    ${edited[2]}"
     item.results["first run"] = (first[0] as float) <= firstBudget ? "" : "took ${ms(first[0])}, budget ${firstBudget.toInt()} ms (500 per 20,000 lines)"
-    item.results["second run"] = (second[1] as float) <= 20.0 ? "" : "took ${ms(second[1])} on top of ww starting, budget 20 ms"
+    item.results["second run"] = (second[1] as float) <= secondBudget ? "" :
+                                 "took ${ms(second[1])} on top of ww starting, budget ${secondBudget.toInt()} ms (20 per 131 files)"
     item.results["after a change"] = (edited[0] as float) <= changeBudget ? "" : "took ${ms(edited[0])}, budget ${changeBudget.toInt()} ms (100 per 20,000 lines)"
   }
 

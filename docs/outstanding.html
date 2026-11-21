@@ -412,8 +412,9 @@ pre code { background: none; padding: 0; }
 
 <section class="item" id="o-second-run-budget">
 <h3>A second run of the start-up program past its 20 ms</h3>
-<p class="status"><span class="label">Open</span> Found 2026-11-20; waits for the user's word</p>
+<p class="status"><span class="label">Recommended</span> Done 2026-11-21: the budget grows with the program's files</p>
 <p>The suite's start-up budgets (D145) time a program made of every test and example, the standard library and Jade. Its second run, nothing changed, is to be ready in 20 ms on top of ww starting. Since the networking plan's part 5 added its tests (406 tests and examples, 75,138 lines; 403 before) it takes 20.3 to 21.6 ms, 0.9.5054 and 0.9.5055 alike, timed alone and in turn (part 2.1 does nothing on a second run: nothing is checked or compiled). Of that, looking at the kept program's files takes about 15 ms (each file's stamp), reading it in about 4. The budget, unlike the first run's and a change's, does not grow with the program. The ways on: a budget that grows with the number of files as the others grow with lines; the files looked at faster (one listing of each folder in place of a stamp a file); or left as it is.</p>
+<p>The user, 2026-11-21: "let the budget grow with the number of files, the way the other budgets grow with lines". The runner (<code>tests/runner/engine.ww</code>, <code>runBudgets</code>) counts the program's files as it counts its lines (each test's and example's folder, the standard library's and Jade's), and the second run's budget is 20 ms on top of ww starting for each 131 files, the program's when the budgets were set (2026-10-18: 98 tests and examples, 7 files of folders they import, 15 of the standard library, 11 of Jade), never less than 20. Now 540 files: a budget of 82 ms, the second run 21.0 ms.</p>
 </section>
 
 <section class="item" id="o-process-trees">
