@@ -48,9 +48,6 @@ internal fun __pyTupleNames() : List<string> => ["count", "index", "__len__", "_
 
 internal fun __pyIntNames() : List<string> => ["as_integer_ratio", "bit_count", "bit_length", "conjugate", "to_bytes", "is_integer"]
 internal fun __pyFloatNames() : List<string> => ["as_integer_ratio", "conjugate", "hex", "is_integer"]
-internal fun __pyBytesNames() : List<string> => ["decode", "hex", "count", "endswith", "find", "index", "join", "lower", "upper",
-  "replace", "split", "startswith", "strip", "lstrip", "rstrip", "isdigit", "isalpha", "__len__", "__getitem__", "__iter__",
-  "__contains__", "__add__", "__mul__"]
 
 internal var __pyInitDone = false
 
@@ -76,6 +73,21 @@ fun pyInitRuntime() {
   fill(pyFloatType, __pyFloatNames())
   pyFloatType.dict["fromhex"] = PyClassMethod(PyBuiltin("fromhex", { a, k -> pyFloatFromHex(a[1] as string) }))
   fill(pyComplexType, ["conjugate"])
+  // float.from_number(x), complex.from_number(x) (3.14): a number made one, never text.
+  pyFloatType.dict["from_number"] = PyClassMethod(PyBuiltin("from_number", { a, k ->
+    val x = a[1]
+    if (x is string or x is Bytes or x is PyByteArray or x is Complex or !(pyIsNumber(x) or x is PyObject)) {
+      throw pyTypeError("must be real number, not ${pyTypeName(x)}")
+    }
+    pyFloatOf1(x)
+  }))
+  pyComplexType.dict["from_number"] = PyClassMethod(PyBuiltin("from_number", { a, k ->
+    val x = a[1]
+    if (x is string or x is Bytes or x is PyByteArray or !(pyIsNumber(x) or x is PyObject)) {
+      throw pyTypeError("complex() argument 'real' must be a real number, not ${pyTypeName(x)}")
+    }
+    __pyToComplex(x)
+  }))
   fill(pyStrType, __pyStrNames())
   pyStrType.dict["maketrans"] = PyStaticMethod(PyBuiltin("maketrans", { a, k -> pyMakeTrans(a) }))
   fill(pyListType, __pyListNames())
@@ -88,8 +100,21 @@ fun pyInitRuntime() {
   fill(pySetType, __pySetNames(false))
   fill(pyFrozenSetType, __pySetNames(true))
   fill(pyTupleType, __pyTupleNames())
-  fill(pyBytesType, __pyBytesNames())
+  fill(pyBytesType, __pyBytesNamesAll())
+  fill(pyByteArrayType, __pyByteArrayNamesAll())
+  fill(pyMemoryViewType, __pyMemoryViewNames())
+  for t in [pyBytesType, pyByteArrayType] {
+    val array = t === pyByteArrayType
+    t.dict["fromhex"] = PyClassMethod(PyBuiltin("fromhex", { a, k ->
+      val made = pyBytesFromHex(a[1])
+      array ? PyByteArray(made) : made
+    }))
+    t.dict["maketrans"] = PyStaticMethod(PyBuiltin("maketrans", { a, k -> pyBytesMakeTrans(a[0], a[1]) }))
+  }
+  for v in ["obj", "nbytes", "itemsize", "format", "ndim", "shape", "strides", "suboffsets", "readonly", "c_contiguous",
+            "f_contiguous", "contiguous"] { pyMemoryViewType.dict[v] = PyMethodDescriptor(pyMemoryViewType, v) }
   fill(pyRangeType, ["count", "index", "__len__", "__getitem__", "__iter__", "__contains__", "__reversed__"])
+  fill(pySliceType, ["indices"])
   fill(pyNoneType, ["__bool__"])
   fill(pyTextIOType, ["write", "flush", "writelines", "isatty", "fileno"])
   fill(pyGeneratorType, ["send", "throw", "close", "__next__", "__iter__"])
@@ -129,10 +154,29 @@ fun pyInitRuntime() {
 
 // ---- Calling a method of a builtin value ----
 
+// The number of positional arguments each builtin type's method takes, by "type.method"
+// (Arity.ww, made from CPython): what it says where a call gives fewer or more.
+internal var __pyArity : open Map<string, List<any>>? = null
+internal fun __pyCheckArity(self : any?, name : string, n : int) {
+  if (__pyArity == null) {
+    val m : open Map<string, List<any>> = {:}
+    for r in __pyArityRows() { m["${r[0]}.${r[1]}"] = r }
+    __pyArity = m
+  }
+  val t = self is bool ? "int" : pyTypeName(self)
+  val row = __pyArity!!["$t.$name"]
+  if (row == null) { return }
+  val low = row!![2] as int
+  val high = row!![3] as int
+  if (n < low and (row!![4] as string).isNotEmpty()) { throw pyTypeError((row!![4] as string).replace("{n}", "$n")) }
+  if (high >= 0 and n > high and (row!![5] as string).isNotEmpty()) { throw pyTypeError((row!![5] as string).replace("{n}", "$n")) }
+}
+
 fun pyCallMethodV(self : any?, name : string, args : List<any?>, kw : List<string>?) : any? {
   if (!(self is PyObject) and !(self is PyType) and pyTypeOf(self).lookup(name) === pyUnbound) {
     throw pyAttributeError("'${pyTypeName(self)}' object has no attribute '$name'", self, name)
   }
+  if (kw == null or kw!!.isEmpty()) { __pyCheckArity(self, name, args.size) }
   val a = PyArgs(args, kw, name + "()")
   return when (self) {
     is string -> __pyStrMethod(self as string, name, a)
@@ -158,17 +202,37 @@ fun pyCallMethodV(self : any?, name : string, args : List<any?>, kw : List<strin
     is PyStdStream -> __pyStreamMethod(self as PyStdStream, name, a)
     is PyNative -> (self as PyNative).call(name, a)
     is PyRange -> {
+      // An int's place worked out, anything else looked for (part 5.3), as CPython does.
+      val r = self as PyRange
+      val x = a.pos[0]
       when (name) {
-        "count" -> pyIterable(self).count { pyEqB(it, a.pos[0]) }
+        "count" -> x is int or x is bool ? (r.has(x) ? 1 : 0) : pyIterable(self).count { pyEqB(it, x) }
         "index" -> {
-          val i = pyIterable(self).indexOfFirst { pyEqB(it, a.pos[0]) }
-          if (i < 0) { throw pyValueError("${pyRepr(a.pos[0])} is not in range") }
+          val i = x is int or x is bool ? (r.has(x) ? ((x is bool ? ((x as bool) ? 1 : 0) : x as int) - r.start) / r.step : -1)
+                                        : pyIterable(self).indexOfFirst { pyEqB(it, x) }
+          if (i < 0) { throw pyValueError("range.index(x): x not in range") }
           i
         }
         else -> __pyCommonMethod(self, name, a)
       }
     }
-    is Bytes -> __pyBytesMethod(self as Bytes, name, a)
+    is PySlice -> {
+      when (name) {
+        "indices" -> {
+          val n = pyIndexValue(a.pos[0])
+          if (pyBig(n) < BigInt.of(0)) { throw pyValueError("length should not be negative") }
+          if (n is BigInt) {
+            PyTuple(pyBigSliceIndices(self as PySlice, n as BigInt).map { pyNorm(it) })
+          } else {
+            val ix = pySliceIndices(self as PySlice, n as int)
+            PyTuple([ix[0], ix[1], ix[2]])
+          }
+        }
+        else -> __pyCommonMethod(self, name, a)
+      }
+    }
+    is Bytes -> pyBytesMethod(self as Bytes, name, a, null)
+    is PyByteArray -> pyByteArrayMethod(self as PyByteArray, name, a)
     is PyFunction, is PyMethod, is PyBuiltin, is PyBoundBuiltin -> {
       when (name) {
         "__call__" -> pyCallV(self, args, kw)
@@ -295,9 +359,17 @@ fun pyIsSpace(c : char) : bool {
   return cat == "Zs" or cat == "Zl" or cat == "Zp" or cp == 0x1680
 }
 
+// A str argument of a str method, or the TypeError CPython gives for that method (part 5.3).
 internal fun __pyStrArg(x : any?, method : string) : string {
   if (x is string) { return x as string }
-  throw pyTypeError("$method arg must be None or str")
+  val t = pyTypeName(x)
+  throw pyTypeError(when (method) {
+    "partition", "rpartition" -> "must be str, not $t"
+    "split", "rsplit" -> "must be str or None, not $t"
+    "removeprefix", "removesuffix" -> "$method() argument must be str, not $t"
+    "replace2" -> "replace() argument 2 must be str, not $t"
+    else -> "$method() argument 1 must be str, not $t"
+  })
 }
 
 // The start and end a str method's optional start and end arguments give.
@@ -380,17 +452,12 @@ internal fun __pyIsLineBreak(c : char) : bool {
   return cp == 10 or cp == 13 or cp == 11 or cp == 12 or cp == 0x1C or cp == 0x1D or cp == 0x1E or cp == 0x85 or cp == 0x2028 or cp == 0x2029
 }
 
-internal fun __pyIsCased(c : char) : bool {
-  val cat = pyCategory(pyOrd(c))
-  return cat == "Lu" or cat == "Ll" or cat == "Lt"
-}
-
 internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
   val p = a.pos
   return when (name) {
-    "upper" -> pyUpper(s)
-    "lower" -> s.lower()
-    "casefold" -> s.lower().replace("ß", "ss")
+    "upper" -> pyStrUpper(s)
+    "lower" -> pyStrLower(s)
+    "casefold" -> pyStrCasefold(s)
     "strip" -> __pyStrip(s, __pyStripChars(a, "strip"), true, true)
     "lstrip" -> __pyStrip(s, __pyStripChars(a, "lstrip"), true, false)
     "rstrip" -> __pyStrip(s, __pyStripChars(a, "rstrip"), false, true)
@@ -401,7 +468,7 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
       if (sep == null) {
         name == "split" ? pySplitWhitespace(s, maxsplit) : __pyRSplitWhitespace(s, maxsplit)
       } else {
-        val sp = __pyStrArg(sep, "must be str or None, not ${pyTypeName(sep)}")
+        val sp = __pyStrArg(sep, name)
         if (sp.isEmpty()) { throw pyValueError("empty separator") }
         val out : open List<any?> = []
         if (name == "split") {
@@ -465,8 +532,8 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
     }
     "replace" -> {
       a.only(["count"])
-      val old = __pyStrArg(p[0], "replace() argument 1")
-      val new = __pyStrArg(p[1], "replace() argument 2")
+      val old = __pyStrArg(p[0], "replace")
+      val new = __pyStrArg(p[1], "replace2")
       val count = pyIndex(p.size > 2 ? p[2] : a.get("count", -1))
       if (count < 0) {
         if (old.isEmpty()) {
@@ -593,29 +660,9 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
     }
     "isidentifier" -> pyIsIdentifier(s)
     "isprintable" -> s.all { pyIsPrintable(pyOrd(it)) }
-    "capitalize" -> s.isEmpty() ? s : s[0].toString().upper() + s[1..].lower()
-    "title" -> {
-      val sb = StringBuilder()
-      var previousCased = false
-      for c in s {
-        if (__pyIsCased(c)) {
-          sb.append(previousCased ? c.toString().lower() : c.toString().upper())
-          previousCased = true
-        } else {
-          sb.append(c)
-          previousCased = false
-        }
-      }
-      sb.toString()
-    }
-    "swapcase" -> {
-      val sb = StringBuilder()
-      for c in s {
-        val cat = pyCategory(pyOrd(c))
-        sb.append(cat == "Lu" ? c.toString().lower() : cat == "Ll" ? c.toString().upper() : c.toString())
-      }
-      sb.toString()
-    }
+    "capitalize" -> pyStrCapitalize(s)
+    "title" -> pyStrTitle(s)
+    "swapcase" -> pyStrSwapcase(s)
     "center", "ljust", "rjust" -> {
       val width = pyIndex(p[0])
       val fill = p.size > 1 ? p[1] : " "
@@ -733,7 +780,12 @@ fun pyIsIdentifier(s : string) : bool {
 fun pyMakeTrans(a : List<any?>) : any? {
   val d = pyNewDict()
   if (a.size == 1) {
+    if (!(a[0] is PyDict) and !(a[0] is PyObject and pyIsInstance(a[0], pyDictType))) {
+      throw pyTypeError("if you give only one argument to maketrans it must be a dict")
+    }
     for k in pyIterable(a[0]) { val v = pyGetItem(a[0], k)
+      if (k is string and (k as string).size != 1) { throw pyValueError("string keys in translatetable must be of length 1") }
+      if (!(k is string) and !pyIsInt(k)) { throw pyTypeError("keys in translate table must be strings or integers") }
       val key = k is string ? pyOrd((k as string)[0]) : k
       d.set(key, v)
     }
@@ -813,6 +865,7 @@ fun pyStrFormat(fmt : string, args : List<any?>, kwargs : Map<string, any?>) : s
           }
           j += 1
         }
+        if (i + 1 >= f.size) { throw pyValueError("Single '{' encountered in format string") }
         if (j >= f.size) { throw pyValueError("expected '}' before end of string") }
         val inside = f[(i + 1)..<j]
         var name = inside
@@ -1109,6 +1162,7 @@ internal fun __pyIntMethod(x : any?, name : string, a : PyArgs) : any? {
     "to_bytes" -> {
       val length = pyIndex(a.pos.size > 0 ? a.pos[0] : a.get("length", 1))
       val order = a.pos.size > 1 ? a.pos[1] as string : a.get("byteorder", "big") as string
+      if (order != "little" and order != "big") { throw pyValueError("byteorder must be either 'little' or 'big'") }
       val signed = pyTruth(a.get("signed", false))
       var v = pyBig(n)
       if (v < 0) {
@@ -1132,6 +1186,7 @@ internal fun __pyIntMethod(x : any?, name : string, a : PyArgs) : any? {
 fun pyIntFromBytes(a : PyArgs) : any? {
   val bytes = pyBytesOf(a.pos[1], null) as Bytes
   val order = a.pos.size > 2 ? a.pos[2] as string : a.get("byteorder", "big") as string
+  if (order != "little" and order != "big") { throw pyValueError("byteorder must be either 'little' or 'big'") }
   val signed = pyTruth(a.get("signed", false))
   var v = BigInt.of(0)
   for i in 0..<bytes.size {
@@ -1166,49 +1221,6 @@ internal fun __pyFloatMethod(x : float, name : string, a : PyArgs) : any? {
   }
 }
 
-fun pyFloatHex(x : float) : string {
-  if (x.isNaN()) { return "nan" }
-  if (x.isInfinite()) { return x > 0.0 ? "inf" : "-inf" }
-  if (x == 0.0) { return 1.0 / x < 0.0 ? "-0x0.0p+0" : "0x0.0p+0" }
-  val parts = __pyFloatParts(Math.abs(x))
-  var m = parts.first
-  var e = parts.second
-  // Normalise to 1.hhhh * 2**exp with 52 bits after the point.
-  var bits = 0
-  var t = m
-  while (t > BigInt.of(0)) { t = t >> 1; bits += 1 }
-  val shift = 53 - bits
-  m = m << shift
-  e -= shift
-  val exp = e + 52
-  val frac = (m - (BigInt.of(1) << 52)).toString(16).padStart(13, '0').let { pyTrimEndChar(it, '0') }
-  return (x < 0.0 ? "-" : "") + "0x1." + (frac.isEmpty() ? "0" : frac) + "p" + (exp >= 0 ? "+" : "") + exp.toString()
-}
-
-fun pyFloatFromHex(s : string) : any? {
-  var t = s.trim().lower()
-  var negative = false
-  if (t.startsWith("-") or t.startsWith("+")) {
-    negative = t.startsWith("-")
-    t = t[1..]
-  }
-  if (t.startsWith("0x")) { t = t[2..] }
-  var exp = 0
-  val pAt = t.indexOf("p")
-  if (pAt >= 0) {
-    exp = t[(pAt + 1)..].toInt()
-    t = t[..<pAt]
-  }
-  val dot = t.indexOf(".")
-  val whole = dot >= 0 ? t[..<dot] : t
-  val frac = dot >= 0 ? t[(dot + 1)..] : ""
-  val digits = (whole + frac).isEmpty() ? "0" : whole + frac
-  val v = BigInt.parse(digits, 16)
-  val e2 = exp - 4 * frac.size
-  var r = v.toFloat()
-  r = e2 >= 0 ? r * 2.0.pow(e2) : r / 2.0.pow(-e2)
-  return negative ? -r : r
-}
 
 // ---- generators and exceptions ----
 
@@ -1283,64 +1295,67 @@ internal fun __pyExcMethod(e : PyExc, name : string, a : PyArgs) : any? {
 
 // ---- bytes ----
 
-internal fun __pyBytesMethod(b : Bytes, name : string, a : PyArgs) : any? {
-  val p = a.pos
-  return when (name) {
-    "decode" -> pyDecode(b, p.isNotEmpty() ? p[0] as string : a.get("encoding", "utf-8") as string,
-                         p.size > 1 ? p[1] as string : a.get("errors", "strict") as string)
-    "hex" -> {
-      val sb = StringBuilder()
-      for i in 0..<b.size { sb.append(pyHex(b[i], 2)) }
-      sb.toString()
-    }
-    "upper", "lower" -> {
-      val out = Bytes(b.size)
-      for i in 0..<b.size {
-        var v : int = b[i]
-        if (name == "upper" and v >= 97 and v <= 122) { v -= 32 }
-        if (name == "lower" and v >= 65 and v <= 90) { v += 32 }
-        out[i] = v.toByte()
-      }
-      out
-    }
-    "startswith", "endswith", "find", "count", "index", "replace", "split", "strip", "lstrip", "rstrip", "join", "isdigit", "isalpha" -> {
-      // As the text of its bytes, one character each.
-      val text = pyBytesText(b)
-      val args = p.map { it is Bytes ? pyBytesText(it as Bytes) : it is PyTuple ? PyTuple((it as PyTuple).items.map { x -> x is Bytes ? pyBytesText(x as Bytes) : x }) : it is List<any?> ? (it as List<any?>).map { x -> x is Bytes ? pyBytesText(x as Bytes) : x } : it }
-      val r = __pyStrMethod(text, name, PyArgs(args, null, name + "()"))
-      when (r) {
-        is string -> pyBytesOfLatin1(r as string)
-        is List<any?> -> (r as List<any?>).map { pyBytesOfLatin1(it as string) }.toOpenList()
-        else -> r
-      }
-    }
-    else -> __pyCommonMethod(b, name, a)
-  }
+
+
+// float.hex(), from the float's 64 bits (part 5.3): 0x1. and 13 hex digits, or 0x0. for a
+// subnormal one, as CPython writes it.
+fun pyFloatHex(x : float) : string {
+  if (x.isNaN()) { return "nan" }
+  if (x.isInfinite()) { return x > 0.0 ? "inf" : "-inf" }
+  val b = Bytes(8)
+  b.putFloat64(0, x)
+  val bits = b.int64(0)
+  val sign = bits < 0 ? "-" : ""
+  val field = (bits >>> 52) & 0x7FF
+  val mantissa = bits & 0xFFFFFFFFFFFFF
+  if (field == 0 and mantissa == 0) { return sign + "0x0.0p+0" }
+  val digits = mantissa.toString(16).padStart(13, '0')
+  if (field == 0) { return sign + "0x0." + digits + "p-1022" }
+  val exp = field - 1023
+  return sign + "0x1." + digits + "p" + (exp >= 0 ? "+" : "") + exp.toString()
 }
 
-// str.upper(): what WinterWolf's upper gives, with Python's full mappings for the characters
-// that become more than one (ß to SS, the ligatures).
-fun pyUpper(s : string) : string {
-  val u = s.upper()
-  var plain = true
-  for c in u {
-    val cp = pyOrd(c)
-    if (cp == 0xDF or cp == 0x149 or (cp >= 0xFB00 and cp <= 0xFB06)) { plain = false; break }
+// float.fromhex(text), as CPython reads it: blanks around it, a sign, inf, infinity or nan, or
+// hexadecimal digits with an optional point, 0x before them and p and a power of two after.
+fun pyFloatFromHex(s : string) : any? {
+  val bad = { -> pyValueError("invalid hexadecimal floating-point string") }
+  var t = s.trim().lower()
+  var negative = false
+  if (t.startsWith("-") or t.startsWith("+")) {
+    negative = t.startsWith("-")
+    t = t[1..]
   }
-  if (plain) { return u }
-  val sb = StringBuilder()
-  for c in u {
-    when (pyOrd(c)) {
-      0xDF -> sb.append("SS")
-      0x149 -> sb.append("\u{2BC}N")
-      0xFB00 -> sb.append("FF")
-      0xFB01 -> sb.append("FI")
-      0xFB02 -> sb.append("FL")
-      0xFB03 -> sb.append("FFI")
-      0xFB04 -> sb.append("FFL")
-      0xFB05, 0xFB06 -> sb.append("ST")
-      else -> sb.append(c)
-    }
+  if (t == "inf" or t == "infinity") { return negative ? -pyInf : pyInf }
+  if (t == "nan") { return pyInf - pyInf }
+  if (t.startsWith("0x")) { t = t[2..] }
+  var exp = BigInt.of(0)
+  val pAt = t.indexOf("p")
+  if (pAt >= 0) {
+    var e = t[(pAt + 1)..]
+    var eNeg = false
+    if (e.startsWith("-") or e.startsWith("+")) { eNeg = e.startsWith("-"); e = e[1..] }
+    if (e.isEmpty() or !e.all { it >= '0' and it <= '9' }) { throw bad() }
+    exp = BigInt.parse(e)
+    if (eNeg) { exp = -exp }
+    t = t[..<pAt]
   }
-  return sb.toString()
+  val dot = t.indexOf(".")
+  val whole = dot >= 0 ? t[..<dot] : t
+  val frac = dot >= 0 ? t[(dot + 1)..] : ""
+  if (whole.isEmpty() and frac.isEmpty()) { throw bad() }
+  fun hexOnly(x : string) : bool => x.all { (it >= '0' and it <= '9') or (it >= 'a' and it <= 'f') }
+  if (!hexOnly(whole) or !hexOnly(frac) or frac.contains(".")) { throw bad() }
+  val v = BigInt.parse(whole + frac, 16)
+  if (v == BigInt.of(0)) { return negative ? -0.0 : 0.0 }
+  val e2 = exp - BigInt.of(4 * frac.size)
+  if (e2 > BigInt.of(2000)) { throw pyOverflowError("hexadecimal value too large to represent as a float") }
+  if (e2 < BigInt.of(-3000)) { return negative ? -0.0 : 0.0 }
+  val p = e2.toInt()
+  // Scaled in steps, so that no step is past a float's range before the last.
+  var r = v.toFloat()
+  var left = p
+  while (left > 0) { val k = left > 1000 ? 1000 : left; r = r * 2.0.pow(k); left -= k }
+  while (left < 0) { val k = left < -1000 ? 1000 : -left; r = r / 2.0.pow(k); left += k }
+  if (r.isInfinite()) { throw pyOverflowError("hexadecimal value too large to represent as a float") }
+  return negative ? -r : r
 }

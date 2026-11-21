@@ -122,7 +122,8 @@ fun pyReprStr(s : string) : string {
 
 // Bytes as Python's repr() writes them: b'...', the quote chosen as a str's is, and every byte
 // that is not printable ASCII as \x.
-fun pyReprBytes(b : Bytes) : string {
+// (`escapeSingle`: a bytearray's, as CPython writes it, a single quote escaped inside double quotes too.)
+fun pyReprBytes(b : Bytes, escapeSingle : bool = false) : string {
   var single = false
   var double = false
   for (i in 0 ..< b.size) {
@@ -135,7 +136,7 @@ fun pyReprBytes(b : Bytes) : string {
   sb.append(quote.char)
   for (i in 0 ..< b.size) {
     val v = b[i].toInt()
-    if (v == quote or v == 92) {
+    if (v == quote or v == 92 or (escapeSingle and v == 39)) {
       sb.append('\\')
       sb.append(v.char)
     } else if (v == 9) {

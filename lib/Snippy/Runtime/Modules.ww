@@ -6,7 +6,38 @@ fun pyStandardModules() : open Map<string, () -> PyModule> {
   val m : open Map<string, () -> PyModule> = {:}
   m["sys"] = { -> pySysModule() }
   m["asyncio"] = { -> pyAsyncioModule() }
+  m["builtins"] = { -> PyBuiltinsModule() }
   return m
+}
+
+// copyright, credits, license: their text shown, or printed when called.
+internal lazy val __pyPrinterType : PyType = pyNativeType("_Printer", "_sitebuiltins", ["__call__", "__repr__"], null)
+class PyPrinter(val name : string, val text : string) : PyNative() {
+  override fun pyType() : PyType => __pyPrinterType
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__repr__" -> text
+      "__call__" -> { print(text); null }
+      else -> throw pyAttributeError("'_Printer' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// The builtins module (part 5.3): the table a name no module binds is looked up in, itself, so
+// that `builtins.name = value` gives every module a new builtin, as in Python.
+class PyBuiltinsModule : PyModule("builtins", "<built-in>", [], { i : int -> pyUnbound }, { i : int, v : any? -> }, null) {
+  init { ran = true }
+  override fun get(name : string) : any? {
+    if (name == "__name__") { return "builtins" }
+    return __pyBuiltinTable()[name, default = pyUnbound]
+  }
+  override fun set(name : string, v : any?) { __pyBuiltinTable()[name] = v }
+  override fun delete(name : string) : bool {
+    if (!(name in __pyBuiltinTable().keys)) { return false }
+    __pyBuiltinTable().remove(name)
+    return true
+  }
+  override fun bound() : List<string> => __pyBuiltinTable().keys.toList()
 }
 
 internal fun __pyStream(isError : bool) : any? {

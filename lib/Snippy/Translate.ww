@@ -1188,6 +1188,21 @@ class PyTranslator(val tree : PyModule, val scopes : PyScopes, val path : string
     return "null"
   }
 
+  // locals() (part 5.3): at module level the module's globals; in a function a new dict of its
+  // parameters and locals bound so far, in their order (as CPython's since PEP 667); in a class
+  // body or a comprehension, a new dict.
+  private fun localsCall() : string {
+    val s = cx.scope
+    if (s.kind == PyScopeKind.Module) { return "pyGlobalsOf($moduleVal)" }
+    if (s.kind != PyScopeKind.Function) { return "pyNewDict()" }
+    val names : open List<string> = []
+    for p in s.params { if (!(p in names)) { names.add(p) } }
+    for n in s.bound {
+      if (!(n in names) and !(n in s.globals) and !(n in s.nonlocals)) { names.add(n) }
+    }
+    return "pyLocalsOf([" + names.map { wwString(it) }.join(", ") + "], [" + names.map { s.wwName(it) }.join(", ") + "])"
+  }
+
   private fun call(c : PyCall) : string {
     val plain = c.keywords.isEmpty() and c.args.none { it is PyStarred }
     val f = c.func
@@ -1198,7 +1213,7 @@ class PyTranslator(val tree : PyModule, val scopes : PyScopes, val path : string
         val cellName = cell.kind == PyRefKind.Free ? cell.ww!! : "null"
         return "pySuper($cellName, ${cx.selfName ?: "pyUnbound"})"
       }
-      if (name == "locals" and c.args.isEmpty()) { return "pyNewDict()" }
+      if (name == "locals" and c.args.isEmpty()) { return localsCall() }
       if (name == "globals" and c.args.isEmpty()) { return "pyGlobalsOf($moduleVal)" }
       val direct = __pyDirectCalls[name]
       if (plain and direct != null and c.args.size >= direct!!.second and c.args.size <= direct!!.third) {

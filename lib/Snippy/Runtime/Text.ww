@@ -100,7 +100,11 @@ fun pyRepr(x : any?) : string {
     }
     is PySlice -> "slice(${pyRepr((x as PySlice).lower)}, ${pyRepr((x as PySlice).upper)}, ${pyRepr((x as PySlice).step)})"
     is Bytes -> pyReprBytes(x as Bytes)
-    is PyByteArray -> "bytearray(${pyReprBytes((x as PyByteArray).bytes)})"
+    is PyByteArray -> "bytearray(${pyReprBytes((x as PyByteArray).bytes, true)})"
+    is PyNative -> {
+      val r = pyNativeSpecial(x as PyNative, "__repr__", [])
+      r === pyUnbound ? x.toString() : r as string
+    }
     is PyGenerator -> "<${(x as PyGenerator).kindName()} object ${(x as PyGenerator).spec.qualname} at ${pyHexId(x)}>"
     is PyDictView -> {
       val v = x as PyDictView
@@ -557,13 +561,15 @@ internal fun __pyFormatComplex(c : Complex, spec : string) : string {
   val inner = spec.size > 0 ? (f.type == '\u{0}' ? spec + "g" : spec) : ""
   val re = __pyFormatFloat(c.re, PyFormatSpec(inner).let { inner.replace(f.width.toString(), "") })
   val im = __pyFormatFloat(c.im, "+" + (inner.startsWith("+") ? inner[1..] : inner).replace(f.width.toString(), ""))
-  val text = c.re == 0.0 and f.type == '\u{0}' ? im[1..] + "j" : "(" + re + im + "j)"
+  // With a type (e, f, g...) both parts, no brackets; with none, brackets, and a real part of 0 left out.
+  val text = f.type != '\u{0}' ? re + im + "j" : c.re == 0.0 ? im[1..] + "j" : "(" + re + im + "j)"
   return __pyPad("", text, f, '>')
 }
 
 // ---- % formatting ----
 
-fun pyPercentFormat(fmt : string, args0 : any?) : string {
+// (`forBytes`: bytes % args, part 5.3: %s and %b take bytes-like values, %r is %a, %c a byte.)
+fun pyPercentFormat(fmt : string, args0 : any?, forBytes : bool = false) : string {
   val sb = StringBuilder()
   val isTuple = args0 is PyTuple
   val args = isTuple ? (args0 as PyTuple).items : [args0]
@@ -646,8 +652,24 @@ fun pyPercentFormat(fmt : string, args0 : any?) : string {
     var left = flags.contains("-")
     var text = ""
     when (type) {
-      's' -> text = pyStr(arg)
-      'r' -> text = pyRepr(arg)
+      's', 'b' -> {
+        if (forBytes) {
+          var held = pyBytesLike(arg)
+          if (held == null and arg is PyObject) {
+            val m = (arg as PyObject).cls.lookup("__bytes__")
+            if (m !== pyUnbound) { held = pyBytesLike(__pyCall1Special(m, arg)) }
+          }
+          if (held == null) {
+            throw pyTypeError("%b requires a bytes-like object, or an object that implements __bytes__, not '${pyTypeName(arg)}'")
+          }
+          text = pyBytesText(held!!)
+        } else if (type == 'b') {
+          throw pyValueError("unsupported format character 'b' (0x62) at index ${i - 1}")
+        } else {
+          text = pyStr(arg)
+        }
+      }
+      'r' -> text = forBytes ? pyAscii(arg) as string : pyRepr(arg)
       'a' -> text = pyAscii(arg) as string
       'd', 'i', 'u' -> {
         if (!pyIsNumber(arg) and !(arg is PyObject)) { throw pyTypeError("%$type format: a real number is required, not ${pyTypeName(arg)}") }
@@ -666,7 +688,20 @@ fun pyPercentFormat(fmt : string, args0 : any?) : string {
         text = __pyFormatFloat(x, sign + (flags.contains("#") ? "#" : "") + "." + (precision < 0 ? 6 : precision).toString() + type.toString())
       }
       'c' -> {
-        text = arg is string ? arg as string : pyChar(pyIndex(arg)).toString()
+        if (forBytes) {
+          val one = pyBytesLike(arg)
+          if (one != null) {
+            if (one!!.size != 1) { throw pyTypeError("%c requires an integer in range(256) or a single byte") }
+            text = pyBytesText(one!!)
+          } else {
+            if (!pyIsInt(arg)) { throw pyTypeError("%c requires an integer in range(256) or a single byte") }
+            val v = pyIndex(arg)
+            if (v < 0 or v > 255) { throw pyOverflowError("%c arg not in range(256)") }
+            text = v.char.toString()
+          }
+        } else {
+          text = arg is string ? arg as string : pyChar(pyIndex(arg)).toString()
+        }
       }
       else -> throw pyValueError("unsupported format character '$type' (0x${type.code.toString(16)}) at index ${i - 1}")
     }
@@ -706,7 +741,7 @@ internal fun __pyPercentInt(n : BigInt, base : int, flags : string, precision : 
 fun pyPercentBytes(fmt : Bytes, args : any?) : any? {
   val s = StringBuilder()
   for i in 0..<fmt.size { s.append((fmt[i] + 0).char) }
-  val text = pyPercentFormat(s.toString(), args)
+  val text = pyPercentFormat(s.toString(), args, true)
   return pyBytesOfLatin1(text)
 }
 

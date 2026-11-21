@@ -1,0 +1,886 @@
+import Snippy.Text.*
+// bytes, bytearray and memoryview (the Snippy plan, part 5.3): their methods whole, as CPython
+// 3.14 has them. bytes is WinterWolf's Bytes; a bytearray (PyByteArray, Containers.ww) keeps a
+// buffer with room to grow and its length; a memoryview (PyMemoryView) is a window on either. A
+// bytearray's methods give bytearrays where bytes' give bytes. Case and the classes of characters
+// are ASCII's alone, as Python's are for bytes, and so is the whitespace split() and strip() take.
+
+// ---- Bytes-like values ----
+
+// The bytes a bytes-like value holds (bytes; a bytearray's, as they are now; a memoryview's), or null.
+fun pyBytesLike(x : any?) : Bytes? {
+  if (x is Bytes) { return x as Bytes }
+  if (x is PyByteArray) { return (x as PyByteArray).bytes }
+  if (x is PyMemoryView) { return (x as PyMemoryView).tobytes() }
+  return null
+}
+
+internal fun __pyNeedBytes(x : any?) : Bytes {
+  val b = pyBytesLike(x)
+  if (b == null) { throw pyTypeError("a bytes-like object is required, not '${pyTypeName(x)}'") }
+  return b!!
+}
+
+internal fun __pyOneByte(n : int) : Bytes {
+  val one = Bytes(1)
+  one[0] = n.toByte()
+  return one
+}
+
+// What find(), count() and the rest look for: a byte's value (0 to 255) or bytes-like.
+internal fun __pyByteSub(x : any?) : Bytes {
+  if (pyIsInt(x)) {
+    val n = pyIndex(x)
+    if (n < 0 or n > 255) { throw pyValueError("byte must be in range(0, 256)") }
+    return __pyOneByte(n)
+  }
+  val b = pyBytesLike(x)
+  if (b == null) { throw pyTypeError("argument should be integer or bytes-like object, not '${pyTypeName(x)}'") }
+  return b!!
+}
+
+// A byte value to store: an int of 0 to 255.
+fun pyByteValue(x : any?) : int {
+  if (!pyIsInt(x)) { throw pyTypeError("'${pyTypeName(x)}' object cannot be interpreted as an integer") }
+  val n = pyIndex(x)
+  if (n < 0 or n > 255) { throw pyValueError("byte must be in range(0, 256)") }
+  return n
+}
+
+internal fun __pyBSpace(v : int) : bool => v == 32 or (v >= 9 and v <= 13)
+internal fun __pyBLower(v : int) : bool => v >= 97 and v <= 122
+internal fun __pyBUpper(v : int) : bool => v >= 65 and v <= 90
+internal fun __pyBDigit(v : int) : bool => v >= 48 and v <= 57
+internal fun __pyBAlpha(v : int) : bool => __pyBLower(v) or __pyBUpper(v)
+
+// Bytes from..<to of b, a copy.
+fun pyBytesPart(b : Bytes, from : int, to : int) : Bytes {
+  val out = Bytes(to > from ? to - from : 0)
+  if (to > from) { out.copyFrom(b, from, 1, 0, 1, to - from) }
+  return out
+}
+
+internal fun __pyBytesCat(parts : List<Bytes>) : Bytes {
+  var n = 0
+  for p in parts { n += p.size }
+  val out = Bytes(n)
+  var at = 0
+  for p in parts {
+    if (p.size > 0) { out.copyFrom(p, 0, 1, at, 1, p.size) }
+    at += p.size
+  }
+  return out
+}
+
+// Where sub is in b within from..<to, the first or the last; -1 where it is not.
+internal fun __pyBIndexOf(b : Bytes, sub : Bytes, from : int, to : int, last : bool) : int {
+  if (from > b.size or from > to) { return -1 }
+  val n = sub.size
+  fun at(i : int) : bool {
+    for j in 0..<n { if (b[i + j] != sub[j]) { return false } }
+    return true
+  }
+  if (last) {
+    var i = to - n
+    while (i >= from) {
+      if (at(i)) { return i }
+      i -= 1
+    }
+    return -1
+  }
+  var i = from
+  while (i + n <= to) {
+    if (at(i)) { return i }
+    i += 1
+  }
+  return -1
+}
+
+internal fun __pyBCount(b : Bytes, sub : Bytes, from : int, to : int) : int {
+  if (from > b.size or from > to) { return 0 }
+  if (sub.size == 0) { return to - from + 1 }
+  var n = 0
+  var i = from
+  while (true) {
+    val k = __pyBIndexOf(b, sub, i, to, false)
+    if (k < 0) { return n }
+    n += 1
+    i = k + sub.size
+  }
+  return n
+}
+
+// The fill byte of center(), ljust() and rjust().
+internal fun __pyFillByte(x : any?, method : string) : int {
+  val b = pyBytesLike(x)
+  if (b == null) { throw pyTypeError("$method(): argument 2 must be a byte string of length 1, not ${pyTypeName(x)}") }
+  if (b!!.size != 1) { throw pyTypeError("$method(): argument 2 must be a byte string of length 1, not a ${pyTypeName(x)} object of length ${b!!.size}") }
+  return b!![0].toInt()
+}
+
+internal fun __pyBPad(b : Bytes, left : int, right : int, fill : int) : Bytes {
+  val out = Bytes(b.size + left + right)
+  out.fill(fill.toByte())
+  if (b.size > 0) { out.copyFrom(b, 0, 1, left, 1, b.size) }
+  return out
+}
+
+internal fun __pyBSplitWhite(b : Bytes, maxsplit : int, fromRight : bool) : open List<Bytes> {
+  val out : open List<Bytes> = []
+  if (!fromRight) {
+    var i = 0
+    var splits = 0
+    while (true) {
+      while (i < b.size and __pyBSpace(b[i])) { i += 1 }
+      if (i >= b.size) { break }
+      if (maxsplit >= 0 and splits >= maxsplit) {
+        out.add(pyBytesPart(b, i, b.size))  // the rest as it is, its blanks at the end kept
+        break
+      }
+      var j = i
+      while (j < b.size and !__pyBSpace(b[j])) { j += 1 }
+      out.add(pyBytesPart(b, i, j))
+      splits += 1
+      i = j
+    }
+    return out
+  }
+  var j = b.size
+  var splits = 0
+  while (true) {
+    while (j > 0 and __pyBSpace(b[j - 1])) { j -= 1 }
+    if (j <= 0) { break }
+    if (maxsplit >= 0 and splits >= maxsplit) {
+      out.add(pyBytesPart(b, 0, j))  // the rest as it is, its blanks at the start kept
+      break
+    }
+    var i = j
+    while (i > 0 and !__pyBSpace(b[i - 1])) { i -= 1 }
+    out.add(pyBytesPart(b, i, j))
+    splits += 1
+    j = i
+  }
+  out.reverse()
+  return out
+}
+
+internal fun __pyBSplitBy(b : Bytes, sep : Bytes, maxsplit : int, fromRight : bool) : open List<Bytes> {
+  if (sep.size == 0) { throw pyValueError("empty separator") }
+  val out : open List<Bytes> = []
+  if (!fromRight) {
+    var i = 0
+    var splits = 0
+    while (maxsplit < 0 or splits < maxsplit) {
+      val k = __pyBIndexOf(b, sep, i, b.size, false)
+      if (k < 0) { break }
+      out.add(pyBytesPart(b, i, k))
+      i = k + sep.size
+      splits += 1
+    }
+    out.add(pyBytesPart(b, i, b.size))
+    return out
+  }
+  var j = b.size
+  var splits = 0
+  while (maxsplit < 0 or splits < maxsplit) {
+    val k = __pyBIndexOf(b, sep, 0, j, true)
+    if (k < 0) { break }
+    out.add(pyBytesPart(b, k + sep.size, j))
+    j = k
+    splits += 1
+  }
+  out.add(pyBytesPart(b, 0, j))
+  out.reverse()
+  return out
+}
+
+internal fun __pyBStrip(b : Bytes, chars : any?, left : bool, right : bool) : Bytes {
+  val set = chars == null ? null : __pyNeedBytes(chars)
+  fun strippable(v : int) : bool {
+    if (set == null) { return __pyBSpace(v) }
+    for k in 0..<set!!.size { if (set!![k] == v) { return true } }
+    return false
+  }
+  var i = 0
+  var j = b.size
+  if (left) { while (i < j and strippable(b[i])) { i += 1 } }
+  if (right) { while (j > i and strippable(b[j - 1])) { j -= 1 } }
+  return pyBytesPart(b, i, j)
+}
+
+internal fun __pyBMapped(b : Bytes, change : (int, int) -> int) : Bytes {
+  val out = Bytes(b.size)
+  for i in 0..<b.size { out[i] = change(i, b[i].toInt()).toByte() }
+  return out
+}
+
+internal fun __pyBTitled(b : Bytes) : Bytes {
+  val out = Bytes(b.size)
+  var previousCased = false
+  for i in 0..<b.size {
+    var v : int = b[i]
+    if (__pyBAlpha(v)) {
+      if (previousCased and __pyBUpper(v)) { v += 32 }
+      if (!previousCased and __pyBLower(v)) { v -= 32 }
+      previousCased = true
+    } else {
+      previousCased = false
+    }
+    out[i] = v.toByte()
+  }
+  return out
+}
+
+// bytes.hex(sep, bytes_per_sep): a separator every so many bytes, counted from the right (a
+// positive count) or the left (a negative one).
+fun pyBytesHex(b : Bytes, sep : any?, perSep : any?) : string {
+  val sb = StringBuilder()
+  if (sep == null) {
+    for i in 0..<b.size { sb.append(pyHex(b[i], 2)) }
+    return sb.toString()
+  }
+  var s = ""
+  if (sep is string) { s = sep as string } else {
+    val sb2 = pyBytesLike(sep)
+    if (sb2 == null) { throw pyTypeError("sep must be str or bytes.") }
+    s = pyBytesText(sb2!!)
+  }
+  if (s.size != 1) { throw pyValueError("sep must be length 1.") }
+  val per = perSep == null ? 1 : pyIndex(perSep)
+  val group = per < 0 ? -per : per
+  if (group == 0) { return pyBytesHex(b, null, null) }
+  for i in 0..<b.size {
+    if (i > 0) {
+      val boundary = per > 0 ? (b.size - i) % group == 0 : i % group == 0
+      if (boundary) { sb.append(s) }
+    }
+    sb.append(pyHex(b[i], 2))
+  }
+  return sb.toString()
+}
+
+// bytes.fromhex(text): pairs of hexadecimal digits, ASCII whitespace between them.
+fun pyBytesFromHex(x : any?) : Bytes {
+  var text = ""
+  if (x is string) { text = x as string } else {
+    val b = pyBytesLike(x)
+    if (b == null) { throw pyTypeError("fromhex() argument must be str or bytes-like, not ${pyTypeName(x)}") }
+    text = pyBytesText(b!!)
+  }
+  fun digit(c : char) : int {
+    if (c >= '0' and c <= '9') { return c.code - 48 }
+    if (c >= 'a' and c <= 'f') { return c.code - 87 }
+    if (c >= 'A' and c <= 'F') { return c.code - 55 }
+    return -1
+  }
+  val out : open List<int> = []
+  var i = 0
+  while (i < text.size) {
+    val c = text[i]
+    if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c.code == 11 or c.code == 12) {
+      i += 1
+      continue
+    }
+    val hi = digit(c)
+    if (hi < 0) { throw pyValueError("non-hexadecimal number found in fromhex() arg at position $i") }
+    if (i + 1 >= text.size) { throw pyValueError("fromhex() arg must contain an even number of hexadecimal digits") }
+    val lo = digit(text[i + 1])
+    if (lo < 0) {
+      val nc = text[i + 1]
+      if (nc == ' ' or nc == '\t' or nc == '\n' or nc == '\r' or nc.code == 11 or nc.code == 12) {
+        throw pyValueError("fromhex() arg must contain an even number of hexadecimal digits")
+      }
+      throw pyValueError("non-hexadecimal number found in fromhex() arg at position ${i + 1}")
+    }
+    out.add(hi * 16 + lo)
+    i += 2
+  }
+  val b = Bytes(out.size)
+  for (k, v) in out.withIndex() { b[k] = v.toByte() }
+  return b
+}
+
+// bytes.maketrans(from, to): the 256 bytes that map each byte of `from` to the one of `to`.
+fun pyBytesMakeTrans(from : any?, to : any?) : Bytes {
+  val f = __pyNeedBytes(from)
+  val t = __pyNeedBytes(to)
+  if (f.size != t.size) { throw pyValueError("maketrans arguments must have same length") }
+  val table = Bytes(256)
+  for i in 0..<256 { table[i] = i.toByte() }
+  for i in 0..<f.size { table[f[i]] = t[i] }
+  return table
+}
+
+internal fun __pyBExpandTabs(b : Bytes, size : int) : Bytes {
+  val out : open List<int> = []
+  var column = 0
+  for i in 0..<b.size {
+    val v : int = b[i]
+    if (v == 9) {
+      if (size > 0) {
+        val n = size - column % size
+        for k in 0..<n { out.add(32) }
+        column += n
+      }
+    } else {
+      out.add(v)
+      column = v == 10 or v == 13 ? 0 : column + 1
+    }
+  }
+  val r = Bytes(out.size)
+  for (k, v) in out.withIndex() { r[k] = v.toByte() }
+  return r
+}
+
+// A method of bytes, or of a bytearray (`array`, whose bytes are `b`): what it gives, a bytearray
+// where bytes would give bytes.
+fun pyBytesMethod(b : Bytes, name : string, a : PyArgs, array : PyByteArray?) : any? {
+  val p = a.pos
+  fun arg(i : int, keyword : string) : any? => p.size > i ? p[i] : a.get(keyword, null)
+  fun out(x : Bytes) : any? => array != null ? PyByteArray(x) : x
+  fun range(i : int) : Pair<int, int> => __pyRange(b.size, p.size > i ? p[i] : null, p.size > i + 1 ? p[i + 1] : null)
+  return when (name) {
+    "count" -> {
+      val r = range(1)
+      __pyBCount(b, __pyByteSub(p[0]), r.first, r.second)
+    }
+    "find", "rfind", "index", "rindex" -> {
+      val r = range(1)
+      val k = __pyBIndexOf(b, __pyByteSub(p[0]), r.first, r.second, name.startsWith("r"))
+      if (k < 0 and name.endsWith("index")) { throw pyValueError("subsection not found") }
+      k
+    }
+    "startswith", "endswith" -> {
+      val r = range(1)
+      val options = p[0] is PyTuple ? (p[0] as PyTuple).items : [p[0]]
+      var found = false
+      for o in options {
+        val s = pyBytesLike(o)
+        if (s == null) {
+          throw pyTypeError("$name first arg must be bytes or a tuple of bytes, not ${pyTypeName(o)}")
+        }
+        val n = s!!.size
+        if (r.first > b.size or r.second - r.first < n) { continue }
+        val at = name == "startswith" ? r.first : r.second - n
+        if (__pyBIndexOf(b, s!!, at, at + n, false) == at) { found = true }
+      }
+      found
+    }
+    "upper" -> out(__pyBMapped(b, { i, v -> __pyBLower(v) ? v - 32 : v }))
+    "lower" -> out(__pyBMapped(b, { i, v -> __pyBUpper(v) ? v + 32 : v }))
+    "swapcase" -> out(__pyBMapped(b, { i, v -> __pyBLower(v) ? v - 32 : __pyBUpper(v) ? v + 32 : v }))
+    "capitalize" -> out(__pyBMapped(b, { i, v -> i == 0 ? (__pyBLower(v) ? v - 32 : v) : (__pyBUpper(v) ? v + 32 : v) }))
+    "title" -> out(__pyBTitled(b))
+    "isalnum", "isalpha", "isdigit", "isspace" -> {
+      if (b.size == 0) { false } else {
+        var all = true
+        for i in 0..<b.size {
+          val v : int = b[i]
+          val ok = name == "isalnum" ? (__pyBAlpha(v) or __pyBDigit(v)) : name == "isalpha" ? __pyBAlpha(v) :
+                   name == "isdigit" ? __pyBDigit(v) : __pyBSpace(v)
+          if (!ok) { all = false; break }
+        }
+        all
+      }
+    }
+    "isascii" -> {
+      var all = true
+      for i in 0..<b.size { if (b[i] >= 128) { all = false; break } }
+      all
+    }
+    "islower", "isupper" -> {
+      var cased = false
+      var all = true
+      for i in 0..<b.size {
+        val v : int = b[i]
+        if (__pyBLower(v)) { cased = true; if (name == "isupper") { all = false } }
+        if (__pyBUpper(v)) { cased = true; if (name == "islower") { all = false } }
+      }
+      cased and all
+    }
+    "istitle" -> {
+      var cased = false
+      var previousCased = false
+      var ok = true
+      for i in 0..<b.size {
+        val v : int = b[i]
+        if (__pyBUpper(v)) {
+          if (previousCased) { ok = false }
+          previousCased = true
+          cased = true
+        } else if (__pyBLower(v)) {
+          if (!previousCased) { ok = false }
+          previousCased = true
+          cased = true
+        } else {
+          previousCased = false
+        }
+      }
+      ok and cased
+    }
+    "center", "ljust", "rjust" -> {
+      val width = pyIndex(p[0])
+      val fill = p.size > 1 ? __pyFillByte(p[1], name) : 32
+      if (width <= b.size) { out(Bytes(b)) } else {
+        val margin = width - b.size
+        val left = name == "ljust" ? 0 : name == "rjust" ? margin : margin / 2 + (margin & width & 1)
+        out(__pyBPad(b, left, margin - left, fill))
+      }
+    }
+    "zfill" -> {
+      val width = pyIndex(p[0])
+      if (width <= b.size) { out(Bytes(b)) } else {
+        val fill = width - b.size
+        val r = __pyBPad(b, fill, 0, 48)
+        if (b.size > 0 and (b[0] == 43 or b[0] == 45)) {
+          r[0] = b[0]
+          r[fill] = 48.toByte()
+        }
+        out(r)
+      }
+    }
+    "expandtabs" -> out(__pyBExpandTabs(b, p.isEmpty() ? pyIndex(a.get("tabsize", 8)) : pyIndex(p[0])))
+    "strip" -> out(__pyBStrip(b, arg(0, "bytes"), true, true))
+    "lstrip" -> out(__pyBStrip(b, arg(0, "bytes"), true, false))
+    "rstrip" -> out(__pyBStrip(b, arg(0, "bytes"), false, true))
+    "split", "rsplit" -> {
+      val sep = arg(0, "sep")
+      val m = arg(1, "maxsplit")
+      val maxsplit = m == null ? -1 : pyIndex(m)
+      val parts = sep == null ? __pyBSplitWhite(b, maxsplit, name == "rsplit") : __pyBSplitBy(b, __pyNeedBytes(sep), maxsplit, name == "rsplit")
+      pyNewList(parts.map { out(it) }.toOpenList())
+    }
+    "splitlines" -> {
+      val keep = pyTruth(arg(0, "keepends"))
+      val lines : open List<any?> = []
+      var i = 0
+      while (i < b.size) {
+        var j = i
+        while (j < b.size and b[j] != 10 and b[j] != 13) { j += 1 }
+        var end = j
+        if (j < b.size) { end = b[j] == 13 and j + 1 < b.size and b[j + 1] == 10 ? j + 2 : j + 1 }
+        lines.add(out(pyBytesPart(b, i, keep ? end : j)))
+        i = end
+      }
+      pyNewList(lines)
+    }
+    "partition", "rpartition" -> {
+      val sep = __pyNeedBytes(p[0])
+      if (sep.size == 0) { throw pyValueError("empty separator") }
+      val k = __pyBIndexOf(b, sep, 0, b.size, name == "rpartition")
+      if (k < 0) {
+        name == "partition" ? PyTuple([out(Bytes(b)), out(Bytes(0)), out(Bytes(0))]) : PyTuple([out(Bytes(0)), out(Bytes(0)), out(Bytes(b))])
+      } else {
+        PyTuple([out(pyBytesPart(b, 0, k)), out(Bytes(sep)), out(pyBytesPart(b, k + sep.size, b.size))])
+      }
+    }
+    "removeprefix", "removesuffix" -> {
+      val fix = __pyNeedBytes(p[0])
+      val n = fix.size
+      if (n > b.size) { out(Bytes(b)) } else if (name == "removeprefix" and __pyBIndexOf(b, fix, 0, n, false) == 0) {
+        out(pyBytesPart(b, n, b.size))
+      } else if (name == "removesuffix" and n > 0 and __pyBIndexOf(b, fix, b.size - n, b.size, false) == b.size - n) {
+        out(pyBytesPart(b, 0, b.size - n))
+      } else {
+        out(Bytes(b))
+      }
+    }
+    "replace" -> {
+      val old = __pyNeedBytes(p[0])
+      val new = __pyNeedBytes(p[1])
+      val c = arg(2, "count")
+      val count = c == null ? -1 : pyIndex(c)
+      val parts : open List<Bytes> = []
+      if (old.size == 0) {
+        var done = 0
+        for i in 0..b.size {
+          if (count < 0 or done < count) { parts.add(new); done += 1 }
+          if (i < b.size) { parts.add(pyBytesPart(b, i, i + 1)) }
+        }
+      } else {
+        var i = 0
+        var done = 0
+        while (count < 0 or done < count) {
+          val k = __pyBIndexOf(b, old, i, b.size, false)
+          if (k < 0) { break }
+          parts.add(pyBytesPart(b, i, k))
+          parts.add(new)
+          i = k + old.size
+          done += 1
+        }
+        parts.add(pyBytesPart(b, i, b.size))
+      }
+      out(__pyBytesCat(parts))
+    }
+    "join" -> {
+      val parts : open List<Bytes> = []
+      for (i, item) in pyIterable(p[0]).withIndex() {
+        val ib = pyBytesLike(item)
+        if (ib == null) { throw pyTypeError("sequence item $i: expected a bytes-like object, ${pyTypeName(item)} found") }
+        if (i > 0) { parts.add(b) }
+        parts.add(ib!!)
+      }
+      out(__pyBytesCat(parts))
+    }
+    "translate" -> {
+      val table = p[0]
+      val t = table == null ? null : __pyNeedBytes(table)
+      if (t != null and t!!.size != 256) { throw pyValueError("translation table must be 256 characters long") }
+      val d = arg(1, "delete")
+      val del = d == null ? Bytes(0) : __pyNeedBytes(d)
+      val kept : open List<int> = []
+      for i in 0..<b.size {
+        val v : int = b[i]
+        var gone = false
+        for k in 0..<del.size { if (del[k] == v) { gone = true; break } }
+        if (!gone) { kept.add(t == null ? v : t!![v].toInt()) }
+      }
+      val r = Bytes(kept.size)
+      for (k, v) in kept.withIndex() { r[k] = v.toByte() }
+      out(r)
+    }
+    "hex" -> pyBytesHex(b, arg(0, "sep"), arg(1, "bytes_per_sep"))
+    "decode" -> pyDecode(b, p.isNotEmpty() ? p[0] as string : a.get("encoding", "utf-8") as string,
+                         p.size > 1 ? p[1] as string : a.get("errors", "strict") as string)
+    "__len__" -> b.size
+    "__getitem__" -> pyGetItem(array != null ? array : b, p[0])
+    "__iter__" -> pyIter(array != null ? array : b)
+    "__contains__" -> pyContains(array != null ? array : b, p[0])
+    "__add__" -> pyAdd(array != null ? array : b, p[0])
+    "__mul__", "__rmul__" -> pyMul(array != null ? array : b, p[0])
+    else -> __pyCommonMethod(array != null ? array : b, name, a)
+  }
+}
+
+// ---- bytearray's own ----
+
+fun pyByteArrayMethod(ba : PyByteArray, name : string, a : PyArgs) : any? {
+  val p = a.pos
+  return when (name) {
+    "append" -> {
+      ba.addByte(pyByteValue(p[0]))
+      null
+    }
+    "extend" -> {
+      val add = pyBytesLike(p[0])
+      if (add != null) {
+        for i in 0..<add!!.size { ba.addByte(add!![i].toInt()) }
+      } else {
+        if (p[0] is string) { throw pyTypeError("expected iterable of integers; got: 'str'") }
+        for x in pyIterable(p[0]) { ba.addByte(pyByteValue(x)) }
+      }
+      null
+    }
+    "insert" -> {
+      var i = pyIndex(p[0])
+      val v = pyByteValue(p[1])
+      val b = ba.bytes
+      if (i < 0) { i += b.size; if (i < 0) { i = 0 } }
+      if (i > b.size) { i = b.size }
+      ba.bytes = __pyBytesCat([pyBytesPart(b, 0, i), __pyOneByte(v), pyBytesPart(b, i, b.size)])
+      null
+    }
+    "pop" -> {
+      val b = ba.bytes
+      if (b.size == 0) { throw pyIndexError("pop from empty bytearray") }
+      var i = p.isEmpty() ? -1 : pyIndex(p[0])
+      if (i < 0) { i += b.size }
+      if (i < 0 or i >= b.size) { throw pyIndexError("pop index out of range") }
+      val v : int = b[i]
+      ba.bytes = __pyBytesCat([pyBytesPart(b, 0, i), pyBytesPart(b, i + 1, b.size)])
+      v
+    }
+    "remove" -> {
+      val v = pyByteValue(p[0])
+      val b = ba.bytes
+      var at = -1
+      for i in 0..<b.size { if (b[i] == v) { at = i; break } }
+      if (at < 0) { throw pyValueError("value not found in bytearray") }
+      ba.bytes = __pyBytesCat([pyBytesPart(b, 0, at), pyBytesPart(b, at + 1, b.size)])
+      null
+    }
+    "reverse" -> {
+      val b = ba.bytes
+      val r = Bytes(b.size)
+      for i in 0..<b.size { r[i] = b[b.size - 1 - i] }
+      ba.bytes = r
+      null
+    }
+    "clear" -> {
+      ba.bytes = Bytes(0)
+      null
+    }
+    "copy" -> PyByteArray(Bytes(ba.bytes))
+    "resize" -> {
+      val n = pyIndex(p[0])
+      if (n < 0) { throw pyValueError("Can only resize to positive sizes, got $n") }
+      val b = ba.bytes
+      val r = Bytes(n)
+      val keep = n < b.size ? n : b.size
+      if (keep > 0) { r.copyFrom(b, 0, 1, 0, 1, keep) }
+      ba.bytes = r
+      null
+    }
+    "__iadd__" -> {
+      val add = __pyNeedBytes(p[0])
+      for i in 0..<add.size { ba.addByte(add[i].toInt()) }
+      ba
+    }
+    "__imul__" -> {
+      val n = pyIndex(p[0])
+      val b = ba.bytes
+      val parts : open List<Bytes> = []
+      for i in 0..<(n > 0 ? n : 0) { parts.add(b) }
+      ba.bytes = __pyBytesCat(parts)
+      ba
+    }
+    "__setitem__" -> {
+      pySetItem(ba, p[0], p[1])
+      null
+    }
+    "__delitem__" -> {
+      pyDelItem(ba, p[0])
+      null
+    }
+    "__alloc__" -> ba.bytes.size + 1
+    else -> pyBytesMethod(ba.bytes, name, a, ba)
+  }
+}
+
+internal fun __pyBytesNamesAll() : List<string> => ["capitalize", "center", "count", "decode", "endswith", "expandtabs", "find",
+  "hex", "index", "isalnum", "isalpha", "isascii", "isdigit", "islower", "isspace", "istitle", "isupper", "join", "ljust",
+  "lower", "lstrip", "partition", "removeprefix", "removesuffix", "replace", "rfind", "rindex", "rjust", "rpartition",
+  "rsplit", "rstrip", "split", "splitlines", "startswith", "strip", "swapcase", "title", "translate", "upper", "zfill",
+  "__len__", "__getitem__", "__iter__", "__contains__", "__add__", "__mul__", "__rmul__"]
+internal fun __pyByteArrayNamesAll() : List<string> => __pyBytesNamesAll() + ["append", "clear", "copy", "extend", "insert",
+  "pop", "remove", "reverse", "resize", "__iadd__", "__imul__", "__setitem__", "__delitem__", "__alloc__"]
+
+// ---- memoryview ----
+
+// The size in bytes of an item of a struct format memoryview takes (B b c ? H h I i L l Q q n N f d e).
+internal fun __pyFormatSize(f : string) : int {
+  return when (f) {
+    "B", "b", "c", "?" -> 1
+    "H", "h", "e" -> 2
+    "I", "i", "L", "l", "f" -> 4
+    "Q", "q", "n", "N", "d", "P" -> 8
+    else -> 0
+  }
+}
+
+// A memoryview: `count` items of `format` from byte `start` of its object's memory, each `stride`
+// bytes after the last. Its object is bytes, whose memory never changes, or a bytearray, read as it is now.
+class PyMemoryView(val obj : any?, val start : int, val count : int, val stride : int, val format : string,
+                   val readonly : bool) : PyNative() {
+  var released = false
+  val itemsize : int = __pyFormatSize(format)
+
+  override fun pyType() : PyType => pyMemoryViewType
+
+  fun memory() : Bytes {
+    if (released) { throw pyValueError("operation forbidden on released memoryview object") }
+    return obj is PyByteArray ? (obj as PyByteArray).bytes : obj as Bytes
+  }
+
+  fun contiguous() : bool => stride == itemsize or count <= 1
+
+  // Its bytes, a copy.
+  fun tobytes() : Bytes {
+    val m = memory()
+    val out = Bytes(count * itemsize)
+    for i in 0..<count {
+      out.copyFrom(m, start + i * stride, 1, i * itemsize, 1, itemsize)
+    }
+    return out
+  }
+
+  fun item(i : int) : any? {
+    val m = memory()
+    val at = start + i * stride
+    return when (format) {
+      "B" -> { val v : int = m[at]; v }
+      "b" -> { val v : int = m[at]; v > 127 ? v - 256 : v }
+      "c" -> __pyOneByte(m[at])
+      "?" -> m[at] != 0
+      "H" -> m.uint16(at)
+      "h" -> m.int16(at)
+      "I", "L" -> m.uint32(at)
+      "i", "l" -> m.int32(at)
+      "q", "n" -> m.int64(at)
+      "Q", "N", "P" -> {
+        val v = m.int64(at)
+        v >= 0 ? v : BigInt.of(v) + BigInt.parse("18446744073709551616")
+      }
+      "f" -> m.float32(at)
+      "d" -> m.float64(at)
+      else -> throw pyError(pyNotImplementedErrorType, "memoryview: format $format not supported")
+    }
+  }
+
+  fun setItem(i : int, v : any?) {
+    if (readonly) { throw pyTypeError("cannot modify read-only memory") }
+    val m = memory()
+    val at = start + i * stride
+    when (format) {
+      "B" -> m[at] = pyByteValue(v).toByte()
+      "b" -> {
+        val n = pyIndex(v)
+        if (n < -128 or n > 127) { throw pyValueError("memoryview: invalid value for format 'b'") }
+        m[at] = (n < 0 ? n + 256 : n).toByte()
+      }
+      "H" -> m.putUint16(at, pyIndex(v))
+      "h" -> m.putInt16(at, pyIndex(v))
+      "I", "L" -> m.putUint32(at, pyIndex(v))
+      "i", "l" -> m.putInt32(at, pyIndex(v))
+      "q", "n", "Q", "N" -> m.putInt64(at, pyIndex(v))
+      "f" -> m.putFloat32(at, pyToFloat(v))
+      "d" -> m.putFloat64(at, pyToFloat(v))
+      else -> throw pyError(pyNotImplementedErrorType, "memoryview: format $format not supported")
+    }
+  }
+
+  fun at(k : any?) : int {
+    var i = pyIndex(k)
+    if (i < 0) { i += count }
+    if (i < 0 or i >= count) { throw pyIndexError("index out of bounds on dimension 1") }
+    return i
+  }
+
+  fun sliced(s : PySlice) : PyMemoryView {
+    val ix = pySliceIndices(s, count)
+    return PyMemoryView(obj, start + ix[0] * stride, ix[3], stride * ix[2], format, readonly)
+  }
+
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "obj" -> { memory(); obj }
+      "nbytes" -> { memory(); count * itemsize }
+      "itemsize" -> itemsize
+      "format" -> format
+      "ndim" -> 1
+      "shape" -> { memory(); PyTuple([count]) }
+      "strides" -> { memory(); PyTuple([stride]) }
+      "suboffsets" -> PyTuple([])
+      "readonly" -> readonly
+      "c_contiguous", "f_contiguous", "contiguous" -> { memory(); contiguous() }
+      "released" -> released
+      else -> pyUnbound
+    }
+  }
+
+  override fun call(name : string, a : PyArgs) : any? {
+    val p = a.pos
+    return when (name) {
+      "tobytes" -> tobytes()
+      "tolist" -> {
+        memory()
+        val items : open List<any?> = []
+        for i in 0..<count { items.add(item(i)) }
+        pyNewList(items)
+      }
+      "hex" -> pyBytesHex(tobytes(), p.size > 0 ? p[0] : a.get("sep", null), p.size > 1 ? p[1] : a.get("bytes_per_sep", null))
+      "toreadonly" -> { memory(); PyMemoryView(obj, start, count, stride, format, true) }
+      "release" -> { released = true; null }
+      "__enter__" -> { memory(); this }
+      "__exit__" -> { released = true; false }
+      "cast" -> {
+        memory()
+        val f = p[0] as string
+        val size = __pyFormatSize(f)
+        if (size == 0) { throw pyValueError("memoryview: destination format must be a native single character format prefixed with an optional '@'") }
+        if (!contiguous()) { throw pyTypeError("memoryview: casts are restricted to C-contiguous views") }
+        val bytes = count * itemsize
+        if (bytes % size != 0) { throw pyTypeError("memoryview: length is not a multiple of itemsize") }
+        PyMemoryView(obj, start, bytes / size, size, f, readonly)
+      }
+      "count" -> {
+        memory()
+        var n = 0
+        for i in 0..<count { if (pyEqB(item(i), p[0])) { n += 1 } }
+        n
+      }
+      "index" -> {
+        memory()
+        var found = -1
+        for i in 0..<count { if (pyEqB(item(i), p[0])) { found = i; break } }
+        if (found < 0) { throw pyValueError("memoryview.index(x): x not found") }
+        found
+      }
+      "__len__" -> { memory(); count }
+      "__getitem__" -> {
+        memory()
+        p[0] is PySlice ? sliced(p[0] as PySlice) : item(at(p[0]))
+      }
+      "__setitem__" -> {
+        memory()
+        if (readonly) { throw pyTypeError("cannot modify read-only memory") }
+        if (p[0] is PySlice) {
+          val view = sliced(p[0] as PySlice)
+          val src = __pyNeedBytes(p[1])
+          if (src.size != view.count * view.itemsize) {
+            throw pyValueError("memoryview assignment: lvalue and rvalue have different structures")
+          }
+          val m = memory()
+          for i in 0..<view.count { m.copyFrom(src, i * itemsize, 1, view.start + i * view.stride, 1, itemsize) }
+        } else {
+          setItem(at(p[0]), p[1])
+        }
+        null
+      }
+      "__iter__" -> {
+        memory()
+        val items : open List<any?> = []
+        for i in 0..<count { items.add(item(i)) }
+        PyListIter(items)
+      }
+      "__eq__" -> {
+        if (released) { this === p[0] } else {
+          val other = p[0]
+          if (other is PyMemoryView) {
+            val o = other as PyMemoryView
+            if (o.released) { false } else {
+              var same = o.count == count
+              if (same) { for i in 0..<count { if (!pyEqB(item(i), o.item(i))) { same = false; break } } }
+              same
+            }
+          } else {
+            val ob = pyBytesLike(other)
+            if (ob == null) { pyNotImplemented } else if (format != "B" and format != "b" and format != "c") {
+              val cast = PyMemoryView(ob!!, 0, ob!!.size, 1, "B", true)
+              call("__eq__", PyArgs([cast], null, "__eq__()"))
+            } else {
+              var same = ob!!.size == count
+              if (same) { for i in 0..<count { val v : int = ob!![i]; if (!pyEqB(item(i), format == "c" ? __pyOneByte(v) : v)) { same = false; break } } }
+              same
+            }
+          }
+        }
+      }
+      "__hash__" -> {
+        if (!readonly) { throw pyValueError("cannot hash writable memoryview object") }
+        pyHash(tobytes())
+      }
+      "__repr__" -> (released ? "<released memory at " : "<memory at ") + pyHexId(this) + ">"
+      "__bool__" -> { memory(); count != 0 }
+      "__bytes__" -> tobytes()
+      "__buffer__" -> this
+      else -> throw pyAttributeError("'memoryview' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+internal fun __pyMemoryViewNames() : List<string> => ["tobytes", "tolist", "hex", "toreadonly", "release", "cast", "count",
+  "index", "__enter__", "__exit__", "__len__", "__getitem__", "__setitem__", "__iter__", "__eq__", "__hash__", "__repr__",
+  "__bool__", "__buffer__"]
+
+// memoryview(obj): a view of bytes, a bytearray or another memoryview.
+fun pyMemoryView(x : any?) : PyMemoryView {
+  if (x is Bytes) { return PyMemoryView(x, 0, (x as Bytes).size, 1, "B", true) }
+  if (x is PyByteArray) { return PyMemoryView(x, 0, (x as PyByteArray).length, 1, "B", false) }
+  if (x is PyMemoryView) {
+    val m = x as PyMemoryView
+    m.memory()
+    return PyMemoryView(m.obj, m.start, m.count, m.stride, m.format, m.readonly)
+  }
+  throw pyTypeError("memoryview: a bytes-like object is required, not '${pyTypeName(x)}'")
+}

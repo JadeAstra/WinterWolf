@@ -1,0 +1,32 @@
+bytearray(b'Hello world') 11 72 100 bytearray(b'ell') bytearray bytearray(b'HELLO WORLD') bytearray
+4 3 [bytearray(b'Hello'), bytearray(b'world')] bytearray (bytearray(b'Hello'), bytearray(b' '), bytearray(b'world')) bytearray(b'HeLLo worLd')
+bytearray(b'**Hello world**') bytearray(b'ello worl') bytearray(b'Hello World') 48656c6c6f20776f726c64 Hello world False True
+bytearray(b'a-b') bytearray
+bytearray(b'AB') bytearray 98
+bytearray(b'>Hello world! okA_B')
+66 62 bytearray(b'Hello world! okA_')
+bytearray(b'Hell world! okA_')
+bytearray(b'_Ako !dlrow lleH')
+bytearray(b'Hell world! okA_') bytearray(b'hell world! okA_') False
+bytearray(b'HELLOworld! okA_')
+bytearray(b'hiworld! okA_')
+bytearray(b'_i_o_l_!_o_A_')
+bytearray(b'l!oA')
+bytearray(b'l!oA!!')
+bytearray(b'l!oA!!l!oA!!')
+bytearray(b'') 0
+bytearray(b'abc\x00\x00')
+bytearray(b'ab')
+ValueError byte must be in range(0, 256)
+IndexError pop index out of range
+IndexError pop from empty bytearray
+ValueError value not found in bytearray
+ValueError byte must be in range(0, 256)
+IndexError bytearray index out of range
+TypeError unhashable type: 'bytearray'
+ValueError attempt to assign bytes of size 3 to extended slice of size 2
+bytearray(b'') bytearray(b'\x00\x00\x00') bytearray(b'\x01\x02') bytearray(b'h\xc3\xa9') True True
+True bytearray(b'abcd') b'cdab' bytes
+bytearray(b"a\'b") [104, 105] True bytearray(b'xyxy')
+b'ba and by' bytearray(b'5')
+True bytearray b'abc' True bytearray(b'00abc') bytearray(b'abc')

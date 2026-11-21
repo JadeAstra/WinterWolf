@@ -14,6 +14,13 @@ abstract class PyNative : PyIdentified() {
   fun attr(name : string) : any? => pyUnbound
 }
 
+// A special method of such an object (__getitem__, __len__...) where its type lists it, as the
+// operators and builtins ask for one (part 5.3); pyUnbound where it lists none.
+fun pyNativeSpecial(o : PyNative, name : string, args : List<any?>) : any? {
+  if (o.pyType().lookup(name) === pyUnbound) { return pyUnbound }
+  return o.call(name, PyArgs(args, null, name + "()"))
+}
+
 // The type of such objects: named, with its methods listed, made with `construct`.
 fun pyNativeType(name : string, module : string, methods : List<string>, construct : ((PyType, List<any?>, List<string>?) -> any?)?) : PyType {
   val t = PyType(name, name, module)

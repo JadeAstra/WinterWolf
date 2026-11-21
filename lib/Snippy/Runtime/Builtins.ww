@@ -188,6 +188,7 @@ fun pyIntOf1(x : any?) : any? {
     }
     is string -> pyIntFromText(x as string, 10)
     is Bytes -> pyIntFromText(pyBytesText(x as Bytes), 10)
+    is PyByteArray, is PyMemoryView -> pyIntFromText(pyBytesText(pyBytesLike(x)!!), 10)
     is PyObject -> {
       val o = x as PyObject
       for name in ["__int__", "__index__", "__trunc__"] {
@@ -616,7 +617,7 @@ internal fun __pyMakeBuiltins() : open Map<string, any?> {
   val b : open Map<string, any?> = {:}
   for t in [pyObjectType, pyTypeType, pyIntType, pyBoolType, pyFloatType, pyComplexType, pyStrType, pyBytesType, pyByteArrayType,
             pyListType, pyTupleType, pyDictType, pySetType, pyFrozenSetType, pyRangeType, pySliceType, pyPropertyType,
-            pyClassMethodType, pyStaticMethodType, pySuperType] { b[t.name] = t }
+            pyClassMethodType, pyStaticMethodType, pySuperType, pyMemoryViewType] { b[t.name] = t }
   for t in pyExceptionTypes() { b[t.name] = t }
   b["EnvironmentError"] = pyOSErrorType
   b["IOError"] = pyOSErrorType
@@ -755,13 +756,17 @@ internal fun __pyMakeBuiltins() : open Map<string, any?> {
   b["open"] = __pyB("open") { a -> pyOpen(a) }
   b["breakpoint"] = __pyB("breakpoint") { a -> null }
   b["help"] = __pyB("help") { a -> null }
+  // copyright, credits and license: objects that show their text, as Python's _Printer does,
+  // with Snippy's own text (part 5.3).
+  b["copyright"] = PyPrinter("copyright", "Snippy is part of WinterWolf, licensed under the Apache License 2.0 with a runtime library exception.")
+  b["credits"] = PyPrinter("credits", "Snippy, a Python-like language of WinterWolf's.")
+  b["license"] = PyPrinter("license", "Type license() to see the full license text")
   b["__import__"] = __pyB("__import__") { a -> pyImport(a.pos[0] as string, 0, PyModule("<import>", "", [], { i : int -> null }, { i : int, v : any? -> }, null)) }
   b["aiter"] = __pyB("aiter") { a -> pyCallM0(a.pos[0], "__aiter__") }
   b["anext"] = __pyB("anext") { a -> pyCallM0(a.pos[0], "__anext__") }
   b["eval"] = __pyB("eval") { a -> throw pyError(pyNotImplementedErrorType, "eval() is not available in Snippy") }
   b["exec"] = __pyB("exec") { a -> throw pyError(pyNotImplementedErrorType, "exec() is not available in Snippy") }
   b["compile"] = __pyB("compile") { a -> throw pyError(pyNotImplementedErrorType, "compile() is not available in Snippy") }
-  b["memoryview"] = __pyB("memoryview") { a -> throw pyError(pyNotImplementedErrorType, "memoryview is not available in Snippy") }
   return b
 }
 
@@ -795,6 +800,7 @@ fun pyDir(x : any?) : any? {
     }
     else -> for t in pyTypeOf(x).mro { for k in t.dict.keys { add(k) } }
   }
+  if (!(x is PyModule)) { add("__class__") }  // object's, as every type and object has it
   pySortList(names, null, false)
   return names
 }
@@ -842,9 +848,17 @@ internal fun __pyConstructors() {
     val re = a.pos.size > 0 ? a.pos[0] : a.get("real", 0)
     val im = a.pos.size > 1 ? a.pos[1] : a.get("imag", 0)
     if (re is string) { pyComplexFromText(re as string) } else {
-      val r = __pyToComplex(re is Complex ? re : pyToFloat(re))
-      val i = __pyToComplex(im is Complex ? im : pyToFloat(im))
-      Complex(r.re - i.im, r.im + i.re)
+      // As CPython makes it: two real numbers taken as they are (a zero's sign kept), a complex
+      // part folded in where one is given (part 5.3).
+      val imGiven = a.pos.size > 1 or a.has("imag")
+      val rc = re is Complex
+      val ic = im is Complex
+      var real = rc ? (re as Complex).re : pyToFloat(re)
+      val realIm = rc ? (re as Complex).im : 0.0
+      var imag = ic ? (im as Complex).re : pyToFloat(im)
+      if (ic) { real = real - (im as Complex).im }
+      if (rc and imGiven) { imag = imag + realIm }
+      Complex(real, imGiven ? imag : realIm)
     }
   }
   pyStrType.construct = { t, args, kw ->
@@ -912,6 +926,11 @@ internal fun __pyConstructors() {
     val a = PyArgs(args, kw, "bytearray()")
     PyByteArray(a.pos.isEmpty() ? Bytes(0) : pyBytesOf(a.pos[0], a.pos.size > 1 ? a.pos[1] : a.get("encoding", null)) as Bytes)
   }
+  pyMemoryViewType.construct = { t, args, kw ->
+    val a = PyArgs(args, kw, "memoryview()")
+    if (a.pos.isEmpty() and !a.has("object")) { throw pyTypeError("memoryview() missing required argument 'object' (pos 1)") }
+    pyMemoryView(a.pos.isEmpty() ? a.get("object", null) : a.pos[0])
+  }
   pyPropertyType.construct = { t, args, kw ->
     val a = PyArgs(args, kw, "property()")
     val fget = a.pos.size > 0 ? a.pos[0] : a.get("fget", null)
@@ -928,7 +947,17 @@ internal fun __pyConstructors() {
   }
 }
 
+// complex(text): any part not a number is the whole string malformed, as CPython says it.
 fun pyComplexFromText(s0 : string) : any? {
+  try {
+    return __pyComplexFromText(s0)
+  } catch (e : PyError) {
+    if (e.exc.cls.isSubtype(pyValueErrorType)) { throw pyValueError("complex() arg is a malformed string") }
+    throw e
+  }
+}
+
+internal fun __pyComplexFromText(s0 : string) : any? {
   var s = s0.trim().replace("_", "")
   if (s.startsWith("(") and s.endsWith(")")) { s = s[1..<(s.size - 1)].trim() }
   val bad = { -> pyValueError("complex() arg is a malformed string") }
@@ -964,8 +993,8 @@ fun pyBytesOf(x : any?, encoding : any?) : any? {
     if (n < 0) { throw pyValueError("negative count") }
     return Bytes(n)
   }
-  if (x is Bytes) { return Bytes(x as Bytes) }
-  if (x is PyByteArray) { return Bytes((x as PyByteArray).bytes) }
+  val like = pyBytesLike(x)
+  if (like != null) { return Bytes(like!!) }
   val items = pyIterable(x)
   val b = Bytes(items.size)
   for (i, v) in items.withIndex() {
@@ -977,34 +1006,270 @@ fun pyBytesOf(x : any?, encoding : any?) : any? {
 }
 
 // Text as bytes, and back, in the encodings scripts use.
-fun pyEncode(s : string, encoding : string, errors : string) : any? {
-  val enc = encoding.lower().replace("_", "-")
-  if (enc == "utf-8" or enc == "utf8") { return s.toBytes() }
-  if (enc == "ascii" or enc == "latin-1" or enc == "latin1" or enc == "iso-8859-1") {
-    val limit = enc == "ascii" ? 128 : 256
-    val out : open List<int> = []
-    for i in 0..<s.size {
-      val c = s[i]
-      val cp = pyOrd(c)
-      if (cp >= limit) {
-        if (errors == "ignore") { continue }
-        if (errors == "replace") { out.add(63); continue }
-        val shown = cp < 0x100 ? "\\x" + pyHex(cp, 2) : cp < 0x10000 ? "\\u" + pyHex(cp, 4) : "\\U" + pyHex(cp, 8)
-        throw pyError(pyUnicodeEncodeErrorType, "'${enc == "ascii" ? "ascii" : "latin-1"}' codec can't encode character '" + shown + "' in position $i: ordinal not in range($limit)")
-      }
-      out.add(cp)
-    }
-    return Bytes(out)
+
+// An encoding's name as Python's codecs registry folds it: case, - and _ alike.
+fun pyEncodingName(encoding : string) : string {
+  val e = encoding.lower().replace("_", "-").replace(" ", "-")
+  return when (e) {
+    "utf8", "u8", "utf", "cp65001" -> "utf-8"
+    "latin1", "latin-1", "iso-8859-1", "iso8859-1", "8859", "cp819", "l1", "latin" -> "latin-1"
+    "ascii", "us-ascii", "646" -> "ascii"
+    "utf16", "u16" -> "utf-16"
+    "utf32", "u32" -> "utf-32"
+    "utf-16le", "utf16le", "utf16-le" -> "utf-16-le"
+    "utf-16be", "utf16be", "utf16-be" -> "utf-16-be"
+    "utf-32le", "utf32le", "utf32-le" -> "utf-32-le"
+    "utf-32be", "utf32be", "utf32-be" -> "utf-32-be"
+    "utf-8-sig", "utf8-sig" -> "utf-8-sig"
+    else -> e
   }
-  throw pyError(pyLookupErrorType, "unknown encoding: $encoding")
+}
+
+// str.encode(encoding, errors), as CPython's codecs do it (part 5.3): UTF-8 (lone surrogates
+// refused, or let through by surrogateescape and surrogatepass), ASCII, latin-1, UTF-16 and
+// UTF-32 (a byte order mark first where no order is named); where a run of characters cannot
+// be written, the error handler's way: an error naming them, nothing (ignore), ? (replace),
+// \xNN or \uNNNN (backslashreplace), &#N; (xmlcharrefreplace), or the byte a surrogate escapes.
+fun pyEncode(s : string, encoding : string, errors : string) : any? {
+  val enc = pyEncodingName(encoding)
+  val out : open List<int> = []
+  fun unit(v : int, size : int, big : bool) {
+    for k in 0..<size {
+      val shift = big ? (size - 1 - k) * 8 : k * 8
+      out.add((v >> shift) & 0xFF)
+    }
+  }
+  fun encodeOne(cp : int) {
+    when (enc) {
+      "utf-8", "utf-8-sig" -> {
+        if (cp < 0x80) { out.add(cp) }
+        else if (cp < 0x800) { out.add(0xC0 | (cp >> 6)); out.add(0x80 | (cp & 0x3F)) }
+        else if (cp < 0x10000) { out.add(0xE0 | (cp >> 12)); out.add(0x80 | ((cp >> 6) & 0x3F)); out.add(0x80 | (cp & 0x3F)) }
+        else { out.add(0xF0 | (cp >> 18)); out.add(0x80 | ((cp >> 12) & 0x3F)); out.add(0x80 | ((cp >> 6) & 0x3F)); out.add(0x80 | (cp & 0x3F)) }
+      }
+      "ascii", "latin-1" -> out.add(cp)
+      "utf-16", "utf-16-le", "utf-16-be" -> {
+        val big = enc == "utf-16-be"
+        if (cp >= 0x10000) {
+          val v = cp - 0x10000
+          unit(0xD800 + (v >> 10), 2, big)
+          unit(0xDC00 + (v & 0x3FF), 2, big)
+        } else {
+          unit(cp, 2, big)
+        }
+      }
+      else -> unit(cp, 4, enc == "utf-32-be")
+    }
+  }
+  // Whether the encoding writes a code point: a lone surrogate never, but with surrogatepass.
+  fun writes(cp : int) : bool {
+    if (cp >= 0xD800 and cp <= 0xDFFF) { return errors == "surrogatepass" and enc != "ascii" and enc != "latin-1" }
+    if (enc == "ascii") { return cp < 128 }
+    if (enc == "latin-1") { return cp < 256 }
+    return true
+  }
+  val known = enc in ["utf-8", "utf-8-sig", "ascii", "latin-1", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
+  if (!known) { throw pyError(pyLookupErrorType, "unknown encoding: $encoding") }
+  if (enc == "utf-16") { out.add(0xFF); out.add(0xFE) }
+  if (enc == "utf-32") { out.add(0xFF); out.add(0xFE); out.add(0); out.add(0) }
+  if (enc == "utf-8-sig") { out.add(0xEF); out.add(0xBB); out.add(0xBF) }
+  val cps = __pyCodePoints(s)
+  var i = 0
+  while (i < cps.size) {
+    val cp = cps[i]
+    if (writes(cp)) {
+      encodeOne(cp)
+      i += 1
+      continue
+    }
+    var j = i + 1
+    while (j < cps.size and !writes(cps[j])) { j += 1 }
+    when (errors) {
+      "strict" -> {
+        val codec = enc == "utf-8-sig" ? "utf-8" : enc == "latin-1" ? "latin-1" : enc.startsWith("utf-16") ? "utf-16" + enc[6..] :
+                    enc.startsWith("utf-32") ? "utf-32" + enc[6..] : enc
+        val surrogate = cp >= 0xD800 and cp <= 0xDFFF
+        val reason = surrogate and enc != "ascii" and enc != "latin-1" ? "surrogates not allowed" :
+                     "ordinal not in range(${enc == "ascii" ? 128 : 256})"
+        // As CPython: a run of characters that cannot be written named at once, or one alone.
+        var end = j
+        if (surrogate) { end = i + 1; while (end < cps.size and cps[end] >= 0xD800 and cps[end] <= 0xDFFF and !writes(cps[end])) { end += 1 } }
+        val what = end - i == 1 ? "character '${__pyEscapedChar(cp)}' in position $i" : "characters in position $i-${end - 1}"
+        throw pyError(pyUnicodeEncodeErrorType, "'$codec' codec can't encode $what: $reason")
+      }
+      "ignore" -> {}
+      "replace" -> { for k in i..<j { encodeOne(63) } }
+      "backslashreplace" -> {
+        for k in i..<j {
+          val c = cps[k]
+          val text = c < 0x100 ? "\\x" + pyHex(c, 2) : c < 0x10000 ? "\\u" + pyHex(c, 4) : "\\U" + pyHex(c, 8)
+          for ch in text { encodeOne(ch.code) }
+        }
+      }
+      "xmlcharrefreplace" -> { for k in i..<j { for ch in "&#${cps[k]};" { encodeOne(ch.code) } } }
+      "surrogateescape" -> {
+        for k in i..<j {
+          val c = cps[k]
+          if (c < 0xDC80 or c > 0xDCFF) {
+            throw pyError(pyUnicodeEncodeErrorType, "'${enc}' codec can't encode character '${__pyEscapedChar(c)}' in position $k: surrogates not allowed")
+          }
+          out.add(c - 0xDC00)
+        }
+      }
+      else -> throw pyError(pyLookupErrorType, "unknown error handler name '$errors'")
+    }
+    i = j
+  }
+  val b = Bytes(out.size)
+  for (k, v) in out.withIndex() { b[k] = v.toByte() }
+  return b
+}
+
+// UTF-16 and UTF-32 read (part 5.3): with no order named, a byte order mark gives it (and is
+// dropped), little-endian otherwise; bytes left over at the end, or a surrogate half alone, are
+// errors the handler deals with as CPython's codecs do (truncated data, illegal encoding).
+internal fun __pyDecodeWide(b : Bytes, enc : string, errors : string) : string {
+  val size = enc.startsWith("utf-16") ? 2 : 4
+  var big = enc.endsWith("-be")
+  var i = 0
+  if (!enc.endsWith("-le") and !enc.endsWith("-be") and b.size >= size) {
+    if (size == 2 and b[0].toInt() == 0xFF and b[1].toInt() == 0xFE) { i = 2 }
+    else if (size == 2 and b[0].toInt() == 0xFE and b[1].toInt() == 0xFF) { i = 2; big = true }
+    else if (size == 4 and b[0].toInt() == 0xFF and b[1].toInt() == 0xFE and b[2].toInt() == 0 and b[3].toInt() == 0) { i = 4 }
+    else if (size == 4 and b[0].toInt() == 0 and b[1].toInt() == 0 and b[2].toInt() == 0xFE and b[3].toInt() == 0xFF) { i = 4; big = true }
+  }
+  val sb = StringBuilder()
+  fun read(at : int) : int {
+    var v = 0
+    for k in 0..<size {
+      val byte = b[at + k].toInt()
+      v = big ? (v << 8) | byte : v | (byte << (8 * k))
+    }
+    return v
+  }
+  fun bad(start : int, end : int, reason : string) {
+    when (errors) {
+      "strict" -> {
+        val what = end - start == 1 ? "byte 0x${pyHex(b[start].toInt(), 2)} in position $start" : "bytes in position $start-${end - 1}"
+        throw pyError(pyUnicodeDecodeErrorType, "'$enc' codec can't decode $what: $reason")
+      }
+      "replace" -> sb.append('\u{FFFD}')
+      "ignore" -> {}
+      "backslashreplace" -> { for k in start..<end { sb.append("\\x" + pyHex(b[k].toInt(), 2)) } }
+      else -> throw pyError(pyLookupErrorType, "unknown error handler name '$errors'")
+    }
+  }
+  while (i < b.size) {
+    if (i + size > b.size) { bad(i, b.size, "truncated data"); break }
+    val v = read(i)
+    if (size == 2 and v >= 0xD800 and v <= 0xDBFF) {
+      if (i + 4 > b.size) { bad(i, b.size, "unexpected end of data"); break }
+      val low = read(i + 2)
+      if (low < 0xDC00 or low > 0xDFFF) { bad(i, i + 2, "illegal UTF-16 surrogate"); i += 2; continue }
+      sb.append((0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00)).char)
+      i += 4
+    } else if (size == 2 and v >= 0xDC00 and v <= 0xDFFF) {
+      bad(i, i + 2, "illegal encoding")
+      i += 2
+    } else if (size == 4 and (v > 0x10FFFF or (v >= 0xD800 and v <= 0xDFFF))) {
+      bad(i, i + 4, "code point not in range(0x110000)")
+      i += 4
+    } else {
+      sb.append(pyChar(v))
+      i += size
+    }
+  }
+  return sb.toString()
+}
+
+// A character as Python's repr writes it inside quotes, for an error's message.
+internal fun __pyEscapedChar(cp : int) : string =>
+  cp < 0x100 ? "\\x" + pyHex(cp, 2) : cp < 0x10000 ? "\\u" + pyHex(cp, 4) : "\\U" + pyHex(cp, 8)
+
+// UTF-8 as CPython decodes it (part 5.3): where a sequence is not UTF-8, the bytes CPython takes
+// for it (a start byte alone, or with the continuation bytes that were right), and what the
+// error handler makes of them: an error (strict), U+FFFD (replace), nothing (ignore), \xNN
+// (backslashreplace), or a lone surrogate for each byte (surrogateescape).
+fun pyDecodeUtf8(b : Bytes, errors : string) : string {
+  val sb = StringBuilder()
+  val n = b.size
+  var i = 0
+  fun bad(start : int, end : int, reason : string) {
+    when (errors) {
+      "strict" -> {
+        val what = end - start == 1 ? "byte 0x${pyHex(b[start].toInt(), 2)} in position $start" : "bytes in position $start-${end - 1}"
+        throw pyError(pyUnicodeDecodeErrorType, "'utf-8' codec can't decode $what: $reason")
+      }
+      "replace" -> sb.append('\u{FFFD}')
+      "ignore" -> {}
+      "backslashreplace" -> { for k in start..<end { sb.append("\\x" + pyHex(b[k].toInt(), 2)) } }
+      "surrogateescape" -> { for k in start..<end { sb.append(pyChar(0xDC00 + b[k].toInt())) } }
+      else -> throw pyError(pyLookupErrorType, "unknown error handler name '$errors'")
+    }
+  }
+  while (i < n) {
+    val c = b[i].toInt()
+    if (c < 0x80) {
+      sb.append(c.char)
+      i += 1
+      continue
+    }
+    var need = 0
+    var low = 0x80
+    var high = 0xBF
+    if (c >= 0xC2 and c <= 0xDF) { need = 1 }
+    else if (c >= 0xE0 and c <= 0xEF) {
+      need = 2
+      if (c == 0xE0) { low = 0xA0 }
+      if (c == 0xED) { high = 0x9F }
+    } else if (c >= 0xF0 and c <= 0xF4) {
+      need = 3
+      if (c == 0xF0) { low = 0x90 }
+      if (c == 0xF4) { high = 0x8F }
+    } else {
+      bad(i, i + 1, "invalid start byte")
+      i += 1
+      continue
+    }
+    // The continuation bytes there are, each in its range (the first's narrower after some starts).
+    var good = 0
+    var cp = need == 1 ? c & 0x1F : need == 2 ? c & 0x0F : c & 0x07
+    var stopped = false
+    while (good < need) {
+      if (i + 1 + good >= n) { break }
+      val d = b[i + 1 + good].toInt()
+      val lo = good == 0 ? low : 0x80
+      val hi = good == 0 ? high : 0xBF
+      if (d < lo or d > hi) { stopped = true; break }
+      cp = (cp << 6) | (d & 0x3F)
+      good += 1
+    }
+    if (good == need) {
+      sb.append(cp.char)
+      i += need + 1
+    } else if (!stopped) {
+      bad(i, n, "unexpected end of data")
+      i = n
+    } else {
+      bad(i, i + 1 + good, "invalid continuation byte")
+      i += 1 + good
+    }
+  }
+  return sb.toString()
 }
 
 fun pyDecode(b0 : any?, encoding : string, errors : string) : any? {
-  val b = b0 is PyByteArray ? (b0 as PyByteArray).bytes : b0
+  val b = pyBytesLike(b0) ?: b0
   if (!(b is Bytes)) { throw pyTypeError("decoding to str: need a bytes-like object, ${pyTypeName(b0)} found") }
-  val enc = encoding.lower().replace("_", "-")
-  if (enc == "utf-8" or enc == "utf8") { return (b as Bytes).decodeToString() }
-  if (enc == "ascii" or enc == "latin-1" or enc == "latin1" or enc == "iso-8859-1") {
+  val enc = pyEncodingName(encoding)
+  if (enc == "utf-8") { return pyDecodeUtf8(b as Bytes, errors) }
+  if (enc == "utf-8-sig") {
+    val bb = b as Bytes
+    val bom = bb.size >= 3 and bb[0].toInt() == 0xEF and bb[1].toInt() == 0xBB and bb[2].toInt() == 0xBF
+    return pyDecodeUtf8(bom ? pyBytesPart(bb, 3, bb.size) : bb, errors)
+  }
+  if (enc.startsWith("utf-16") or enc.startsWith("utf-32")) { return __pyDecodeWide(b as Bytes, enc, errors) }
+  if (enc == "ascii" or enc == "latin-1") {
     val sb = StringBuilder()
     for i in 0..<(b as Bytes).size {
       val v = (b as Bytes)[i]

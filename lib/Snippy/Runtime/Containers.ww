@@ -56,6 +56,13 @@ fun pyDictUpdate(d : PyDict, other : any?) {
   }
 }
 
+// locals() in a function: its names bound so far, with their values (Translate.ww's localsCall).
+fun pyLocalsOf(names : List<string>, values : List<any?>) : any? {
+  val d = PyDict()
+  for (i, n) in names.withIndex() { if (values[i] !== pyUnbound) { d.set(n, values[i]) } }
+  return d
+}
+
 fun pyGlobalsOf(m : PyModule) : any? {
   val d = PyDict()
   for name in m.bound() { d.set(name, m.get(name)) }
@@ -197,6 +204,11 @@ fun pyGetItem(o : any?, k : any?) : any? {
       if (t.builtin) { return PyGenericAlias(t, k) }
       throw pyTypeError("type '${t.name}' is not subscriptable")
     }
+    is PyNative -> {
+      val r = pyNativeSpecial(o as PyNative, "__getitem__", [k])
+      if (r === pyUnbound) { throw pyTypeError("'${pyTypeName(o)}' object is not subscriptable") }
+      r
+    }
     else -> throw pyTypeError("'${pyTypeName(o)}' object is not subscriptable")
   }
 }
@@ -271,9 +283,23 @@ fun pySetItem(o : any?, k : any?, v : any?) {
       val b = o as PyByteArray
       if (k is PySlice) {
         val l : open List<any?> = []
-        for i in 0..<b.bytes.size { l.add(b.bytes[i]) }
-        __pySetListSlice(l, k as PySlice, pyIterable(v is Bytes ? PyByteArray(v as Bytes) : v))
-        b.bytes = Bytes(l)
+        for i in 0..<b.bytes.size { l.add(b.bytes[i].toInt()) }
+        val src = pyBytesLike(v)
+        val values : open List<any?> = []
+        if (src != null) {
+          for i in 0..<src!!.size { values.add(src!![i].toInt()) }
+        } else {
+          if (pyIsInt(v) or v is string) { throw pyTypeError("can assign only bytes, buffers, or iterables of ints in range(0, 256)") }
+          for x in pyIterable(v) { values.add(pyByteValue(x)) }
+        }
+        val ix = pySliceIndices(k as PySlice, l.size)
+        if (ix[2] != 1 and values.size != ix[3]) {
+          throw pyValueError("attempt to assign bytes of size ${values.size} to extended slice of size ${ix[3]}")
+        }
+        __pySetListSlice(l, k as PySlice, values)
+        val out = Bytes(l.size)
+        for (i, x) in l.withIndex() { out[i] = (x as int).toByte() }
+        b.bytes = out
         return
       }
       val i = __pyAt(k, b.bytes.size)
@@ -291,6 +317,11 @@ fun pySetItem(o : any?, k : any?, v : any?) {
         return
       }
       pyCall2(pyBindDescriptor(m, o, ob.cls), k, v)
+    }
+    is PyNative -> {
+      if (pyNativeSpecial(o as PyNative, "__setitem__", [k, v]) === pyUnbound) {
+        throw pyTypeError("'${pyTypeName(o)}' object does not support item assignment")
+      }
     }
     else -> throw pyTypeError("'${pyTypeName(o)}' object does not support item assignment")
   }
@@ -323,6 +354,20 @@ fun pyDelItem(o : any?, k : any?) {
     is PyDict -> {
       if (!(o as PyDict).remove(k)) { throw pyKeyError(k) }
     }
+    is PyByteArray -> {
+      // As a list's items go (part 5.3), on a list of its values.
+      val b = o as PyByteArray
+      val l : open List<any?> = []
+      for i in 0..<b.length { l.add(b.bytes[i].toInt()) }
+      if (!(k is PySlice)) {
+        val i = __pyAt(k, l.size)
+        if (i < 0) { throw pyIndexError("bytearray index out of range") }
+      }
+      pyDelItem(l, k)
+      val out = Bytes(l.size)
+      for (i, x) in l.withIndex() { out[i] = (x as int).toByte() }
+      b.bytes = out
+    }
     is open List<any?> -> {
       val l = o as open List<any?>
       if (k is PySlice) {
@@ -354,6 +399,11 @@ fun pyDelItem(o : any?, k : any?) {
         return
       }
       __pyCall2Special(m, o, k)
+    }
+    is PyNative -> {
+      if (pyNativeSpecial(o as PyNative, "__delitem__", [k]) === pyUnbound) {
+        throw pyTypeError("'${pyTypeName(o)}' object doesn't support item deletion")
+      }
     }
     else -> throw pyTypeError("'${pyTypeName(o)}' object doesn't support item deletion")
   }
@@ -391,7 +441,30 @@ class PyDictView(val map : PyDict, val kind : int) : PyIdentified() {
 
 // ---- bytearray ----
 
-class PyByteArray(var bytes : Bytes) : PyIdentified() {
+// Its bytes in a buffer with room to grow (part 5.3: append() in a loop copies nothing each
+// time), `length` of them its own; `bytes` gives them exactly, the buffer cut to its length
+// where it had room.
+class PyByteArray(initial : Bytes) : PyIdentified() {
+  internal var buffer : Bytes = initial
+  var length = initial.size
+  var bytes : Bytes = Bytes(0)
+    get() {
+      if (buffer.size != length) { buffer = pyBytesPart(buffer, 0, length) }
+      return buffer
+    }
+    set(value) {
+      buffer = value
+      length = value.size
+    }
+  fun addByte(v : int) {
+    if (length == buffer.size) {
+      val bigger = Bytes(length < 8 ? 16 : length * 2)
+      if (length > 0) { bigger.copyFrom(buffer, 0, 1, 0, 1, length) }
+      buffer = bigger
+    }
+    buffer[length] = v.toByte()
+    length += 1
+  }
   override fun toString() : string => pyRepr(this)
 }
 

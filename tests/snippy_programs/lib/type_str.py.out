@@ -1,0 +1,65 @@
+5 3 1 20 3 2
+4 8 -1 18 3 -1 19
+7 17
+ValueError substring not found
+ValueError substring not found
+TypeError count() argument 1 must be str, not int
+True True True True False
+HELLO WORLD SSTRASSE Ǆ ÉCLAIR ΣΑΣ | hello world ßtraße ǆ éclair σας | HELLO world SSTRASSE ǅ ÉCLAIR σας | Hello world ßtraße ǆ éclair σας | Hello World Sstraße ǅ Éclair Σας | hello world sstrasse ǆ éclair σασ
+They'Re Bill'S Friends From The Uk FINE i̇ 2 σας σ
+'abc' True True True False False False True False False False True True
+'ABC' True True True False False False False True False False True True
+'Abc Def' False False True False False False False False False True False True
+'abc1' True False True False False False True False False False True True
+'123' True False True True True True False False False False False True
+'½' True False False False False True False False False False False True
+'²' True False False False True True False False False False False True
+'٣' True False False True True True False False False False False True
+' \t\n\x1c\x85\xa0' False False False False False False False False True False False False
+'' False False True False False False False False False False False True
+'é' True True False False False False True False False False True True
+'ǅ' True True False False False False False False False True True True
+'Ab Cd' False False True False False False False False False True False True
+'aB' True True True False False False False False False False True True
+'a_b' False False True False False False True False False False True True
+'1a' True False True False False False True False False False False True
+'_x' False False True False False False True False False False True True
+'x́' False False False False False False True False False False True True
+   ab   ***ab** ab--- ---ab ab éabcéé
+00042 -0042 +007 abc 000
+a       bc      d a   bc  d x  y
+ab c 
+TypeError The fill character must be exactly one character long
+'spaced' 'spaced \xa0\u2003 \n' ' \t\x0b\x0c\x1c spaced' hi c abc
+['a', 'b', 'c'] ['a', 'b c  '] ['a', 'b', '', 'c'] ['a', 'b,c'] [] ['']
+['a', 'b', 'c'] ['a,b', 'c'] ['  a', 'b'] ['a', 'b c'] ['a-b', 'c']
+['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'] ['a\n', 'b\n'] []
+('a', '-', 'b-c') ('a-b', '-', 'c') ('abc', '', '') ('', '', 'abc')
+ValueError empty separator
+ValueError empty separator
+body body x abc
+bbb bba -a-b-c- -a-bc ac bbaa
+a, b, c  x-y-z 0+1+2+3
+TypeError sequence item 1: expected str instance, int found
+[(97, 120), (98, 121), (99, 122), (100, None)] xxyyzz Jeo {97: '1', 98: None}
+ValueError the first two maketrans arguments must have equal length
+ValueError string keys in translatetable must be of length 1
+TypeError if you give only one argument to maketrans it must be a dict
+1 2 b a 1-2 6 3      a|b     |  c   |***d*** 1,234,567 ff 0003.142 +5 1.234500e+03 25.000000%
+'é' é '\xe9' {} 7     3.14 1010 12 0xa
+x and 3   2.3|42   |00007|ff|'q' 00003.50   x  
+Ann is 30
+IndexError Replacement index 0 out of range for positional args tuple
+ValueError cannot switch from manual field specification to automatic field numbering
+ValueError Unknown format code 'd' for object of type 'str'
+ValueError Single '{' encountered in format string
+TypeError %d format: a real number is required, not str
+TypeError not enough arguments for format string
+TypeError not all arguments converted during string formatting
+b'caf\xc3\xa9' b'caf\xe9' b'abc' b'caf?' b'caf' b'caf\\xe9' b'caf&#233; &#9731;' b'\xac ' b'\x00\x00 \xac'
+UnicodeEncodeError 'ascii' codec can't encode character '\xe9' in position 3: ordinal not in range(128)
+H o ello olleh !dlroW ,olleH Hl r!eo  19 ababab xx ab True True
+True False True True True True ['h', 'i'] ['a', 'b', 'c']
+"a'b" 'a"b' 'a\'"b' '\t\n\r\x00\x7f\\\u200b😀é' '\xe9\u2603\U0001f600' 5 b'x' é
+str str True  None [1, 'a'] None
+e o cba b 233 é 😀

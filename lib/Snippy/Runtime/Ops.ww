@@ -254,7 +254,8 @@ fun pyBuiltinOp(a0 : any?, b0 : any?, op : int) : any? {
   // keys() and items() take set operators, giving sets, as CPython's views do.
   if ((op == 1 or op >= 10) and ((a is PyDictView and (a as PyDictView).kind != 1) or (b is PyDictView and (b as PyDictView).kind != 1))) {
     val left = PySet(false)
-    left.update(a is PyDictView ? (a as PyDictView).items() : a)
+    // (A keys view made a set as CPython makes it, from its dict: one resize first, part 5.3.)
+    left.update(a is PyDictView ? ((a as PyDictView).kind == 0 ? (a as PyDictView).map : (a as PyDictView).items()) : a)
     val right = pyAsSet(b is PyDictView ? (b as PyDictView).items() : b)
     if (op == 1) {
       for k in right.items() { left.discard(k) }
@@ -273,6 +274,11 @@ fun pyBuiltinOp(a0 : any?, b0 : any?, op : int) : any? {
       }
       if (a is PyTuple and b is PyTuple) { return PyTuple((a as PyTuple).items + (b as PyTuple).items) }
       if (a is Bytes and b is Bytes) { return (a as Bytes) + (b as Bytes) }
+      // bytes or a bytearray and anything bytes-like: of the left one's type (part 5.3).
+      if ((a is Bytes or a is PyByteArray) and pyBytesLike(b) != null) {
+        val joined = pyBytesLike(a)!! + pyBytesLike(b)!!
+        return a is PyByteArray ? PyByteArray(joined) : joined
+      }
     }
     2 -> {
       if (pyIsInt(b) and !(a is float) and !(a is Complex)) { return __pySeqRepeat(a, b) }
@@ -281,6 +287,7 @@ fun pyBuiltinOp(a0 : any?, b0 : any?, op : int) : any? {
     6 -> {
       if (a is string) { return pyPercentFormat(a as string, b) }
       if (a is Bytes) { return pyPercentBytes(a as Bytes, b) }
+      if (a is PyByteArray) { return PyByteArray(pyPercentBytes((a as PyByteArray).bytes, b) as Bytes) }
     }
     10, 11, 12 -> {
       if (a is PySet and b is PySet) { return (a as PySet).operate(b as PySet, op) }
@@ -300,7 +307,7 @@ fun pyBuiltinOp(a0 : any?, b0 : any?, op : int) : any? {
 
 // `seq` repeated `n` times: a str, list, tuple or bytes; NotImplemented for anything else.
 internal fun __pySeqRepeat(seq : any?, n0 : any?) : any? {
-  if (!(seq is string or seq is List<any?> or seq is PyTuple or seq is Bytes)) { return pyNotImplemented }
+  if (!(seq is string or seq is List<any?> or seq is PyTuple or seq is Bytes or seq is PyByteArray)) { return pyNotImplemented }
   val nv = pyIndexValue(n0)
   if (nv is BigInt) {
     if ((nv as BigInt) < 0) { return pyRepeatOf(seq, 0) }
@@ -323,10 +330,11 @@ fun pyRepeatOf(seq : any?, n : int) : any? {
       for i in 0..<count { out.addAll(seq as List<any?>) }
       out
     }
-    is Bytes -> {
-      var out = Bytes(0)
-      for i in 0..<count { out = out + (seq as Bytes) }
-      out
+    is Bytes, is PyByteArray -> {
+      val one = pyBytesLike(seq)!!
+      val out = Bytes(one.size * count)
+      for i in 0..<count { if (one.size > 0) { out.copyFrom(one, 0, 1, i * one.size, 1, one.size) } }
+      seq is PyByteArray ? PyByteArray(out) : out
     }
     else -> pyNotImplemented
   }
@@ -709,8 +717,15 @@ fun pyTruth(x : any?) : bool {
     is PyObject -> __pyObjectTruth(x as PyObject)
     is PyRange -> (x as PyRange).length() != 0
     is Bytes -> (x as Bytes).size != 0
-    is PyByteArray -> (x as PyByteArray).bytes.size != 0
+    is PyByteArray -> (x as PyByteArray).length != 0
     is PyDictView -> (x as PyDictView).size() != 0
+    is PyNative -> {
+      val b = pyNativeSpecial(x as PyNative, "__bool__", [])
+      if (b !== pyUnbound) { pyTruth(b) } else {
+        val n = pyNativeSpecial(x as PyNative, "__len__", [])
+        n === pyUnbound or pyIndex(n) != 0
+      }
+    }
     else -> true
   }
 }
@@ -763,6 +778,18 @@ fun pyBuiltinEq(a0 : any?, b0 : any?) : bool {
   val a = pyUnwrap(a0)
   val b = pyUnwrap(b0)
   if (pySame(a, b)) { return true }
+  // An object of the runtime's own (a memoryview, a module's): its __eq__, either way round (part 5.3).
+  if (a is PyNative or b is PyNative) {
+    if (a is PyNative) {
+      val r = pyNativeSpecial(a as PyNative, "__eq__", [b])
+      if (r !== pyUnbound and r !== pyNotImplemented) { return pyTruth(r) }
+    }
+    if (b is PyNative) {
+      val r = pyNativeSpecial(b as PyNative, "__eq__", [a])
+      if (r !== pyUnbound and r !== pyNotImplemented) { return pyTruth(r) }
+    }
+    return false
+  }
   if (pyIsNumber(a) and pyIsNumber(b)) { return __pyNumberEq(a, b) }
   if (a is string and b is string) { return a == b }
   if (a is PyTuple and b is PyTuple) { return __pyListEq((a as PyTuple).items, (b as PyTuple).items) }
@@ -964,9 +991,9 @@ internal fun __pyOrder(a : any?, b : any?) : any? {
   }
   if (a is PyTuple and b is PyTuple) { return __pySeqOrder((a as PyTuple).items, (b as PyTuple).items) }
   if (a is List<any?> and b is List<any?> and !(a is PyTuple) and !(b is PyTuple)) { return __pySeqOrder(a as List<any?>, b as List<any?>) }
-  if (a is Bytes and b is Bytes) {
-    val x = a as Bytes
-    val y = b as Bytes
+  if ((a is Bytes or a is PyByteArray) and (b is Bytes or b is PyByteArray)) {
+    val x = pyBytesLike(a)!!
+    val y = pyBytesLike(b)!!
     for i in 0..<(x.size < y.size ? x.size : y.size) {
       if (x[i] != y[i]) { return x[i] < y[i] ? -1 : 1 }
     }
@@ -1057,6 +1084,10 @@ fun pyHash(x : any?) : int {
     is PyDict -> throw pyTypeError("unhashable type: 'dict'")
     is PyByteArray -> throw pyTypeError("unhashable type: 'bytearray'")
     is Bytes -> __pyHashBytes(x as Bytes)
+    is PyNative -> {
+      val h = pyNativeSpecial(x as PyNative, "__hash__", [])
+      h === pyUnbound ? (x as PyIdentified).identity() >>> 4 : pyIndex(h)
+    }
     is PyRange -> __pyHashTuple(PyTuple([(x as PyRange).length(), (x as PyRange).start, (x as PyRange).step]))
     is PyIdentified -> (x as PyIdentified).identity() >>> 4
     else -> __hashCode(x)
@@ -1220,7 +1251,7 @@ fun pyLength(x : any?) : int {
     is PySet -> (x as PySet).size
     is PyRange -> (x as PyRange).length()
     is Bytes -> (x as Bytes).size
-    is PyByteArray -> (x as PyByteArray).bytes.size
+    is PyByteArray -> (x as PyByteArray).length
     is PyDictView -> (x as PyDictView).size()
     is PyObject -> {
       val m = (x as PyObject).cls.lookup("__len__")
@@ -1230,6 +1261,11 @@ fun pyLength(x : any?) : int {
       val n = pyIndex(r)
       if (n < 0) { throw pyValueError("__len__() should return >= 0") }
       n
+    }
+    is PyNative -> {
+      val n = pyNativeSpecial(x as PyNative, "__len__", [])
+      if (n === pyUnbound) { throw pyTypeError("object of type '${pyTypeName(x)}' has no len()") }
+      pyIndex(n)
     }
     else -> throw pyTypeError("object of type '${pyTypeName(x)}' has no len()")
   }
@@ -1255,6 +1291,7 @@ fun pyContains(c : any?, item : any?) : bool {
     is PyRange -> (c as PyRange).has(item)
     is PyDictView -> (c as PyDictView).has(item)
     is Bytes -> pyBytesContains(c as Bytes, item)
+    is PyByteArray -> pyBytesContains((c as PyByteArray).bytes, item)
     is PyObject -> {
       val m = (c as PyObject).cls.lookup("__contains__")
       if (m !== pyUnbound and m != null) { return pyTruth(__pyCall2Special(m, c, item)) }

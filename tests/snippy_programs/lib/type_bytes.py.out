@@ -1,0 +1,50 @@
+5 3 1 5 20
+4 8 -1 4 18 3
+7 17
+ValueError subsection not found
+ValueError subsection not found
+True True True True
+b'HELLO WORLD \xe9T\xc9 42' b'hello world \xe9t\xc9 42' b'HELLO world \xe9T\xc9 42' b'Hello world \xe9t\xc9 42' b'Hello World \xe9T\xc9 42'
+b'abc' True True True False True False False False
+b'ABC' True True True False False True False False
+b'Abc Def' False False True False False False False True
+b'abc1' True False True False True False False False
+b'123' True False True True False False False False
+b' \t\n' False False True False False False True False
+b'' False False True False False False False False
+b'\xe9' False False False False False False False False
+b'ab cd' False False True False True False False False
+b'Ab Cd' False False True False False False False True
+b'AB CD' False False True False False True False False
+b'aB' True True True False False False False False
+b"They'Re Bill'S Friends" b'Hello\xe9world'
+b'   ab  ' b'***ab**' b'ab---' b'---ab' b'ab'
+b'00042' b'-0042' b'+007' b'abc'
+b'a       bc      d' b'a   bc  d' b'x  y\nab c'
+TypeError center(): argument 2 must be a byte string of length 1, not a bytes object of length 2
+b'spaced \xa0\x85' b'spaced \xa0\x85 \n' b' \t\x0b\x0c spaced \xa0\x85' b'hi' b'c'
+[b'a', b'b', b'c'] [b'a', b'b c  '] [b'a', b'b', b'', b'c'] [b'a', b'b,c']
+[b'a', b'b', b'c'] [b'a,b', b'c'] [b'  a', b'b']
+[b'\xa0a\x85b'] [b'x\x1cy']
+[b'one', b'two', b'three', b'four\x0bfive\x0c'] [b'a\n', b'b\n'] []
+(b'a', b'-', b'b-c') (b'a-b', b'-', b'c') (b'abc', b'', b'') (b'', b'', b'abc')
+b'body' b'body' b'x'
+b'bbb' b'bba' b'-a-b-c-' b'ac'
+b'a, b, c, d' b''
+TypeError sequence item 1: expected a bytes-like object, str found
+256 b'xyz' b'xxyyzz' b'heo' b'xz'
+ValueError maketrans arguments must have same length
+00ff10 01:02:03:04 0102-0304 0102 0304 05
+b'\xde\xad\xbe\xef' b'' b'\n\x0b'
+ValueError fromhex() arg must contain an even number of hexadecimal digits
+ValueError non-hexadecimal number found in fromhex() arg at position 0
+café café abc caf� caf caf\xff
+UnicodeDecodeError 'utf-8' codec can't decode byte 0xff in position 3: invalid start byte
+b'' b'\x00\x00\x00' b'ABC' b'abc' b'\x00\x01\x02\x03\x04' b'xy' b'mv'
+ValueError bytes must be in range(0, 256)
+TypeError string argument without an encoding
+72 111 b'ello' b'olleh !dlroW ,olleH' b'Hl r!eo' 19 b'ababab' b'xx' b'ab' b'abc'
+True True True True True [104, 105]
+b"a'b" b'a"b' b'a\'"b' b'\t\n\r\x00\x7f\\' b'x'
+b"3 items cost 1.50: ok b'r' ff A Z"
+bytes bytes True

@@ -172,6 +172,12 @@ fun pyIter(x : any?) : any? {
     is PyDictView -> (x as PyDictView).iterator()
     is Bytes -> PyBytesIter(x as Bytes)
     is PyByteArray -> PyBytesIter((x as PyByteArray).bytes)
+    is PyNative -> {
+      val it = pyNativeSpecial(x as PyNative, "__iter__", [])
+      if (it !== pyUnbound) { return it }
+      if ((x as PyNative).pyType().lookup("__getitem__") !== pyUnbound) { return PySeqIter(x) }
+      throw pyTypeError("'${pyTypeName(x)}' object is not iterable")
+    }
     is PyObject -> {
       val o = x as PyObject
       val m = o.cls.lookup("__iter__")
@@ -204,6 +210,16 @@ fun pyIterOf(x : any?) : any? => pyIter(x)
 // next(it): the next item, or pyEnd.
 fun pyNext(it : any?) : any? {
   if (it is PyIterator) { return (it as PyIterator).next() }
+  if (it is PyNative) {
+    try {
+      val r = pyNativeSpecial(it as PyNative, "__next__", [])
+      if (r === pyUnbound) { throw pyTypeError("'${pyTypeName(it)}' object is not an iterator") }
+      return r
+    } catch (e : PyError) {
+      if (e.exc.cls.isSubtype(pyStopIterationType)) { return pyEnd }
+      throw e
+    }
+  }
   if (it is PyObject) {
     val m = (it as PyObject).cls.lookup("__next__")
     if (m === pyUnbound or m == null) { throw pyTypeError("'${pyTypeName(it)}' object is not an iterator") }
@@ -350,12 +366,135 @@ class PyRange(val start : int, val stop : int, val step : int) : PyIdentified() 
   override fun toString() : string => pyRepr(this)
 }
 
-fun pyRangeOf1(stop : any?) : any? => PyRange(0, pyIndex(stop), 1)
-fun pyRangeOf2(start : any?, stop : any?) : any? => PyRange(pyIndex(start), pyIndex(stop), 1)
-fun pyRangeOf3(start : any?, stop : any?, step : any?) : any? {
-  val s = pyIndex(step)
-  if (s == 0) { throw pyValueError("range() arg 3 must not be zero") }
-  return PyRange(pyIndex(start), pyIndex(stop), s)
+fun pyRangeOf1(stop : any?) : any? => pyMakeRange(0, stop, 1)
+fun pyRangeOf2(start : any?, stop : any?) : any? => pyMakeRange(start, stop, 1)
+fun pyRangeOf3(start : any?, stop : any?, step : any?) : any? => pyMakeRange(start, stop, step)
+
+// range(start, stop, step): a PyRange of WinterWolf ints where its numbers are well inside
+// them, a PyBigRange otherwise (part 5.3: range(2**70) as Python's).
+fun pyMakeRange(start0 : any?, stop0 : any?, step0 : any?) : any? {
+  val a = pyIndexValue(start0)
+  val b = pyIndexValue(stop0)
+  val c = pyIndexValue(step0)
+  if (c is int and c == 0) { throw pyValueError("range() arg 3 must not be zero") }
+  val limit = 4611686018427387904  // 2**62: stop - start never overflows below it
+  if (a is int and b is int and c is int and a > -limit and a < limit and b > -limit and b < limit and c > -limit and c < limit) {
+    return PyRange(a as int, b as int, c as int)
+  }
+  return PyBigRange(pyBig(a), pyBig(b), pyBig(c))
+}
+
+// A range past WinterWolf's ints: its numbers BigInts, the rest as PyRange's.
+class PyBigRange(val start : BigInt, val stop : BigInt, val step : BigInt) : PyNative() {
+  override fun pyType() : PyType => pyRangeType
+  fun length() : BigInt {
+    val zero = BigInt.of(0)
+    val one = BigInt.of(1)
+    if (step > zero) { return start < stop ? (stop - start - one) / step + one : zero }
+    return start > stop ? (start - stop - one) / (-step) + one : zero
+  }
+  fun item(i : BigInt) : BigInt => start + i * step
+  fun index(x : any?) : BigInt? {
+    if (!pyIsInt(x)) { return null }
+    val v = pyBig(x)
+    val zero = BigInt.of(0)
+    val inside = step > zero ? (v >= start and v < stop) : (v <= start and v > stop)
+    if (!inside or (v - start) % step != zero) { return null }
+    return (v - start) / step
+  }
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "start" -> pyNorm(start)
+      "stop" -> pyNorm(stop)
+      "step" -> pyNorm(step)
+      else -> pyUnbound
+    }
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    val p = a.pos
+    return when (name) {
+      "__len__" -> {
+        val n = length().toIntOrNull()
+        if (n == null) { throw pyOverflowError("Python int too large to convert to C ssize_t") }
+        n
+      }
+      "__bool__" -> length() != BigInt.of(0)
+      "__getitem__" -> {
+        if (p[0] is PySlice) {
+          // As CPython slices a range: the slice's indices on its length, made a range again.
+          val s = p[0] as PySlice
+          val ix = pyBigSliceIndices(s, length())
+          pyMakeRange(pyNorm(item(ix[0])), pyNorm(item(ix[1])), pyNorm(step * ix[2]))
+        } else {
+          var i = pyBig(pyIndexValue(p[0]))
+          val n = length()
+          if (i < BigInt.of(0)) { i = i + n }
+          if (i < BigInt.of(0) or i >= n) { throw pyIndexError("range object index out of range") }
+          pyNorm(item(i))
+        }
+      }
+      "__iter__" -> PyBigRangeIter(start, stop, step)
+      "__reversed__" -> {
+        val n = length()
+        PyBigRangeIter(item(n - BigInt.of(1)), start - step, -step)
+      }
+      "__contains__" -> index(p[0]) != null
+      "count" -> index(p[0]) != null ? 1 : 0
+      "index" -> {
+        val i = index(p[0])
+        if (i == null) { throw pyValueError("range.index(x): x not in range") }
+        pyNorm(i!!)
+      }
+      "__repr__" -> step == BigInt.of(1) ? "range(${start}, ${stop})" : "range(${start}, ${stop}, ${step})"
+      "__eq__" -> {
+        val o = p[0]
+        if (o is PyBigRange) {
+          val x = o as PyBigRange
+          val n = length()
+          n == x.length() and (n == BigInt.of(0) or (start == x.start and (n == BigInt.of(1) or step == x.step)))
+        } else if (o is PyRange) { false } else { pyNotImplemented }
+      }
+      "__hash__" -> {
+        val n = length()
+        pyHash(PyTuple([pyNorm(n), n == BigInt.of(0) ? null : pyNorm(start), n <= BigInt.of(1) ? null : pyNorm(step)]))
+      }
+      else -> throw pyAttributeError("'range' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+class PyBigRangeIter(var cur : BigInt, val stop : BigInt, val step : BigInt) : PyIterator() {
+  override fun next() : any? {
+    if (step > BigInt.of(0) ? cur < stop : cur > stop) {
+      val v = cur
+      cur = cur + step
+      return pyNorm(v)
+    }
+    return pyEnd
+  }
+  override fun pyType() : PyType => __pyIterType("longrange_iterator")
+}
+
+// slice.indices(length) with BigInts: start, stop, step, as CPython's PySlice_GetIndicesEx.
+fun pyBigSliceIndices(s : PySlice, length : BigInt) : List<BigInt> {
+  val zero = BigInt.of(0)
+  val one = BigInt.of(1)
+  val step = s.step == null ? one : pyBig(pyIndexValue(s.step))
+  if (step == zero) { throw pyValueError("slice step cannot be zero") }
+  val lower = step < zero ? -one : zero
+  val upper = step < zero ? length - one : length
+  fun clamp(v : any?, otherwise : BigInt) : BigInt {
+    if (v == null) { return otherwise }
+    var x = pyBig(pyIndexValue(v))
+    if (x < zero) {
+      x = x + length
+      if (x < lower) { x = lower }
+    } else if (x > upper) { x = upper }
+    return x
+  }
+  val start = clamp(s.lower, step < zero ? upper : lower)
+  val stop = clamp(s.upper, step < zero ? lower : upper)
+  return [start, stop, step]
 }
 
 // ---- Generators ----
