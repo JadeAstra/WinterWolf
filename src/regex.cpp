@@ -3,16 +3,9 @@
 // into a tree, the tree compiled into a program of a few kinds of instruction, and the program
 // run by backtracking, with the alternatives kept on a stack of its own.
 //
-// What a character is (a letter, a digit, upper or lower case) comes from the system's tables,
-// as it does for char.isLetter() and the rest, until the text engine brings Unicode data of its
-// own; so do the Unicode categories (\p{Lu}), the rarer ones (\p{Lm}, \p{Sc}) approximated by
-// what those tables tell apart.
-
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
+// What a character is (a letter, a digit, upper or lower case, its category and properties) and
+// its other case come from WinterWolf's own Unicode data (unicode.h, Unicode 16.0), as they do for
+// char.isLetter() and the rest, each class as Java's Pattern defines it.
 
 #include "regex.h"
 
@@ -22,11 +15,8 @@
 #include <mutex>
 
 #include "builtins.h"
+#include "unicode.h"
 #include "value.h"
-
-#ifndef _WIN32
-#include <wctype.h>
-#endif
 
 namespace ww::regex {
 
@@ -34,105 +24,10 @@ namespace ww::regex {
 
 namespace {
 
-enum Kind : uint16_t {
-    kLetter = 1, kDigit = 2, kSpace = 4, kUpper = 8, kLower = 16, kPunct = 32, kControl = 64, kSymbol = 128, kMark = 256,
-    kDefined = 512,
-};
-
-#ifdef _WIN32
-uint16_t systemKinds(uint32_t c) {
-    wchar_t units[2];
-    int count = 1;
-    if (c >= 0x10000) {
-        units[0] = static_cast<wchar_t>(0xD800 + ((c - 0x10000) >> 10));
-        units[1] = static_cast<wchar_t>(0xDC00 + ((c - 0x10000) & 0x3FF));
-        count = 2;
-    } else {
-        units[0] = static_cast<wchar_t>(c);
-    }
-    WORD one[2] = {0, 0}, three[2] = {0, 0};
-    GetStringTypeW(CT_CTYPE1, units, count, one);
-    GetStringTypeW(CT_CTYPE3, units, count, three);
-    uint16_t k = 0;
-    if (one[0] & C1_ALPHA) k |= kLetter;
-    if (one[0] & C1_DIGIT) k |= kDigit;
-    if (one[0] & C1_SPACE) k |= kSpace;
-    if (one[0] & C1_UPPER) k |= kUpper;
-    if (one[0] & C1_LOWER) k |= kLower;
-    if (one[0] & C1_PUNCT) k |= kPunct;
-    if (one[0] & C1_CNTRL) k |= kControl;
-    if (three[0] & C3_SYMBOL) k |= kSymbol;
-    if (three[0] & C3_NONSPACING) k |= kMark;
-    if (one[0] & C1_DEFINED) k |= kDefined;
-    if (k & kLetter) k &= static_cast<uint16_t>(~kPunct);  // some letters come with a punctuation bit
-    return k;
-}
-uint32_t systemCase(uint32_t c, bool upper) {
-    if (c >= 0x10000 || (c >= 0xD800 && c < 0xE000)) return c;
-    wchar_t unit = static_cast<wchar_t>(c);
-    if (upper) CharUpperBuffW(&unit, 1);
-    else CharLowerBuffW(&unit, 1);
-    return unit;
-}
-#else
-uint16_t systemKinds(uint32_t c) {
-    const int k = unicodeKinds(c);
-    uint16_t out = kDefined;
-    if (k & kUnicodeLetter) out |= kLetter;
-    if (k & kUnicodeDigit) out |= kDigit;
-    if (k & kUnicodeSpace) out |= kSpace;
-    if (k & kUnicodeUpper) out |= kUpper;
-    if (k & kUnicodeLower) out |= kLower;
-    if (c < 0x20 || (c >= 0x7F && c < 0xA0)) out |= kControl;
-    else if (!(out & (kLetter | kDigit | kSpace))) out |= kPunct;
-    return out;
-}
-uint32_t systemCase(uint32_t c, bool upper) { return unicodeCase(c, upper); }
-#endif
-
-// The kinds and the cases of the first 65,536 characters, worked out once.
-struct Tables {
-    std::vector<uint16_t> kinds;
-    std::vector<uint32_t> upper, lower;
-    Tables() : kinds(0x10000), upper(0x10000), lower(0x10000) {
-        for (uint32_t c = 0; c < 0x10000; c++) {
-            if (c < 0x80) {
-                uint16_t k = kDefined;
-                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) k |= kLetter;
-                if (c >= 'A' && c <= 'Z') k |= kUpper;
-                if (c >= 'a' && c <= 'z') k |= kLower;
-                if (c >= '0' && c <= '9') k |= kDigit;
-                if (c == ' ' || (c >= 9 && c <= 13) || (c >= 0x1C && c <= 0x1F)) k |= kSpace;
-                if (c < 0x20 || c == 0x7F) k |= kControl;
-                if (std::strchr("!\"#%&'()*,-./:;?@[\\]_{}", static_cast<int>(c)) != nullptr && c != 0) k |= kPunct;
-                if (std::strchr("$+<=>^`|~", static_cast<int>(c)) != nullptr && c != 0) k |= kSymbol;
-                kinds[c] = k;
-                upper[c] = (c >= 'a' && c <= 'z') ? c - 32 : c;
-                lower[c] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
-            } else {
-                kinds[c] = (c >= 0xD800 && c < 0xE000) ? 0 : systemKinds(c);
-                upper[c] = systemCase(c, true);
-                lower[c] = systemCase(c, false);
-            }
-        }
-        // The titlecase digraphs (Dž, Lj, Nj, Dz) each have an upper and a lower form.
-        for (uint32_t t : {0x01C5u, 0x01C8u, 0x01CBu, 0x01F2u}) {
-            upper[t] = t - 1;
-            lower[t] = t + 1;
-            upper[t + 1] = t - 1;
-            lower[t - 1] = t + 1;
-        }
-    }
-};
-const Tables& tables() {
-    static const Tables made;
-    return made;
-}
-
-uint16_t kindsOf(uint32_t c) { return c < 0x10000 ? tables().kinds[c] : systemKinds(c); }
-uint32_t upperOf(uint32_t c) { return c < 0x10000 ? tables().upper[c] : systemCase(c, true); }
-uint32_t lowerOf(uint32_t c) { return c < 0x10000 ? tables().lower[c] : systemCase(c, false); }
-// One form of a character for comparing without case, as Java's UNICODE_CASE does.
+// Java's simple case mappings, and one form of a character for comparing without case, as
+// Java's UNICODE_CASE does.
+uint32_t upperOf(uint32_t c) { return unicode::toUpper(c); }
+uint32_t lowerOf(uint32_t c) { return unicode::toLower(c); }
 uint32_t fold(uint32_t c) { return lowerOf(upperOf(c)); }
 
 bool isLineTerminator(uint32_t c, bool unixLines) {
@@ -175,14 +70,19 @@ bool snippyCased(uint32_t c) {
 enum class Pred : uint8_t {
     AsciiDigit, AsciiWord, AsciiSpace, HSpace, VSpace,
     PosixLower, PosixUpper, Ascii, PosixAlpha, PosixAlnum, PosixPunct, PosixGraph, PosixPrint, Blank, PosixCntrl, XDigit,
-    Letter, Upper, Lower, TitleOrModifier, OtherLetter, Mark, Digit, Punct, Symbol, Separator, SpaceSeparator, LineSeparator,
-    ParagraphSeparator, Control, Surrogate, PrivateUse, Unassigned, Format, Any, Whitespace, LetterOrDigit, Alphabetic,
-    UnicodeWord,
+    Any, Whitespace, LetterOrDigit, Alphabetic, UnicodeWord, Uppercase, Lowercase, WhiteSpaceProperty, Assigned, HexDigit,
+    Ideographic, JoinControl, CasedLetter,
+    MajorL, MajorM, MajorN, MajorP, MajorS, MajorZ, MajorC,
+    // One general category each, in unicode::Category's order.
+    CatCn, CatLu, CatLl, CatLt, CatLm, CatLo, CatMn, CatMc, CatMe, CatNd, CatNl, CatNo, CatPc, CatPd, CatPs, CatPe, CatPi, CatPf,
+    CatPo, CatSm, CatSc, CatSk, CatSo, CatZs, CatZl, CatZp, CatCc, CatCf, CatCs, CatCo,
     SnippyWord, SnippyDecimal, SnippySpace,  // CPython's \w, \d and \s on str: str.isalnum() or _, str.isdecimal(), str.isspace()
 };
 
 bool test(Pred p, uint32_t c) {
+    using unicode::Category;
     const auto posixPunct = [](uint32_t ch) { return ch < 0x80 && std::strchr("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", static_cast<int>(ch)) != nullptr && ch != 0; };
+    if (p >= Pred::CatCn && p <= Pred::CatCo) return unicode::category(c) == static_cast<Category>(static_cast<int>(p) - static_cast<int>(Pred::CatCn));
     switch (p) {
         case Pred::AsciiDigit: return c >= '0' && c <= '9';
         case Pred::AsciiWord: return isAsciiWord(c);
@@ -202,45 +102,41 @@ bool test(Pred p, uint32_t c) {
         case Pred::Blank: return c == ' ' || c == '\t';
         case Pred::PosixCntrl: return c < 0x20 || c == 0x7F;
         case Pred::XDigit: return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-        case Pred::Letter: return (kindsOf(c) & kLetter) != 0;
-        case Pred::Upper: return (kindsOf(c) & kUpper) != 0;
-        case Pred::Lower: return (kindsOf(c) & kLower) != 0;
-        case Pred::TitleOrModifier: return c == 0x01C5 || c == 0x01C8 || c == 0x01CB || c == 0x01F2 || (c >= 0x02B0 && c <= 0x02FF && (kindsOf(c) & kLetter));
-        case Pred::OtherLetter: {
-            const uint16_t k = kindsOf(c);
-            return (k & kLetter) && !(k & (kUpper | kLower));
-        }
-        case Pred::Mark: return (kindsOf(c) & kMark) != 0;
-        case Pred::Digit: return (kindsOf(c) & kDigit) != 0;
-        case Pred::Punct: {
-            const uint16_t k = kindsOf(c);
-            return c < 0x80 ? (k & kPunct) != 0 : (k & kPunct) && !(k & kSymbol);
-        }
-        case Pred::Symbol: return (kindsOf(c) & kSymbol) != 0;
-        case Pred::Separator: return c == ' ' || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
-        case Pred::SpaceSeparator: return c == ' ' || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x202F || c == 0x205F || c == 0x3000;
-        case Pred::LineSeparator: return c == 0x2028;
-        case Pred::ParagraphSeparator: return c == 0x2029;
-        case Pred::Control: return c < 0x20 || (c >= 0x7F && c < 0xA0);
-        case Pred::Surrogate: return c >= 0xD800 && c < 0xE000;
-        case Pred::PrivateUse: return (c >= 0xE000 && c <= 0xF8FF) || (c >= 0xF0000 && c <= 0xFFFFD) || (c >= 0x100000 && c <= 0x10FFFD);
-        case Pred::Unassigned: return !(kindsOf(c) & kDefined) && !(c >= 0xD800 && c < 0xE000);
-        case Pred::Format: return c == 0xAD || (c >= 0x600 && c <= 0x605) || c == 0x200B || (c >= 0x200C && c <= 0x200F) || (c >= 0x202A && c <= 0x202E) ||
-                                  (c >= 0x2060 && c <= 0x2064) || c == 0xFEFF;
         case Pred::Any: return true;
-        case Pred::Whitespace: {
-            // Java's Character.isWhitespace: space separators but the no-break ones, and \t to \r, \x1C to \x1F.
-            if (c == 0xA0 || c == 0x2007 || c == 0x202F) return false;
-            return (c >= 9 && c <= 13) || (c >= 0x1C && c <= 0x1F) || test(Pred::Separator, c);
+        case Pred::Whitespace: return unicode::isWhitespace(c);  // Java's Character.isWhitespace
+        case Pred::LetterOrDigit: return unicode::isLetterOrDigit(c);
+        case Pred::Alphabetic: return unicode::isAlphabetic(c);
+        case Pred::UnicodeWord: {
+            // Java's \p{IsWord}: alphabetic, a mark, a decimal digit, connector punctuation or a joiner.
+            const Category k = unicode::category(c);
+            return unicode::isAlphabetic(c) || k == Category::Mn || k == Category::Me || k == Category::Mc || k == Category::Nd || k == Category::Pc ||
+                   unicode::has(c, unicode::kJoinControl);
         }
-        case Pred::LetterOrDigit: return (kindsOf(c) & (kLetter | kDigit)) != 0;
-        case Pred::Alphabetic: return (kindsOf(c) & kLetter) != 0;
-        case Pred::UnicodeWord: return (kindsOf(c) & (kLetter | kDigit | kMark)) != 0 || c == '_' || c == 0x200C || c == 0x200D;
+        case Pred::Uppercase: return unicode::isUpperCase(c);
+        case Pred::Lowercase: return unicode::isLowerCase(c);
+        case Pred::WhiteSpaceProperty: return unicode::has(c, unicode::kWhiteSpace);
+        case Pred::Assigned: return unicode::category(c) != Category::Cn;
+        case Pred::HexDigit:
+            // Java's \p{IsHex_Digit}: a decimal digit, or 0-9, A-F and a-f, at half or full width.
+            return unicode::isDigit(c) || unicode::has(c, unicode::kHexDigit);
+        case Pred::Ideographic: return unicode::has(c, unicode::kIdeographic);
+        case Pred::JoinControl: return unicode::has(c, unicode::kJoinControl);
+        case Pred::CasedLetter: {
+            const Category k = unicode::category(c);
+            return k == Category::Lu || k == Category::Ll || k == Category::Lt;
+        }
+        case Pred::MajorL: return unicode::major(unicode::category(c)) == 'L';
+        case Pred::MajorM: return unicode::major(unicode::category(c)) == 'M';
+        case Pred::MajorN: return unicode::major(unicode::category(c)) == 'N';
+        case Pred::MajorP: return unicode::major(unicode::category(c)) == 'P';
+        case Pred::MajorS: return unicode::major(unicode::category(c)) == 'S';
+        case Pred::MajorZ: return unicode::major(unicode::category(c)) == 'Z';
+        case Pred::MajorC: return unicode::major(unicode::category(c)) == 'C';
         case Pred::SnippyWord: return snippyIs(c, kSnippyWord);
         case Pred::SnippyDecimal: return snippyIs(c, kSnippyDecimal);
         case Pred::SnippySpace: return snippyIs(c, kSnippySpace);
+        default: return false;
     }
-    return false;
 }
 
 }  // namespace
@@ -884,26 +780,29 @@ private:
             {"Digit", Pred::AsciiDigit}, {"Alnum", Pred::PosixAlnum}, {"Punct", Pred::PosixPunct}, {"Graph", Pred::PosixGraph},
             {"Print", Pred::PosixPrint}, {"Blank", Pred::Blank}, {"Cntrl", Pred::PosixCntrl}, {"XDigit", Pred::XDigit},
             {"Space", Pred::AsciiSpace},
-            {"javaLowerCase", Pred::Lower}, {"javaUpperCase", Pred::Upper}, {"javaWhitespace", Pred::Whitespace},
-            {"javaLetter", Pred::Letter}, {"javaDigit", Pred::Digit}, {"javaLetterOrDigit", Pred::LetterOrDigit},
-            {"javaAlphabetic", Pred::Alphabetic}, {"javaSpaceChar", Pred::Separator},
+            // Java's Character methods.
+            {"javaLowerCase", Pred::Lowercase}, {"javaUpperCase", Pred::Uppercase}, {"javaTitleCase", Pred::CatLt},
+            {"javaWhitespace", Pred::Whitespace}, {"javaLetter", Pred::MajorL}, {"javaDigit", Pred::CatNd},
+            {"javaLetterOrDigit", Pred::LetterOrDigit}, {"javaAlphabetic", Pred::Alphabetic}, {"javaSpaceChar", Pred::MajorZ},
+            {"javaIdeographic", Pred::Ideographic}, {"javaDefined", Pred::Assigned},
         };
         static const std::map<std::string, Pred> categories = {
-            {"L", Pred::Letter}, {"Lu", Pred::Upper}, {"Ll", Pred::Lower}, {"Lt", Pred::TitleOrModifier}, {"Lm", Pred::TitleOrModifier},
-            {"Lo", Pred::OtherLetter}, {"M", Pred::Mark}, {"Mn", Pred::Mark}, {"Mc", Pred::Mark}, {"Me", Pred::Mark},
-            {"N", Pred::Digit}, {"Nd", Pred::Digit}, {"Nl", Pred::Digit}, {"No", Pred::Digit},
-            {"P", Pred::Punct}, {"Pc", Pred::Punct}, {"Pd", Pred::Punct}, {"Ps", Pred::Punct}, {"Pe", Pred::Punct},
-            {"Pi", Pred::Punct}, {"Pf", Pred::Punct}, {"Po", Pred::Punct},
-            {"S", Pred::Symbol}, {"Sm", Pred::Symbol}, {"Sc", Pred::Symbol}, {"Sk", Pred::Symbol}, {"So", Pred::Symbol},
-            {"Z", Pred::Separator}, {"Zs", Pred::SpaceSeparator}, {"Zl", Pred::LineSeparator}, {"Zp", Pred::ParagraphSeparator},
-            {"C", Pred::Control}, {"Cc", Pred::Control}, {"Cf", Pred::Format}, {"Cs", Pred::Surrogate}, {"Co", Pred::PrivateUse},
-            {"Cn", Pred::Unassigned},
+            {"L", Pred::MajorL}, {"LC", Pred::CasedLetter}, {"Lu", Pred::CatLu}, {"Ll", Pred::CatLl}, {"Lt", Pred::CatLt}, {"Lm", Pred::CatLm},
+            {"Lo", Pred::CatLo}, {"M", Pred::MajorM}, {"Mn", Pred::CatMn}, {"Mc", Pred::CatMc}, {"Me", Pred::CatMe},
+            {"N", Pred::MajorN}, {"Nd", Pred::CatNd}, {"Nl", Pred::CatNl}, {"No", Pred::CatNo},
+            {"P", Pred::MajorP}, {"Pc", Pred::CatPc}, {"Pd", Pred::CatPd}, {"Ps", Pred::CatPs}, {"Pe", Pred::CatPe},
+            {"Pi", Pred::CatPi}, {"Pf", Pred::CatPf}, {"Po", Pred::CatPo},
+            {"S", Pred::MajorS}, {"Sm", Pred::CatSm}, {"Sc", Pred::CatSc}, {"Sk", Pred::CatSk}, {"So", Pred::CatSo},
+            {"Z", Pred::MajorZ}, {"Zs", Pred::CatZs}, {"Zl", Pred::CatZl}, {"Zp", Pred::CatZp},
+            {"C", Pred::MajorC}, {"Cc", Pred::CatCc}, {"Cf", Pred::CatCf}, {"Cs", Pred::CatCs}, {"Co", Pred::CatCo},
+            {"Cn", Pred::CatCn},
         };
         static const std::map<std::string, Pred> binary = {
-            {"ALPHABETIC", Pred::Alphabetic}, {"LETTER", Pred::Letter}, {"LOWERCASE", Pred::Lower}, {"UPPERCASE", Pred::Upper},
-            {"PUNCTUATION", Pred::Punct}, {"CONTROL", Pred::Control}, {"WHITE_SPACE", Pred::Whitespace}, {"WHITESPACE", Pred::Whitespace},
-            {"DIGIT", Pred::Digit}, {"HEX_DIGIT", Pred::XDigit}, {"HEXDIGIT", Pred::XDigit}, {"ASSIGNED", Pred::Unassigned},
-            {"WORD", Pred::UnicodeWord},
+            {"ALPHABETIC", Pred::Alphabetic}, {"LETTER", Pred::MajorL}, {"LOWERCASE", Pred::Lowercase}, {"UPPERCASE", Pred::Uppercase},
+            {"TITLECASE", Pred::CatLt}, {"PUNCTUATION", Pred::MajorP}, {"CONTROL", Pred::CatCc}, {"WHITE_SPACE", Pred::WhiteSpaceProperty},
+            {"WHITESPACE", Pred::WhiteSpaceProperty}, {"DIGIT", Pred::CatNd}, {"HEX_DIGIT", Pred::HexDigit}, {"HEXDIGIT", Pred::HexDigit},
+            {"ASSIGNED", Pred::Assigned}, {"WORD", Pred::UnicodeWord}, {"IDEOGRAPHIC", Pred::Ideographic},
+            {"JOIN_CONTROL", Pred::JoinControl}, {"JOINCONTROL", Pred::JoinControl},
         };
         negate = false;
         if (auto f = posix.find(name); f != posix.end()) return f->second;
@@ -915,10 +814,7 @@ private:
             if (auto f = categories.find(after); f != categories.end()) return f->second;
             std::string upper;
             for (char c : after) upper.push_back(static_cast<char>(c >= 'a' && c <= 'z' ? c - 32 : c));
-            if (auto f = binary.find(upper); f != binary.end()) {
-                negate = upper == "ASSIGNED";
-                return f->second;
-            }
+            if (auto f = binary.find(upper); f != binary.end()) return f->second;
         }
         if (auto f = categories.find(rest); f != categories.end()) return f->second;
         if (name == "all") return Pred::Any;

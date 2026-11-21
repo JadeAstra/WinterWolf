@@ -1145,10 +1145,10 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <p>The positions of the characters, <code>0..&lt;size</code>.</p>
 </div>
 <div class="entry" id="string.upper"><code class="sig">fun string.upper() : string</code><a class="anchor" href="#string.upper">#</a>
-<p>The text with every letter in upper case, not only the ASCII ones.</p>
+<p>The text in upper case as Kotlin's uppercase() gives it: Unicode's full mappings, so &quot;Straße&quot; is &quot;STRASSE&quot; and &quot;ﬁ&quot; is &quot;FI&quot;, the same on every system.</p>
 </div>
 <div class="entry" id="string.lower"><code class="sig">fun string.lower() : string</code><a class="anchor" href="#string.lower">#</a>
-<p>The text with every letter in lower case, not only the ASCII ones.</p>
+<p>The text in lower case as Kotlin's lowercase() gives it: Unicode's full mappings (&quot;İ&quot; is &quot;i̇&quot;), and a Σ that ends a word as ς: &quot;ΟΔΟΣ&quot; is &quot;οδος&quot;.</p>
 </div>
 <div class="entry" id="string.trim"><code class="sig">fun string.trim() : string</code><a class="anchor" href="#string.trim">#</a>
 <p>The text without the spaces, tabs and line ends at its start and at its end.</p>
@@ -1667,28 +1667,28 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <p>The character numbered by the int: <code>97.char</code> is 'a'. An IllegalArgumentException for a number that is no character's, outside 0 to 1114111 or from 55296 to 57343.</p>
 </div>
 <div class="entry" id="char.isLetter"><code class="sig">fun char.isLetter() : bool</code><a class="anchor" href="#char.isLetter">#</a>
-<p>True when the character is a letter.</p>
+<p>What a character is, as Java's Character methods answer, from WinterWolf's own Unicode data (Unicode 16.0, the same on every system). True when the character is a letter (category L: Lu, Ll, Lt, Lm or Lo).</p>
 </div>
 <div class="entry" id="char.isDigit"><code class="sig">fun char.isDigit() : bool</code><a class="anchor" href="#char.isDigit">#</a>
-<p>True when the character is a digit.</p>
+<p>True when the character is a decimal digit (category Nd: '7', '٣'; not '²' or 'Ⅻ').</p>
 </div>
 <div class="entry" id="char.isLetterOrDigit"><code class="sig">fun char.isLetterOrDigit() : bool</code><a class="anchor" href="#char.isLetterOrDigit">#</a>
-<p>True when the character is a letter or a digit.</p>
+<p>True when the character is a letter or a decimal digit.</p>
 </div>
 <div class="entry" id="char.isWhitespace"><code class="sig">fun char.isWhitespace() : bool</code><a class="anchor" href="#char.isWhitespace">#</a>
-<p>True when the character is whitespace: a space, a tab, a line end.</p>
+<p>True when the character is whitespace as Java has it: a space separator but the no-break ones (U+00A0, U+2007, U+202F), a line or paragraph separator, \t to \r, or \x1C to \x1F.</p>
 </div>
 <div class="entry" id="char.isUpperCase"><code class="sig">fun char.isUpperCase() : bool</code><a class="anchor" href="#char.isUpperCase">#</a>
-<p>True when the character is an upper-case letter.</p>
+<p>True when the character is upper case (Unicode's Uppercase: Lu, and Ⓐ and the like).</p>
 </div>
 <div class="entry" id="char.isLowerCase"><code class="sig">fun char.isLowerCase() : bool</code><a class="anchor" href="#char.isLowerCase">#</a>
-<p>True when the character is a lower-case letter.</p>
+<p>True when the character is lower case (Unicode's Lowercase: Ll, and ª, º and the like).</p>
 </div>
 <div class="entry" id="char.upper"><code class="sig">fun char.upper() : char</code><a class="anchor" href="#char.upper">#</a>
-<p>The same letter in upper case; the char itself where there is none, or where it would be more than one character.</p>
+<p>The character in upper case, one for one as Java's Character.toUpperCase gives it: 'ǅ' is 'Ǆ'; the char itself where it has none, as 'ß' has none of one character.</p>
 </div>
 <div class="entry" id="char.lower"><code class="sig">fun char.lower() : char</code><a class="anchor" href="#char.lower">#</a>
-<p>The same letter in lower case; the char itself where there is none.</p>
+<p>The character in lower case, one for one as Java's Character.toLowerCase gives it.</p>
 </div>
 <div class="entry" id="char.digitToInt"><code class="sig">fun char.digitToInt(radix : int = 10) : int</code><a class="anchor" href="#char.digitToInt">#</a>
 <p>The number the digit stands for in base <code>radix</code>: '7' is 7, and in base 16, 'f' is 15. A NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a radix outside 2 to 36.</p>
@@ -6446,7 +6446,7 @@ print(m.value, m.groupValues[2], m.groups[&quot;year&quot;]?.value, m.range)   /
 &quot;John Smith&quot;.replace(Regex(&quot;(\\w+) (\\w+)&quot;), &quot;$2, $1&quot;)                // Smith, John
 for (word in Regex(&quot;\\w+&quot;).findAll(text)) { ... }
 </pre>
-<p>The syntax is Java's: classes ([a-z&amp;&amp;[^aeiou]], \d, \w, \s, \p{Lu}, \p{IsAlphabetic}), groups (capturing, (?:...), named (?&lt;name&gt;...)), alternation, greedy, lazy and possessive repeats (*, *?, *+, {2,5}), anchors (^, $, \b, \A, \z, \Z, \G), look-ahead and look-behind, atomic groups, back references (\1, \k&lt;name&gt;), inline options ((?i), (?m:...)), \Q...\E. \d, \w, \s and \b are ASCII, as in Java and Kotlin; \p{L} and the other Unicode classes go by the system's tables of characters (as char.isLetter() does) until the text engine has Unicode data of its own. A pattern that is no regular expression is a PatternSyntaxException.</p>
+<p>The syntax is Java's: classes ([a-z&amp;&amp;[^aeiou]], \d, \w, \s, \p{Lu}, \p{IsAlphabetic}), groups (capturing, (?:...), named (?&lt;name&gt;...)), alternation, greedy, lazy and possessive repeats (*, *?, *+, {2,5}), anchors (^, $, \b, \A, \z, \Z, \G), look-ahead and look-behind, atomic groups, back references (\1, \k&lt;name&gt;), inline options ((?i), (?m:...)), \Q...\E. \d, \w, \s and \b are ASCII, as in Java and Kotlin; \p{L} and the other Unicode classes (the general categories, IsAlphabetic, IsWhite_Space, javaLowerCase and the rest) and case without regard to it are Java's, from WinterWolf's own Unicode data (16.0), as char.isLetter() and string.upper() are: the same on every system. A pattern that is no regular expression is a PatternSyntaxException.</p>
 <div class="entry" id="RegexOption"><code class="sig">enum RegexOption(internal val bit : int)</code><a class="anchor" href="#RegexOption">#</a>
 <p>How a pattern is read, as Kotlin's RegexOption.</p>
 </div>

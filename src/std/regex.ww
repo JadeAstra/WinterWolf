@@ -13,9 +13,11 @@
 // groups (capturing, (?:...), named (?<name>...)), alternation, greedy, lazy and possessive
 // repeats (*, *?, *+, {2,5}), anchors (^, $, \b, \A, \z, \Z, \G), look-ahead and look-behind,
 // atomic groups, back references (\1, \k<name>), inline options ((?i), (?m:...)), \Q...\E.
-// \d, \w, \s and \b are ASCII, as in Java and Kotlin; \p{L} and the other Unicode classes go by
-// the system's tables of characters (as char.isLetter() does) until the text engine has Unicode
-// data of its own. A pattern that is no regular expression is a PatternSyntaxException.
+// \d, \w, \s and \b are ASCII, as in Java and Kotlin; \p{L} and the other Unicode classes (the
+// general categories, IsAlphabetic, IsWhite_Space, javaLowerCase and the rest) and case without
+// regard to it are Java's, from WinterWolf's own Unicode data (16.0), as char.isLetter() and
+// string.upper() are: the same on every system. A pattern that is no regular expression is a
+// PatternSyntaxException.
 
 // How a pattern is read, as Kotlin's RegexOption.
 enum RegexOption(internal val bit : int) {

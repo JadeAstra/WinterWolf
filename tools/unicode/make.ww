@@ -1,0 +1,168 @@
+// Makes src/unicode_data.inc, WinterWolf's own Unicode data, from the Unicode Character Database
+// kept in tools/unicode/ucd-16.0.0 (Unicode's own files, under its license there): each code
+// point's general category, the properties WinterWolf's characters, strings and regular
+// expressions ask about, its simple case mappings, and the full ones SpecialCasing.txt gives
+// without a condition. From the repository's top:
+//
+//   ww tools/unicode/make.ww
+//
+// Layout: kUnicodeBlock[c >> 7] picks a block of 128 entries in kUnicodeEntry, each an index into
+// kUnicodeRecord { category, properties, simple uppercase, lowercase and titlecase each minus the
+// character, the special casing's number plus 1 (0 for none) }. kUnicodeSpecial gives a special
+// casing's lowercase, titlecase and uppercase as (start, length) in kUnicodeSpecialChars.
+
+val folder = FilePath("tools/unicode/ucd-16.0.0")
+val categories = ["Cn", "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Pc", "Pd", "Ps", "Pe", "Pi", "Pf",
+                  "Po", "Sm", "Sc", "Sk", "So", "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co"]
+// The properties, each a bit, as src/unicode.h names them.
+val propertyBits : Map<string, int> = {"Alphabetic": 1, "Uppercase": 2, "Lowercase": 4, "White_Space": 8, "Cased": 16,
+  "Case_Ignorable": 32, "Hex_Digit": 64, "Join_Control": 128, "Ideographic": 256}
+val count = 0x110000
+
+val category : open List<int> = List(count) { 0 }
+val properties : open List<int> = List(count) { 0 }
+val upper : open List<int> = List(count) { 0 }
+val lower : open List<int> = List(count) { 0 }
+val title : open List<int> = List(count) { 0 }
+val special : open List<int> = List(count) { 0 }
+
+// The data lines of a file: comments and blank lines left out, fields trimmed.
+fun fieldsOf(name : string) : List<List<string>> {
+  val out : open List<List<string>> = []
+  for (line in folder.resolve(name).readLines()) {
+    val hash = line.indexOf('#')
+    val data = (hash >= 0 ? line[..<hash] : line).trim()
+    if (data.isEmpty()) { continue }
+    out.add(data.split(';').map { it.trim() })
+  }
+  return out
+}
+
+// "0041" or "0041..005A": the first and last code point.
+fun rangeOf(text : string) : Pair<int, int> {
+  val dots = text.indexOf("..")
+  if (dots < 0) {
+    val c = text.toInt(16)
+    return Pair(c, c)
+  }
+  return Pair(text[..<dots].toInt(16), text[(dots + 2)..].toInt(16))
+}
+
+// UnicodeData.txt: categories and simple case mappings; a range is given by its First and Last lines.
+var rangeStart = -1
+for (f in fieldsOf("UnicodeData.txt")) {
+  val c = f[0].toInt(16)
+  val cat = categories.indexOf(f[2])
+  if (cat < 0) { throw IllegalStateException("unknown category ${f[2]} at ${f[0]}") }
+  if (f[1].endsWith(", First>")) {
+    rangeStart = c
+    continue
+  }
+  val from = f[1].endsWith(", Last>") ? rangeStart : c
+  for (k in from..c) { category[k] = cat }
+  if (f[12].isNotEmpty()) { upper[c] = f[12].toInt(16) - c }
+  if (f[13].isNotEmpty()) { lower[c] = f[13].toInt(16) - c }
+  // Titlecase is the uppercase where none is given.
+  if (f[14].isNotEmpty()) { title[c] = f[14].toInt(16) - c } else { title[c] = upper[c] }
+}
+
+for (file in ["PropList.txt", "DerivedCoreProperties.txt"]) {
+  for (f in fieldsOf(file)) {
+    val bit = propertyBits[f[1]]
+    if (bit == null) { continue }
+    val r = rangeOf(f[0])
+    for (k in r.first..r.second) { properties[k] = properties[k] | bit!! }
+  }
+}
+
+// SpecialCasing.txt: the full mappings with no condition (code; lower; title; upper;).
+val specials : open List<List<List<int>>> = []
+for (f in fieldsOf("SpecialCasing.txt")) {
+  if (f.size > 4 and f[4].isNotEmpty()) { continue }  // Final_Sigma and the languages' own: worked out by src/unicode.cpp or left
+  val c = f[0].toInt(16)
+  fun seq(text : string) : List<int> => text.split(' ').filter { it.isNotEmpty() }.map { it.toInt(16) }
+  specials.add([[c], seq(f[1]), seq(f[2]), seq(f[3])])
+  special[c] = specials.size
+}
+
+// Records, each kept once, and the blocks of 128 entries.
+val recordIndex : open Map<string, int> = {:}
+val records : open List<string> = []
+val entries : open List<int> = []
+for (c in 0..<count) {
+  val key = "{${category[c]}, ${properties[c]}, ${upper[c]}, ${lower[c]}, ${title[c]}, ${special[c]}}"
+  var at = recordIndex[key]
+  if (at == null) {
+    at = records.size
+    recordIndex[key] = at!!
+    records.add(key)
+  }
+  entries.add(at!!)
+}
+val blockIndex : open Map<string, int> = {:}
+val blocks : open List<List<int>> = []
+val stage1 : open List<int> = []
+for (b in 0..<(count / 128)) {
+  val block = entries[(b * 128)..<(b * 128 + 128)]
+  val key = block.join(",")
+  var at = blockIndex[key]
+  if (at == null) {
+    at = blocks.size
+    blockIndex[key] = at!!
+    blocks.add(block)
+  }
+  stage1.add(at!!)
+}
+
+val sb = StringBuilder()
+fun line(text : string) { sb.append(text).append("\n") }
+fun rows(values : List<int>, per : int) {
+  var k = 0
+  while (k < values.size) {
+    val end = Math.min(k + per, values.size)
+    line("    " + values[k..<end].join(", ") + ",")
+    k = end
+  }
+}
+line("// Made by tools/unicode/make.ww from the Unicode Character Database 16.0.0 (tools/unicode/ucd-16.0.0,")
+line("// under Unicode's license there): do not edit. See the tool for the layout.")
+line("")
+line("constexpr uint16_t kUnicodeBlock[${stage1.size}] = {")
+rows(stage1, 24)
+line("};")
+val flat : open List<int> = []
+for (block in blocks) { flat.addAll(block) }
+line("constexpr uint16_t kUnicodeEntry[${flat.size}] = {")
+rows(flat, 32)
+line("};")
+line("constexpr UnicodeRecord kUnicodeRecord[${records.size}] = {")
+var k = 0
+while (k < records.size) {
+  val end = Math.min(k + 6, records.size)
+  line("    " + records[k..<end].join(", ") + ",")
+  k = end
+}
+line("};")
+val chars : open List<int> = []
+val specialRows : open List<string> = []
+for (s in specials) {
+  val parts : open List<string> = []
+  for (i in 1..3) {
+    parts.add("${chars.size}, ${s[i].size}")
+    chars.addAll(s[i])
+  }
+  specialRows.add("{${parts.join(", ")}}")
+}
+line("constexpr uint32_t kUnicodeSpecialChars[${chars.size}] = {")
+rows(chars, 16)
+line("};")
+line("constexpr UnicodeSpecial kUnicodeSpecial[${specialRows.size}] = {")
+var s = 0
+while (s < specialRows.size) {
+  val end = Math.min(s + 6, specialRows.size)
+  line("    " + specialRows[s..<end].join(", ") + ",")
+  s = end
+}
+line("};")
+FilePath("src/unicode_data.inc").writeText(sb.toString())
+print("src/unicode_data.inc: ${records.size} records, ${blocks.size} blocks, ${specials.size} special casings")

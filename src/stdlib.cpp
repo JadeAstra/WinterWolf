@@ -26,6 +26,7 @@
 #include "charset.h"
 #include "fmath.h"
 #include "host.h"
+#include "unicode.h"
 #include "vm.h"
 
 namespace ww {
@@ -115,105 +116,41 @@ int radixOf(VM& vm, int argc, const Value* args, int i) {
 
 enum class CharacterClass { Letter, Digit, LetterOrDigit, Whitespace, Upper, Lower };
 
-bool asciiIs(unsigned char c, CharacterClass which) {
-    const bool upper = c >= 'A' && c <= 'Z', lower = c >= 'a' && c <= 'z', digit = c >= '0' && c <= '9';
+// What kind a character is, as Java's Character methods say (unicode.h): the same on every system.
+bool characterIs(uint32_t c, CharacterClass which) {
     switch (which) {
-        case CharacterClass::Letter: return upper || lower;
-        case CharacterClass::Digit: return digit;
-        case CharacterClass::LetterOrDigit: return upper || lower || digit;
-        case CharacterClass::Whitespace: return c == ' ' || (c >= '\t' && c <= '\r');
-        case CharacterClass::Upper: return upper;
-        case CharacterClass::Lower: return lower;
+        case CharacterClass::Letter: return unicode::isLetter(c);
+        case CharacterClass::Digit: return unicode::isDigit(c);
+        case CharacterClass::LetterOrDigit: return unicode::isLetterOrDigit(c);
+        case CharacterClass::Whitespace: return unicode::isWhitespace(c);
+        case CharacterClass::Upper: return unicode::isUpperCase(c);
+        case CharacterClass::Lower: return unicode::isLowerCase(c);
     }
     return false;
 }
 
 // Whether every character of `s` is of the kind asked about; false for no characters at all.
-// Like upper() and lower(), the answer for letters outside ASCII is the operating system's
-// until the text engine brings Unicode data of our own (M4).
 bool charactersAre(const std::string& s, CharacterClass which) {
     if (s.empty()) return false;
-    bool ascii = true;
-    for (unsigned char c : s) ascii = ascii && c < 0x80;
-    if (ascii) {
-        for (unsigned char c : s)
-            if (!asciiIs(c, which)) return false;
-        return true;
-    }
-#ifdef _WIN32
-    const int length = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring wide(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), wide.data(), length);
-    std::vector<WORD> kinds(static_cast<size_t>(length));
-    if (!GetStringTypeW(CT_CTYPE1, wide.data(), length, kinds.data())) return false;
-    for (WORD kind : kinds) {
-        bool is = false;
-        switch (which) {
-            case CharacterClass::Letter: is = (kind & C1_ALPHA) != 0; break;
-            case CharacterClass::Digit: is = (kind & C1_DIGIT) != 0; break;
-            case CharacterClass::LetterOrDigit: is = (kind & (C1_ALPHA | C1_DIGIT)) != 0; break;
-            case CharacterClass::Whitespace: is = (kind & C1_SPACE) != 0; break;
-            case CharacterClass::Upper: is = (kind & C1_UPPER) != 0; break;
-            case CharacterClass::Lower: is = (kind & C1_LOWER) != 0; break;
-        }
-        if (!is) return false;
-    }
-    return true;
-#else
     const Characters text = Characters::fromUtf8(s);
-    for (size_t i = 0; i < text.size(); i++) {
-        const int kinds = unicodeKinds(text[i]);
-        bool is = false;
-        switch (which) {
-            case CharacterClass::Letter: is = (kinds & kUnicodeLetter) != 0; break;
-            case CharacterClass::Digit: is = (kinds & kUnicodeDigit) != 0; break;
-            case CharacterClass::LetterOrDigit: is = (kinds & (kUnicodeLetter | kUnicodeDigit)) != 0; break;
-            case CharacterClass::Whitespace: is = (kinds & kUnicodeSpace) != 0; break;
-            case CharacterClass::Upper: is = (kinds & kUnicodeUpper) != 0; break;
-            case CharacterClass::Lower: is = (kinds & kUnicodeLower) != 0; break;
-        }
-        if (!is) return false;
-    }
+    for (size_t i = 0; i < text.size(); i++)
+        if (!characterIs(text[i], which)) return false;
     return true;
-#endif
 }
 
 // Python's isupper() and islower() (G21): whether `s` has a letter that has a case, and every such
-// letter is upper case (`upper`) or lower case; digits, spaces and letters with no case do not count.
+// letter is upper case (`upper`) or lower case; digits, spaces and letters with no case do not
+// count, and a titlecase letter (ǅ) is neither.
 bool casedAre(const std::string& s, bool upper) {
     bool seen = false;
-    bool ascii = true;
-    for (unsigned char c : s) ascii = ascii && c < 0x80;
-    if (ascii) {
-        for (unsigned char c : s) {
-            const bool isUpper = c >= 'A' && c <= 'Z', isLower = c >= 'a' && c <= 'z';
-            if (upper ? isLower : isUpper) return false;
-            seen = seen || (upper ? isUpper : isLower);
-        }
-        return seen;
-    }
-#ifdef _WIN32
-    const int length = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring wide(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), wide.data(), length);
-    std::vector<WORD> kinds(static_cast<size_t>(length));
-    if (!GetStringTypeW(CT_CTYPE1, wide.data(), length, kinds.data())) return false;
-    for (WORD kind : kinds) {
-        const bool isUpper = (kind & C1_UPPER) != 0, isLower = (kind & C1_LOWER) != 0;
-        if (upper ? isLower : isUpper) return false;
-        seen = seen || (upper ? isUpper : isLower);
-    }
-    return seen;
-#else
     const Characters text = Characters::fromUtf8(s);
     for (size_t i = 0; i < text.size(); i++) {
-        const int kinds = unicodeKinds(text[i]);
-        const bool isUpper = (kinds & kUnicodeUpper) != 0, isLower = (kinds & kUnicodeLower) != 0;
-        if (upper ? isLower : isUpper) return false;
+        const uint32_t c = text[i];
+        const bool isUpper = unicode::isUpperCase(c), isLower = unicode::isLowerCase(c);
+        if ((upper ? isLower : isUpper) || unicode::isTitleCase(c)) return false;
         seen = seen || (upper ? isUpper : isLower);
     }
     return seen;
-#endif
 }
 
 // Thousands separators for the digits of a whole number: 1234567 -> 1,234,567.
@@ -919,18 +856,13 @@ void registerCharMethods(VM& vm) {
     CHARACTER_CLASS("isUpperCase", Upper)
     CHARACTER_CLASS("isLowerCase", Lower)
 #undef CHARACTER_CLASS
-    // The same letter in the other case, where it is one character; the char itself otherwise.
+    // The same letter in the other case, as Java's Character.toUpperCase and toLowerCase give it: one
+    // character for one, the char itself where it has none.
     vm.defineMethod(T, "upper", 0, 0, [](VM&, Value self, int, Value*) -> Value {
-        std::string text;
-        appendUtf8(text, static_cast<uint32_t>(self.as.i));
-        const Characters result = Characters::fromUtf8(changeCase(text, true));
-        return result.size() == 1 ? Value::character(result[0]) : self;
+        return Value::character(unicode::toUpper(static_cast<uint32_t>(self.as.i)));
     });
     vm.defineMethod(T, "lower", 0, 0, [](VM&, Value self, int, Value*) -> Value {
-        std::string text;
-        appendUtf8(text, static_cast<uint32_t>(self.as.i));
-        const Characters result = Characters::fromUtf8(changeCase(text, false));
-        return result.size() == 1 ? Value::character(result[0]) : self;
+        return Value::character(unicode::toLower(static_cast<uint32_t>(self.as.i)));
     });
     // The number a digit stands for: '7' is 7, and with a radix past 10, 'f' is 15.
     vm.defineMethod(T, "digitToInt", 0, 1, [](VM& vm, Value self, int argc, Value* args) -> Value {

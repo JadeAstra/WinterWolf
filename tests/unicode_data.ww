@@ -1,0 +1,28 @@
+// WinterWolf's own Unicode data (src/unicode.h, Unicode 16.0 from tools/unicode/ucd-16.0.0): what
+// a character is, its other case, string case and Regex's classes, the same on every system, each
+// as Java answers (checked for every code point against Java 21, which differs only where Unicode
+// 16 changed or added characters).
+
+// Kinds, as Java's Character methods: categories and the Uppercase/Lowercase/Alphabetic properties.
+print('℘'.isLetter(), 'ª'.isLetter(), 'ª'.isLowerCase(), 'Ⓐ'.isUpperCase(), 'Ⓐ'.isLetter(), 'ǅ'.isUpperCase(), 'ǅ'.isLowerCase())   // expect: false true true true false false false
+print('٣'.isDigit(), '²'.isDigit(), 'Ⅻ'.isDigit(), '٣'.isLetterOrDigit(), '_'.isLetterOrDigit())   // expect: true false false true false
+print('\u{A0}'.isWhitespace(), '\u{2028}'.isWhitespace(), '\u{1C}'.isWhitespace(), '\u{3000}'.isWhitespace(), '\u{200B}'.isWhitespace())   // expect: false true true true false
+
+// A char's other case: one character for one, as Java's Character.toUpperCase and toLowerCase.
+// (ƛ's uppercase, U+A7DC, is new in Unicode 16.)
+print('ß'.upper(), 'ǅ'.upper(), 'ǅ'.lower(), 'ᾀ'.upper(), 'ƛ'.upper().code.toString(16), '\u{212A}'.lower(), 'İ'.lower())   // expect: ß Ǆ ǆ ᾈ a7dc k i
+
+// A string's case: the full mappings, and a final Σ as ς, as Kotlin's uppercase() and lowercase().
+print("Straße".upper(), "ﬁnal ﬂow".upper(), "ŉ".upper(), "İstanbul".lower(), "ǅungla ǈ".upper())   // expect: STRASSE FINAL FLOW ʼN i̇stanbul ǄUNGLA Ǉ
+print("ΟΔΟΣ ΟΔΟΣ.".lower(), "ΣΑ".lower(), "ΑΣ'".lower(), "Σ".lower(), "ΑΣ\u{301}Α".lower())   // expect: οδος οδος. σα ας' σ ασ́α
+print("ᾀ ᾈ ᾳ".upper(), "Ⓐⓐ".lower(), "ı i I İ".upper())   // expect: ἈΙ ἈΙ ΑΙ ⓐⓐ I I I İ
+
+// A string's kinds (isAlpha and the rest ask the same of every character; isUpper as Python's).
+print("Ⓐ".isUpper(), "ǅ".isUpper(), "ª".isLower(), "naïve".isAlpha(), "٣٤".isDigit(), " \u{2029}".isSpace())   // expect: true false true true true true
+
+// Regex's Unicode classes, each Java's.
+fun all(p : string, text : string) : string => Regex(p).findAll(text).map { it.value }.join("")
+print(all("\\p{Lu}", "AǅǄa"), all("\\p{Lt}", "AǅǄa"), all("\\p{LC}", "Aǅ1ª"), all("\\p{IsAlphabetic}", "a\u{345}1Ⅻ"), all("\\p{javaLowerCase}", "aªA"))   // expect: AǄ ǅ Aǅ aͅⅫ aª
+print(all("\\p{Sm}", "+℘<"), all("\\p{No}", "²Ⅻ½"), all("\\p{Nl}", "²Ⅻ½"), all("\\p{IsWhite_Space}", "a\u{85}\u{A0}b").map { it.code }.toList(), all("\\p{IsHex_Digit}", "9fG\u{FF21}"))   // expect: +℘< ²½ Ⅻ [133, 160] 9fＡ
+// Without case as Java's UNICODE_CASE: ß has no simple uppercase, so it is only itself.
+print(Regex("(?iu)ǆ").matches("ǅ"), Regex("(?iu)ß").matches("ẞ"), Regex("(?iu)k").matches("\u{212A}"), Regex("\\p{IsAssigned}").matches("\u{378}"))   // expect: true false true false

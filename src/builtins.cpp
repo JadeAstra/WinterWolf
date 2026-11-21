@@ -13,11 +13,6 @@
 #ifndef _WIN32
 #include <unistd.h>
 extern char** environ;
-#include <locale.h>
-#include <wctype.h>
-#ifdef __APPLE__
-#include <xlocale.h>
-#endif
 #endif
 #if defined(__SSE2__) || defined(_M_X64)
 #include <emmintrin.h>
@@ -40,6 +35,7 @@ extern char** environ;
 #include "fmath.h"
 #include "run.h"
 #include "sandbox.h"
+#include "unicode.h"
 #include "vm.h"
 
 namespace ww {
@@ -91,79 +87,10 @@ size_t clampPosition(int64_t position, size_t length) {
     return static_cast<size_t>(std::clamp<int64_t>(position, 0, static_cast<int64_t>(length)));
 }
 
-// Upper or lower case for all letters, not only the ASCII ones. The mapping is the
-// operating system's for now; the text engine brings Unicode data of our own (M4).
-std::string changeCase(const std::string& s, bool upper) {
-    bool ascii = true;
-    for (unsigned char c : s) ascii = ascii && c < 0x80;
-    if (ascii) {
-        std::string out = s;
-        for (char& c : out) {
-            if (upper && c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-            if (!upper && c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        }
-        return out;
-    }
-#ifdef _WIN32
-    int wideLength = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring wide(static_cast<size_t>(wideLength), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), wide.data(), wideLength);
-    const DWORD how = upper ? LCMAP_UPPERCASE : LCMAP_LOWERCASE;
-    int mappedLength = LCMapStringEx(LOCALE_NAME_INVARIANT, how, wide.data(), wideLength, nullptr, 0, nullptr, nullptr, 0);
-    std::wstring mapped(static_cast<size_t>(mappedLength), L'\0');
-    LCMapStringEx(LOCALE_NAME_INVARIANT, how, wide.data(), wideLength, mapped.data(), mappedLength, nullptr, nullptr, 0);
-    int length = WideCharToMultiByte(CP_UTF8, 0, mapped.data(), mappedLength, nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<size_t>(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, mapped.data(), mappedLength, out.data(), length, nullptr, nullptr);
-    return out;
-#else
-    const Characters text = Characters::fromUtf8(s);
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < text.size(); i++) appendUtf8(out, unicodeCase(text[i], upper));
-    return out;
-#endif
-}
-
-#ifndef _WIN32
-// A locale whose character classes and case mapping are Unicode's, asked of without making it
-// the program's (which would change how it reads and writes numbers); none where the system has
-// no UTF-8 locale, and then only ASCII's.
-locale_t unicodeLocale() {
-    static const locale_t made = [] {
-        for (const char* name : {"C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8", "UTF-8"})
-            if (locale_t found = newlocale(LC_CTYPE_MASK, name, static_cast<locale_t>(0))) return found;
-        return static_cast<locale_t>(0);
-    }();
-    return made;
-}
-
-int unicodeKinds(uint32_t c) {
-    const locale_t here = unicodeLocale();
-    if (here == static_cast<locale_t>(0) || c < 0x80) {
-        const bool upper = c >= 'A' && c <= 'Z', lower = c >= 'a' && c <= 'z', digit = c >= '0' && c <= '9';
-        const bool space = c == ' ' || (c >= '\t' && c <= '\r');
-        return (upper || lower ? kUnicodeLetter : 0) | (digit ? kUnicodeDigit : 0) | (space ? kUnicodeSpace : 0) | (upper ? kUnicodeUpper : 0) |
-               (lower ? kUnicodeLower : 0);
-    }
-    const auto w = static_cast<wint_t>(c);
-    const bool letter = iswalpha_l(w, here) != 0;
-    // A digit of another script (Arabic-Indic, Devanagari) is alphanumeric and no letter.
-    const bool digit = iswdigit_l(w, here) != 0 || (iswalnum_l(w, here) != 0 && !letter);
-    return (letter ? kUnicodeLetter : 0) | (digit ? kUnicodeDigit : 0) | (iswspace_l(w, here) != 0 ? kUnicodeSpace : 0) |
-           (iswupper_l(w, here) != 0 ? kUnicodeUpper : 0) | (iswlower_l(w, here) != 0 ? kUnicodeLower : 0);
-}
-
-uint32_t unicodeCase(uint32_t c, bool upper) {
-    const locale_t here = unicodeLocale();
-    if (here == static_cast<locale_t>(0) || c < 0x80) {
-        if (upper && c >= 'a' && c <= 'z') return c - 'a' + 'A';
-        if (!upper && c >= 'A' && c <= 'Z') return c - 'A' + 'a';
-        return c;
-    }
-    return static_cast<uint32_t>(upper ? towupper_l(static_cast<wint_t>(c), here) : towlower_l(static_cast<wint_t>(c), here));
-}
-#endif
+// Upper or lower case for all letters, as Kotlin's uppercase() and lowercase() give it (Java's,
+// with Locale.ROOT): full mappings from WinterWolf's own Unicode data (unicode.h), the same on
+// every system.
+std::string changeCase(const std::string& s, bool upper) { return upper ? unicode::upper(s) : unicode::lower(s); }
 
 std::string_view trimmed(std::string_view s) {
     const char* whitespace = " \t\r\n\f\v";
