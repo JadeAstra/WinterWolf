@@ -371,8 +371,24 @@ struct Tree {
     HANDLE port = nullptr;     // where the job reports; with limits only
     std::atomic<int> past{0};  // the limit it went past: 1 memory, 2 processes
     std::thread watcher;
+    // Markers posted to the port by settle(), and the last the watcher has handled.
+    std::atomic<uint64_t> markersPosted{0}, markersSeen{0};
+    static constexpr DWORD kMarker = 0xFFFF0001;  // no job message has this number
 
     void end() { TerminateJobObject(job, 1); }
+
+    // Waits until the watcher has handled everything the job reported before now (o-process-
+    // limit-race, 2026-11-21). A program that goes past its memory limit can die of the
+    // allocation refused at once, and its end be seen before the watcher has taken the job's
+    // message: limitReached was then null (1 run in a suite's 600 under load). The port hands
+    // its packets over in order, and the job's message is posted as the limit is hit, before the
+    // program can end of it; so a marker posted now and seen by the watcher comes after it.
+    void settle() {
+        if (port == nullptr || !watcher.joinable()) return;
+        const uint64_t n = ++markersPosted;
+        if (!PostQueuedCompletionStatus(port, kMarker, static_cast<ULONG_PTR>(n), nullptr)) return;
+        for (int i = 0; i < 5000 && markersSeen.load() < n; i++) Sleep(1);
+    }
     ~Tree() {
         if (port != nullptr) CloseHandle(port);  // the watcher's wait returns
         if (watcher.joinable()) watcher.join();
@@ -408,6 +424,10 @@ std::shared_ptr<Tree> makeTree(int64_t memory, int64_t processes) {
         ULONG_PTR key = 0;
         LPOVERLAPPED overlapped = nullptr;
         while (GetQueuedCompletionStatus(watched->port, &message, &key, &overlapped, INFINITE)) {
+            if (message == Tree::kMarker) {
+                watched->markersSeen.store(static_cast<uint64_t>(key));
+                continue;
+            }
             if (message == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT || message == JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT) {
                 watched->past = 1;
                 watched->end();
@@ -431,6 +451,9 @@ struct Stream {
     // listener that made the file removes it as it is closed.
     std::string unixPath;
     bool removesFile = false;
+    // A socket's read timeout in milliseconds, 0 for none (as SO_RCVTIMEO holds it), for the wait
+    // a Unix domain socket's read makes itself (waitReadable).
+    std::atomic<int64_t> readLimitMs{0};
     DWORD pid = 0;
     // A process's job: it and what it starts, ended together (2026-11-20); null where there is none.
     std::shared_ptr<Tree> tree;
@@ -508,6 +531,39 @@ struct Use {
     ~Use() { stream.users--; }
 };
 
+// Waits until a Unix domain socket has something to read, its end, or an error (o-uds-hang,
+// 2026-11-21). Windows' AF_UNIX can leave a recv that is already waiting asleep when the other side
+// shuts down its sending: the end is never read, and the reader waits for ever (a raw Winsock
+// program of a client reading to the end while its server sends two lines and shuts down: 22 of 24
+// copies hung within 2,000 rounds). WSAPoll sees the end every time (none of 48,000 rounds even
+// waited out a slice). So a Unix domain socket's read waits in WSAPoll first, in slices of 200 ms,
+// in which a close from another thread and the read's time limit are seen; recv then has what
+// there is. False with `result` filled in where it is closed or the time ran out.
+bool waitReadable(Stream& s, Outcome& result) {
+    const int64_t limit = s.readLimitMs.load();
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        if (s.closed.load()) {
+            result.error = "the socket is closed";
+            return false;
+        }
+        int slice = 200;
+        if (limit > 0) {
+            const int64_t left = limit - static_cast<int64_t>(GetTickCount64() - start);
+            if (left <= 0) {
+                result.error = "the read timed out";
+                result.timedOut = true;
+                return false;
+            }
+            slice = static_cast<int>(std::min<int64_t>(slice, left));
+        }
+        WSAPOLLFD p{};
+        p.fd = s.socket;
+        p.events = POLLRDNORM;
+        if (WSAPoll(&p, 1, slice) != 0) return true;  // something to read, the end, or an error: recv says which
+    }
+}
+
 // Reads up to `max` bytes. The count read; 0 at the end; -1 with `result.error` filled in.
 int rawRead(Stream& s, char* out, size_t max, Outcome& result) {
     Use use(s);
@@ -517,6 +573,7 @@ int rawRead(Stream& s, char* out, size_t max, Outcome& result) {
     }
     if (s.channel != nullptr) return s.channel->read(out, std::min<size_t>(max, 1 << 30), result.error, result.timedOut);
     if (s.isSocket()) {
+        if (!s.unixPath.empty() && !waitReadable(s, result)) return -1;
         const int got = recv(s.socket, out, static_cast<int>(std::min<size_t>(max, 1 << 30)), 0);
         if (got >= 0) return got;
         const int code = WSAGetLastError();
@@ -588,6 +645,8 @@ bool rawWrite(Stream& s, const char* data, size_t size, std::string& error) {
 struct Tree {
     int64_t memory = 0, processes = 0;
     std::atomic<int> past{0};  // the limit it went past: 1 memory, 2 processes
+    // Nothing to wait for: the watcher here ends the tree itself, and says why before it does.
+    void settle() {}
 };
 
 // What the system has to say about an error number.
@@ -1276,6 +1335,7 @@ bool remoteEnd(Stream& s, std::string& host, int& port) {
 
 void setReadTimeout(Stream& s, int64_t limit) {
     const DWORD ms = static_cast<DWORD>(limit);
+    s.readLimitMs.store(limit);
     setsockopt(s.socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&ms), sizeof(ms));
 }
 
@@ -2760,6 +2820,7 @@ void registerIo(VM& vm) {
     def("processPast", 1, 1, [](VM& vm, int, Value* args) -> Value {
         auto s = findStream(args[0]);
         if (s == nullptr || s->tree == nullptr) return Value::null();
+        s->tree->settle();
         const int past = s->tree->past.load();
         return past == 1 ? vm.str("memory") : past == 2 ? vm.str("processes") : Value::null();
     });
