@@ -1,0 +1,27 @@
+// format's alternate form (#) and BigInts in %d, %x and %o (A4 of docs/snippy-ww-checklist.html),
+// as Java's String.format gives them (checked against Java 21): 0x and 0X before %x and %X, 0
+// before %o, after the sign and before any zeros put in; an int's %x and %o its 64 bits unsigned, a
+// BigInt's with its sign; a point always with %#f and %#e.
+print("[%#x][%#X][%#o][%#x][%#o][%#010x][%-#8x][%#x]".format(255, 255, 15, -1, -8, 255, 255, 0))
+// expect: [0xff][0XFF][017][0xffffffffffffffff][01777777777777777777770][0x000000ff][0xff    ][0x0]
+val b = "-255".toBigInt()
+val h = "123456789012345678901234567890".toBigInt()
+print("[%x][%#x][%o][%#o][%d][%,d][%+d][% d][%040d][%X]".format(b, b, b, b, b, h, h, h, h, h))
+// expect: [-ff][-0xff][-377][-0377][-255][123,456,789,012,345,678,901,234,567,890][+123456789012345678901234567890][ 123456789012345678901234567890][0000000000123456789012345678901234567890][18EE90FF6C373E0EE4E3F0AD2]
+print("[%#x][%#010x][%-#10x][%,d][%x]".format(h, b, b, b, -h))
+// expect: [0x18ee90ff6c373e0ee4e3f0ad2][-0x00000ff][-0xff     ][-255][-18ee90ff6c373e0ee4e3f0ad2]
+print("[%+x][% x][%+o]".format(h, h, h))
+// expect: [+18ee90ff6c373e0ee4e3f0ad2][ 18ee90ff6c373e0ee4e3f0ad2][+143564417755415637016711617605322]
+print("[%#.0f][%#.0e][%#.2f][%.0f][%#f]".format(2.5, 2.5, 1.0, 2.5, 3.0))
+// expect: [3.][3.e+00][1.00][3][3.000000]
+// # with any other kind is an error, as Java's FormatFlagsConversionMismatchException.
+for (p in ["%#d", "%#g", "%#s"]) {
+  try {
+    p.format(5)
+  } catch (e : IllegalArgumentException) {
+    print(e.message)
+  }
+}
+// expect: format: the flag '#' does not go with %d; it goes with %x, %X, %o, %f, %e and %E
+// expect: format: the flag '#' does not go with %g; it goes with %x, %X, %o, %f, %e and %E
+// expect: format: the flag '#' does not go with %s; it goes with %x, %X, %o, %f, %e and %E

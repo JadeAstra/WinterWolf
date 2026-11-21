@@ -290,11 +290,33 @@ std::string javaGeneral(double magnitude, int precision, bool upper, bool& fixed
 
 } // namespace
 
+// Whether `v` is the standard library's BigInt.
+bool isBigInt(VM& vm, Value v) {
+    if (!v.isObjType(ObjType::Instance)) return false;
+    ObjClass* cls = asInstance(v)->cls;
+    return cls->name->utf8() == "BigInt" && vm.classNamed("BigInt") == cls;
+}
+
+// A BigInt's digits in `radix` (its toString(radix)), a minus first where negative.
+std::string bigIntText(VM& vm, Value v, int radix) {
+    if (radix == 10) return vm.stringify(v);
+    const Value* method = asInstance(v)->cls->methods.find(vm.intern("toString"));
+    if (method == nullptr) throw vm.runtimeError(Thrown::InternalError, "BigInt has no toString");
+    Value bound = Value::object(vm.alloc<ObjBoundMethod>(v, asClosure(*method)));
+    TempRoot keep(vm, bound);
+    const Value radixValue = Value::integer(radix);
+    const Value result = vm.call(bound, 1, &radixValue);
+    if (!result.isString()) throw vm.runtimeError(Thrown::InternalError, "BigInt's toString gave no text");
+    return asString(result)->utf8();
+}
+
 // "%d items, %.2f each".format(3, 1.5): the patterns of Kotlin's (Java's) String.format.
 //   %[index$][flags][width][.precision]conversion
-// Flags: - left-justify, 0 pad with zeros, + always a sign, space for a plus sign, and
-// , thousands separators. Conversions: d x X o (whole numbers), f e E g G (fractions),
-// s S (anything, as print shows it), c (a character), b (true or false), %% and %n.
+// Flags: - left-justify, 0 pad with zeros, + always a sign, space for a plus sign,
+// , thousands separators, and # the alternate form (0x or 0X before %x and %X, 0 before %o; a
+// point always with %f, %e and %E). Conversions: d x X o (whole numbers: ints, whole floats for
+// %d, and BigInts, which %x and %o give with their sign, as Java's BigInteger), f e E g G
+// (fractions), s S (anything, as print shows it), c (a character), b (true or false), %% and %n.
 std::string formatText(VM& vm, const std::string& pattern, int argc, const Value* args) {
     std::string out;
     int next = 0;
@@ -328,7 +350,7 @@ std::string formatText(VM& vm, const std::string& pattern, int argc, const Value
                 at = p + 1;
             }
         }
-        bool left = false, zero = false, plus = false, space = false, comma = false;
+        bool left = false, zero = false, plus = false, space = false, comma = false, alternate = false;
         for (bool more = true; more && at < size;) {
             switch (pattern[at]) {
                 case '-': left = true; break;
@@ -336,6 +358,7 @@ std::string formatText(VM& vm, const std::string& pattern, int argc, const Value
                 case '+': plus = true; break;
                 case ' ': space = true; break;
                 case ',': comma = true; break;
+                case '#': alternate = true; break;
                 default: more = false; break;
             }
             if (more) at++;
@@ -357,10 +380,23 @@ std::string formatText(VM& vm, const std::string& pattern, int argc, const Value
             throw vm.runtimeError(Thrown::IllegalArgumentException, "format: the pattern asks for more values than the " + std::to_string(argc) + " given");
         const Value value = args[index];
 
+        // Java's alternate form goes with %x, %X, %o, %f, %e and %E only.
+        if (alternate && conversion != 'x' && conversion != 'X' && conversion != 'o' && conversion != 'f' && conversion != 'e' && conversion != 'E')
+            throw vm.runtimeError(Thrown::IllegalArgumentException, std::string("format: the flag '#' does not go with %") + conversion +
+                                  "; it goes with %x, %X, %o, %f, %e and %E");
         std::string sign, body;
         bool numeric = false;
         switch (conversion) {
             case 'd': {
+                if (isBigInt(vm, value)) {
+                    body = bigIntText(vm, value, 10);
+                    const bool negative = !body.empty() && body[0] == '-';
+                    if (negative) body.erase(0, 1);
+                    if (comma) body = grouped(body);
+                    sign = negative ? "-" : plus ? "+" : space ? " " : "";
+                    numeric = true;
+                    break;
+                }
                 if (!value.isNumber() || (value.isFloat() && value.as.d != std::floor(value.as.d)))
                     throw vm.runtimeError(Thrown::IllegalArgumentException, "format: %d takes a whole number, not " + vm.stringify(value) +
                                           "; %f and %s take any number");
@@ -375,12 +411,24 @@ std::string formatText(VM& vm, const std::string& pattern, int argc, const Value
             case 'x':
             case 'X':
             case 'o': {
-                if (!value.isInt()) throw vm.runtimeError(Thrown::IllegalArgumentException, std::string("format: %") + conversion + " takes a whole number, not " + vm.stringify(value));
-                char buffer[32];
-                auto result = std::to_chars(buffer, buffer + sizeof(buffer), static_cast<uint64_t>(value.as.i), conversion == 'o' ? 8 : 16);
-                body.assign(buffer, result.ptr);
+                const int radix = conversion == 'o' ? 8 : 16;
+                if (isBigInt(vm, value)) {
+                    // A BigInt with its sign, as Java's BigInteger: -ff, +ff with the flag.
+                    body = bigIntText(vm, value, radix);
+                    const bool negative = !body.empty() && body[0] == '-';
+                    if (negative) body.erase(0, 1);
+                    sign = negative ? "-" : plus ? "+" : space ? " " : "";
+                } else {
+                    // An int as its 64 bits, unsigned, as Java's long.
+                    if (!value.isInt()) throw vm.runtimeError(Thrown::IllegalArgumentException, std::string("format: %") + conversion + " takes a whole number, not " + vm.stringify(value));
+                    char buffer[32];
+                    auto result = std::to_chars(buffer, buffer + sizeof(buffer), static_cast<uint64_t>(value.as.i), radix);
+                    body.assign(buffer, result.ptr);
+                }
                 if (conversion == 'X')
                     for (char& c : body) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                // The alternate form's 0x, 0X or 0 goes after the sign, before any zeros put in.
+                if (alternate) sign += conversion == 'o' ? "0" : conversion == 'X' ? "0X" : "0x";
                 numeric = true;
                 break;
             }
@@ -405,6 +453,11 @@ std::string formatText(VM& vm, const std::string& pattern, int argc, const Value
                 if (comma && fixed) {
                     const size_t point = body.find('.');
                     body = grouped(body.substr(0, point)) + (point == std::string::npos ? "" : body.substr(point));
+                }
+                // The alternate form always has a point: 3. and 3.e+00.
+                if (alternate && body.find('.') == std::string::npos) {
+                    const size_t e = body.find_first_of("eE");
+                    body.insert(e == std::string::npos ? body.size() : e, ".");
                 }
                 numeric = true;
                 break;
@@ -811,6 +864,16 @@ void registerNumberMethods(VM& vm) {
     });
 
     // The remainder that is never negative for a positive divisor: (-1).mod(5) is 4.
+    // A float's 64 bits as an int, every NaN the one quiet NaN (Kotlin's toBits; A2).
+    vm.defineMethod(T, "toBits", 0, 0, [](VM&, Value self, int, Value*) -> Value {
+        return Value::integer(static_cast<int64_t>(fmath::canonicalBits(self.toDouble())));
+    });
+
+    // The largest whole number at or below a float, and the smallest at or above, as floats (A3):
+    // NaN, infinities and -0.0 as they are, numbers past 2^63 too.
+    vm.defineMethod(T, "floor", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::number(std::floor(self.toDouble())); });
+    vm.defineMethod(T, "ceil", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::number(std::ceil(self.toDouble())); });
+
     vm.defineMethod(T, "mod", 1, 1, [](VM& vm, Value self, int, Value* args) -> Value {
         if (self.isInt() && args[0].isInt()) {
             const int64_t divisor = args[0].as.i;

@@ -94,6 +94,27 @@ object Json {
     writer.write(value, 0)
     return writer.out.toString()
   }
+
+  // `value` written as JSON to `to` as it is made, a piece at a time (each about 64 KB), so a
+  // large document is never held whole: the same text as write gives, with the same options.
+  // A value JSON has no form of may be found after some of the text is written; the
+  // IllegalArgumentException then comes with that part already in `to`.
+  //   FileWriter(path).use { Json.write(rows, it, indent = 2) }
+  fun write(value : any?, to : Writer, indent : (int | string)? = null, itemSeparator : string? = null, keySeparator : string = ": ",
+            sortKeys : bool = false, ensureAscii : bool = true, allowNaN : bool = true, skipKeys : bool = false,
+            checkCircular : bool = true, default : ((any?) -> any?)? = null) throws IOException {
+    var step : string? = null
+    if (indent is int) { step = " ".repeat(Math.max(0, indent as int)) } else if (indent is string) { step = indent as string }
+    val items = itemSeparator ?: (step == null ? ", " : ",")
+    val writer = __JsonWriter(step, items, keySeparator, sortKeys, ensureAscii, allowNaN, skipKeys, checkCircular, default)
+    writer.sink = to
+    try {
+      writer.write(value, 0)
+      writer.spill(true)
+    } catch (e : __JsonWriteStopped) {
+      throw e.failure
+    }
+  }
 }
 
 // What Json.rawDecode gives: the value read, and where in the text it ended.
@@ -753,8 +774,13 @@ class __JsonReader {
 
 // Writes a value as Python's json encoder does. `indent` null for one line, else what each
 // level is indented by.
+// The IOException of a Writer that JSON was being written to, carried out of the writing.
+class __JsonWriteStopped(val failure : IOException) : RuntimeException(failure.message)
+
 class __JsonWriter {
   val out = StringBuilder()
+  // Where the text goes as it is made (Json.write to a Writer), or null to keep it all in out.
+  var sink : Writer? = null
   private val indent : string?
   private val itemSeparator : string
   private val keySeparator : string
@@ -780,7 +806,26 @@ class __JsonWriter {
     this.default = default
   }
 
+  // What is in out handed to the sink, where there is one: all of it, or once it is 64 KB. The
+  // sink's IOException goes out as a __JsonWriteStopped, which only Json.write to a Writer
+  // catches and throws on as itself: writing to a string throws none.
+  fun spill(all : bool) {
+    if (sink != null and (all or out.size >= 65536)) {
+      try {
+        sink!!.write(out.toString())
+      } catch (e : IOException) {
+        throw __JsonWriteStopped(e)
+      }
+      out.clear()
+    }
+  }
+
   fun write(value : any?, level : int) {
+    writeValue(value, level)
+    spill(false)
+  }
+
+  private fun writeValue(value : any?, level : int) {
     if (value == null or value === JsonNull) {
       out.append("null")
     } else if (value is string) {

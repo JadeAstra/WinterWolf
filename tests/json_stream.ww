@@ -1,0 +1,51 @@
+// Json.write to a Writer (A5 of docs/snippy-ww-checklist.html): the same text as Json.write
+// gives, handed on in pieces of about 64 KB as it is made, never held whole.
+// Quick (WW_TEST_QUICK=1, under GC stress, where the time goes with the values made): 300 rows of
+// one long string each (190 KB, a few pieces) for 20,000 of five values (2.5 MB).
+val quick = Program.environment["WW_TEST_QUICK"] == "1"
+
+// A ByteChannel that keeps each piece it is sent.
+class Pieces : ByteChannel {
+  val sent : open List<Bytes> = []
+  override fun receive(count : int) : Bytes? => null
+  override fun send(data : Bytes) { sent.add(data) }
+  override fun closeChannel() {}
+  override val isChannelOpen : bool
+    get() => true
+}
+
+val rows = quick ? List(300) { i -> ({"id": i, "text": "row $i " + "x".repeat(600)}) }
+                 : List(20000) { i -> ({"id": i, "name": "row $i", "tags": ["a", "b"], "ok": i % 3 == 0, "score": i * 0.5}) }
+val whole = Json.write(rows, indent = 2)
+val pieces = Pieces()
+Json.write(rows, Writer(pieces), indent = 2)
+var largest = 0
+val texts : open List<string> = []
+for (p in pieces.sent) {
+  texts.add(p.decodeToString())
+  largest = Math.max(largest, p.size)
+}
+// Every piece but the last 64 KB or a little more, so as many as the text needs, and no more.
+print(whole.size > 65536 * 2, texts.join("") == whole, pieces.sent.size == whole.size / 65536 + 1 or pieces.sent.size == whole.size / 65536, largest < 70000)
+// expect: true true true true
+
+// Small, with the options: one piece, the same as the text form.
+val small = Pieces()
+val value = {"b": [1, 2.5, null, "é"], "a": true}
+Json.write(value, Writer(small), sortKeys = true, ensureAscii = false)
+print(small.sent.size, small.sent[0].decodeToString(), small.sent[0].decodeToString() == Json.write(value, sortKeys = true, ensureAscii = false))
+// expect: 1 {"a": true, "b": [1, 2.5, null, "é"]} true
+
+// To a file, through a FilePath's writer.
+val path = FilePath.createTempFile("json_stream", ".json")
+path.writer().use { w -> Json.write(rows, w) }
+print(path.readText() == Json.write(rows))   // expect: true
+path.delete()
+
+// A value JSON has no form of, met part way: an IllegalArgumentException.
+val bad = Pieces()
+try {
+  Json.write([1, 2, Pieces()], Writer(bad))
+} catch (e : IllegalArgumentException) {
+  print("refused")   // expect: refused
+}

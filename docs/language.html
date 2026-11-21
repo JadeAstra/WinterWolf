@@ -559,7 +559,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#JadeHeap"><code>JadeHeap</code></a> (8)</li>
 <li><a href="#Job"><code>Job</code></a> (15)</li>
 <li><a href="#JobQueue"><code>JobQueue</code></a> (1)</li>
-<li><a href="#Json"><code>Json</code></a> (4)</li>
+<li><a href="#Json"><code>Json</code></a> (5)</li>
 <li><a href="#JsonArray"><code>JsonArray</code></a> (3)</li>
 <li><a href="#JsonBigInt"><code>JsonBigInt</code></a> (2)</li>
 <li><a href="#JsonBool"><code>JsonBool</code></a> (2)</li>
@@ -598,7 +598,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#MatchGroup"><code>MatchGroup</code></a> (1)</li>
 <li><a href="#MatchGroupCollection"><code>MatchGroupCollection</code></a> (7)</li>
 <li><a href="#MatchResult"><code>MatchResult</code></a> (8)</li>
-<li><a href="#Math"><code>Math</code></a> (45)</li>
+<li><a href="#Math"><code>Math</code></a> (47)</li>
 <li><a href="#Memory"><code>Memory</code></a> (29)</li>
 <li><a href="#Method"><code>Method</code></a> (8)</li>
 <li><a href="#Network"><code>Network</code></a> (3)</li>
@@ -702,7 +702,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#any.toString"><code>any</code></a> (5)</li>
 <li><a href="#byte.toInt"><code>byte</code></a> (1)</li>
 <li><a href="#char.code"><code>char</code></a> (11)</li>
-<li><a href="#float.toBigInt"><code>float</code></a> (26)</li>
+<li><a href="#float.toBigInt"><code>float</code></a> (30)</li>
 <li><a href="#int.toBigInt"><code>int</code></a> (45)</li>
 <li><a href="#string.hexToBytes"><code>string</code></a> (112)</li>
 </ul>
@@ -1760,6 +1760,22 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <div class="entry" id="float.mod"><code class="sig">fun float.mod(divisor : Number) : float</code><a class="anchor" href="#float.mod">#</a>
 <p>The remainder after dividing by <code>divisor</code>, with the divisor's sign: (-7.5).mod(2) is 0.5. NaN for a divisor of 0.</p>
 </div>
+<div class="entry" id="float.toBits"><code class="sig">fun float.toBits() : int</code><a class="anchor" href="#float.toBits">#</a>
+<p>The float's 64 bits as an int (IEEE 754's binary64: the sign, 11 bits of exponent, 52 of fraction), every NaN as the one quiet NaN, 0x7FF8000000000000, as Kotlin's toBits gives it. Math.floatFromBits goes back.</p>
+<pre>1.0.toBits()   // 4607182418800017408 (0x3FF0000000000000)
+</pre>
+</div>
+<div class="entry" id="float.floor"><code class="sig">fun float.floor() : float</code><a class="anchor" href="#float.floor">#</a>
+<p>The largest whole number at or below the float, as a float: -2.5 gives -3.0. NaN, infinities and -0.0 are themselves, and so is a float past 2^63 (Math.floor gives an int, which ends there).</p>
+</div>
+<div class="entry" id="float.ceil"><code class="sig">fun float.ceil() : float</code><a class="anchor" href="#float.ceil">#</a>
+<p>The smallest whole number at or above the float, as a float: -2.5 gives -2.0.</p>
+</div>
+<div class="entry" id="float.frexp"><code class="sig">fun float.frexp() : Pair&lt;float, int&gt;</code><a class="anchor" href="#float.frexp">#</a>
+<p>The float as m × 2^e, 0.5 &lt;= |m| &lt; 1 with the float's sign, exactly (subnormals too): Pair(m, e). 0, NaN and the infinities are themselves with e 0. C's frexp; Math.ldexp goes back.</p>
+<pre>8.0.frexp()   // Pair(first=0.5, second=4)
+</pre>
+</div>
 <div class="entry" id="Number.roundToInt"><code class="sig">fun Number.roundToInt() : int</code><a class="anchor" href="#Number.roundToInt">#</a>
 <p>The nearest whole number, a half going up: 2.5 gives 3 and -2.5 gives -2. An ArithmeticException for NaN, or where it does not fit in an int.</p>
 </div>
@@ -1850,6 +1866,12 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 </div>
 <div class="entry member" id="Math.hypot"><code class="sig">fun hypot(x : Number, y : Number) : float</code><a class="anchor" href="#Math.hypot">#</a>
 <p>The length of the hypotenuse, <code>sqrt(x * x + y * y)</code>, without overflow on the way.</p>
+</div>
+<div class="entry member" id="Math.ldexp"><code class="sig">fun ldexp(x : Number, e : int) : float</code><a class="anchor" href="#Math.ldexp">#</a>
+<p>x × 2^e, rounded once: exact unless the result is subnormal or past the largest float (an infinity then). NaN, infinities and zeros are themselves. C's ldexp, Java's Math.scalb.</p>
+</div>
+<div class="entry member" id="Math.floatFromBits"><code class="sig">fun floatFromBits(bits : int) : float</code><a class="anchor" href="#Math.floatFromBits">#</a>
+<p>The float whose 64 bits are <code>bits</code>, as float.toBits gives them (Kotlin's Double.fromBits): a NaN with a payload of its own stays a NaN.</p>
 </div>
 <div class="entry member" id="Math.ln"><code class="sig">fun ln(x : Number) : float</code><a class="anchor" href="#Math.ln">#</a>
 <p>The natural logarithm of <code>x</code>, in base e; minus infinity for 0, NaN for a negative <code>x</code>.</p>
@@ -4495,6 +4517,11 @@ checkCircular   a list or map inside itself an error (false: not looked for)
 default         what a value JSON has no form of is written as instead
 </pre>
 <p>A value JSON has no form of, with no <code>default</code>, is an IllegalArgumentException.</p>
+</div>
+<div class="entry member" id="Json.write-2"><code class="sig">fun write(value : any?, to : Writer, indent : (int | string)? = null, itemSeparator : string? = null, keySeparator : string = &quot;: &quot;, sortKeys : bool = false, ensureAscii : bool = true, allowNaN : bool = true, skipKeys : bool = false, checkCircular : bool = true, default : ((any?) -&gt; any?)? = null) throws IOException</code><a class="anchor" href="#Json.write-2">#</a>
+<p><code>value</code> written as JSON to <code>to</code> as it is made, a piece at a time (each about 64 KB), so a large document is never held whole: the same text as write gives, with the same options. A value JSON has no form of may be found after some of the text is written; the IllegalArgumentException then comes with that part already in <code>to</code>.</p>
+<pre>FileWriter(path).use { Json.write(rows, it, indent = 2) }
+</pre>
 </div>
 <div class="entry" id="JsonRead"><code class="sig">data JsonRead(val value : any?, val end : int)</code><a class="anchor" href="#JsonRead">#</a>
 <p>What Json.rawDecode gives: the value read, and where in the text it ended.</p>

@@ -660,6 +660,19 @@ void registerMath(VM& vm) {
     def("atan2", 2, 2, [](VM& vm, int, Value* args) -> Value {
         return Value::number(fmath::atan2(vm.toNumber(args[0], "Math.atan2() argument"), vm.toNumber(args[1], "Math.atan2() argument")));
     });
+    // x × 2^e, rounded once (A2 of docs/snippy-ww-checklist.html).
+    def("ldexp", 2, 2, [](VM& vm, int, Value* args) -> Value {
+        return Value::number(fmath::ldexp(vm.toNumber(args[0], "Math.ldexp() number"), vm.toInt(args[1], "Math.ldexp() exponent")));
+    });
+
+    // The float whose 64 bits `bits` are (Kotlin's Double.fromBits).
+    def("floatFromBits", 1, 1, [](VM& vm, int, Value* args) -> Value {
+        const int64_t bits = vm.toInt(args[0], "Math.floatFromBits() bits");
+        double d;
+        std::memcpy(&d, &bits, sizeof d);
+        return Value::number(d);
+    });
+
     def("hypot", 2, 2, [](VM& vm, int, Value* args) -> Value {
         return Value::number(fmath::hypot(vm.toNumber(args[0], "Math.hypot() argument"), vm.toNumber(args[1], "Math.hypot() argument")));
     });

@@ -37,6 +37,13 @@ double atanh(double x);
 double pow(double x, double y);
 double hypot(double x, double y);
 
+// x × 2^e, rounded once (only where the result is subnormal or past the largest float does it
+// round at all); NaN, infinities and zeros as they are. C's ldexp, Java's Math.scalb.
+double ldexp(double x, int64_t e);
+// x as m × 2^e with 0.5 <= |m| < 1, m's sign x's; e is set. 0, NaN and infinities are given back
+// as they are with e 0. C's frexp: exact, subnormals too.
+double frexp(double x, int64_t& e);
+
 // A float's bits as a program may see them (written as bytes, hashed, compared by an atomic):
 // every NaN the one quiet NaN, 0x7FF8000000000000 (0x7FC00000 for 32 bits), whatever made it.
 // x86 and ARM make NaNs with other bits (0.0 / 0.0 has its sign set on x86 and not on ARM), and

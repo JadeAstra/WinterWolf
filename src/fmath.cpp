@@ -803,6 +803,28 @@ double pow(double x, double y) {
     return sign * scale2(v.hi, m);
 }
 
+double ldexp(double x, int64_t e) {
+    if (isNaN(x) || isInf(x) || x == 0.0) return x;
+    if (e > 3000) e = 3000;  // past any float's reach either way: an infinity or a zero, as the rounding says
+    if (e < -3000) e = -3000;
+    return scale2(x, static_cast<int>(e));
+}
+
+double frexp(double x, int64_t& e) {
+    e = 0;
+    if (isNaN(x) || isInf(x) || x == 0.0) return x;
+    int shift = 0;
+    if (absOf(x) < 0x1p-1022) {  // subnormal: made normal first, exactly
+        x *= 0x1p54;
+        shift = -54;
+    }
+    const uint64_t b = bitsOf(x);
+    const int biased = static_cast<int>((b >> 52) & 0x7FF);
+    e = biased - 1022 + shift;
+    // The same significand with the exponent of [0.5, 1).
+    return fromBits((b & 0x800FFFFFFFFFFFFFull) | 0x3FE0000000000000ull);
+}
+
 double hypot(double x, double y) {
     if (isInf(x) || isInf(y)) return kInf;
     if (isNaN(x) || isNaN(y)) return x + y;

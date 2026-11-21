@@ -619,6 +619,32 @@ external fun float.pow(exponent : Number) : float
 // The remainder after dividing by `divisor`, with the divisor's sign: (-7.5).mod(2) is 0.5. NaN
 // for a divisor of 0.
 external fun float.mod(divisor : Number) : float
+// The float's 64 bits as an int (IEEE 754's binary64: the sign, 11 bits of exponent, 52 of
+// fraction), every NaN as the one quiet NaN, 0x7FF8000000000000, as Kotlin's toBits gives it.
+// Math.floatFromBits goes back.
+//   1.0.toBits()   // 4607182418800017408 (0x3FF0000000000000)
+external fun float.toBits() : int
+// The largest whole number at or below the float, as a float: -2.5 gives -3.0. NaN, infinities
+// and -0.0 are themselves, and so is a float past 2^63 (Math.floor gives an int, which ends
+// there).
+external fun float.floor() : float
+// The smallest whole number at or above the float, as a float: -2.5 gives -2.0.
+external fun float.ceil() : float
+// The float as m × 2^e, 0.5 <= |m| < 1 with the float's sign, exactly (subnormals too):
+// Pair(m, e). 0, NaN and the infinities are themselves with e 0. C's frexp; Math.ldexp goes back.
+//   8.0.frexp()   // Pair(first=0.5, second=4)
+fun float.frexp() : Pair<float, int> {
+  if (this.isNaN() or this.isInfinite() or this == 0.0) { return Pair(this, 0) }
+  var y = this
+  var shift = 0
+  if (Math.abs(this) < 2.2250738585072014e-308) {
+    y = this * 18014398509481984.0   // 2^54: a subnormal made normal, exactly
+    shift = -54
+  }
+  val bits = y.toBits()
+  val m = Math.floatFromBits((bits & 0xFFFFFFFFFFFFF) | 0x3FE0000000000000)
+  return Pair(bits < 0 ? -m : m, ((bits >> 52) & 0x7FF) - 1022 + shift)
+}
 // The nearest whole number, a half going up: 2.5 gives 3 and -2.5 gives -2. An ArithmeticException
 // for NaN, or where it does not fit in an int.
 external fun Number.roundToInt() : int
@@ -697,6 +723,12 @@ external object Math {
   fun atan2(y : Number, x : Number) : float
   // The length of the hypotenuse, `sqrt(x * x + y * y)`, without overflow on the way.
   fun hypot(x : Number, y : Number) : float
+  // x × 2^e, rounded once: exact unless the result is subnormal or past the largest float (an
+  // infinity then). NaN, infinities and zeros are themselves. C's ldexp, Java's Math.scalb.
+  fun ldexp(x : Number, e : int) : float
+  // The float whose 64 bits are `bits`, as float.toBits gives them (Kotlin's Double.fromBits):
+  // a NaN with a payload of its own stays a NaN.
+  fun floatFromBits(bits : int) : float
   // The natural logarithm of `x`, in base e; minus infinity for 0, NaN for a negative `x`.
   fun ln(x : Number) : float
   // The logarithm of `x` in base `base`, as Kotlin's: `Math.log(8, 2)` is 3.0. NaN where the base

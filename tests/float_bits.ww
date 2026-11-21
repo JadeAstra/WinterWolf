@@ -1,0 +1,34 @@
+// A float's bits, frexp and ldexp (A2 of docs/snippy-ww-checklist.html), and a floor and a
+// ceiling that give floats (A3). The values are C's frexp and ldexp (as CPython's math module
+// gives them) and Kotlin's toBits.
+
+// toBits and Math.floatFromBits: the 64 bits as an int and back; every NaN as the one quiet NaN.
+print(1.0.toBits(), (-2.5).toBits(), 5e-324.toBits(), (-0.0).toBits(), (0.0 / 0.0).toBits(), (-(0.0 / 0.0)).toBits())
+// expect: 4607182418800017408 -4610560118520545280 1 -9223372036854775808 9221120237041090560 9221120237041090560
+print(Math.floatFromBits(4607182418800017408), Math.floatFromBits(-4610560118520545280), Math.floatFromBits(1), Math.floatFromBits(9218868437227405312), Math.floatFromBits(-1).isNaN())
+// expect: 1.0 -2.5 5e-324 inf true
+var same = true
+for (x in [0.1, -1e300, 2.2250738585072014e-308, 123.456, 1.0 / 3.0]) { same = same and Math.floatFromBits(x.toBits()) == x }
+print(same)   // expect: true
+
+// frexp: m × 2^e, 0.5 <= |m| < 1, exact, subnormals too.
+for (x in [8.0, -0.75, 5e-324, 1e300, 0.1, -3.0]) {
+  val (m, e) = x.frexp()
+  print(x, m, e, Math.ldexp(m, e) == x)
+}
+// expect: 8.0 0.5 4 true
+// expect: -0.75 -0.75 0 true
+// expect: 5e-324 0.5 -1073 true
+// expect: 1e+300 0.7466108948025751 997 true
+// expect: 0.1 0.8 -3 true
+// expect: -3.0 -0.75 2 true
+print(0.0.frexp(), (-0.0).frexp(), (1.0 / 0.0).frexp())
+// expect: Pair(first=0.0, second=0) Pair(first=-0.0, second=0) Pair(first=inf, second=0)
+
+// ldexp: rounded once; a half of the least subnormal to even.
+print(Math.ldexp(0.5, 4), Math.ldexp(1.0, -1074), Math.ldexp(1.0, -1075), Math.ldexp(3.0, -1075), Math.ldexp(1.0, 1023) == 8.98846567431158e307, Math.ldexp(1.0, 1024), Math.ldexp(-0.0, 5), Math.ldexp(1.0, -1000000000000))
+// expect: 8.0 5e-324 0.0 1e-323 true inf -0.0 0.0
+
+// floor and ceil as floats: past 2^63, NaN and -0.0 as they are; Math.floor still an int.
+print((-2.5).floor(), (-2.5).ceil(), 2.5.floor(), 2.5.ceil(), 1e300.floor() == 1e300, (-0.0).floor(), (0.0 / 0.0).ceil().isNaN(), (-0.5).ceil(), Math.floor(-2.5))
+// expect: -3.0 -2.0 2.0 3.0 true -0.0 true -0.0 -3
