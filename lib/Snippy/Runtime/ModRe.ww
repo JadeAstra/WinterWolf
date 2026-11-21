@@ -1,0 +1,712 @@
+import Snippy.Text.*
+// re (the Snippy plan, part 5.3, step 4), in WinterWolf: patterns read and matched by the regex
+// engine's Python syntax (src/regex.cpp, as CPython's re/_parser.py and _sre read and match them),
+// with CPython's Pattern and Match objects around it, its searches one after another (an empty
+// match followed by one that may start where it ended, not be empty there: 3.7's rule), sub's
+// templates (re/_parser.py's parse_template), split, escape, the flags and PatternError.
+
+// ---- PatternError ----
+
+internal lazy val __pyPatternErrorType : PyType = __pyExc("PatternError", pyExceptionType).also { it.module = "re" }
+
+// re.PatternError(msg, pattern, pos): its text with the position, and the line and column where
+// the pattern has more than one line.
+internal fun __pyReError(msg : string, pattern : any?, pos : int) : PyError {
+  var text = msg
+  var lineno : any? = null
+  var colno : any? = null
+  if (pattern != null and pos >= 0) {
+    text = "$msg at position $pos"
+    val src = pattern is string ? pattern as string : pyBytesText(pyBytesLike(pattern)!!)
+    var lines = 0
+    var lastNewline = -1
+    for k in 0..<Math.min(pos, src.size) {
+      if (src[k] == '\n') {
+        lines += 1
+        lastNewline = k
+      }
+    }
+    lineno = lines + 1
+    colno = pos - lastNewline
+    if (src.contains('\n')) { text = "$text (line $lineno, column $colno)" }
+  }
+  val err = pyError(__pyPatternErrorType, text)
+  val d = err.exc.dict!!
+  d.set("msg", msg)
+  d.set("pattern", pattern)
+  d.set("pos", pos >= 0 ? pos : null)
+  d.set("lineno", lineno)
+  d.set("colno", colno)
+  return err
+}
+
+// A bytes pattern's words as CPython gives them: what is not ASCII as escapes.
+internal fun __pyReAsciiText(s : string) : string {
+  val sb = StringBuilder()
+  for c in s {
+    val cp = pyOrd(c)
+    if (cp < 128) { sb.append(c) }
+    else if (cp < 256) { sb.append("\\x" + __pyReHex(cp, 2)) }
+    else if (cp < 0x10000) { sb.append("\\u" + __pyReHex(cp, 4)) }
+    else { sb.append("\\U" + __pyReHex(cp, 8)) }
+  }
+  return sb.toString()
+}
+internal fun __pyReHex(n : int, digits : int) : string {
+  val hex = "0123456789abcdef"
+  val sb = StringBuilder()
+  for k in 0..<digits { sb.append(hex[(n >> (4 * (digits - 1 - k))) & 15]) }
+  return sb.toString()
+}
+
+// ---- Flags ----
+
+internal val __pyReFlagNames : List<Pair<int, string>> = [Pair(2, "IGNORECASE"), Pair(4, "LOCALE"), Pair(8, "MULTILINE"), Pair(16, "DOTALL"),
+  Pair(32, "UNICODE"), Pair(64, "VERBOSE"), Pair(128, "DEBUG"), Pair(256, "ASCII")]
+
+internal fun __pyReFlagText(v : int) : string {
+  if (v == 0) { return "re.NOFLAG" }
+  val parts : open List<string> = []
+  for (bit, name) in __pyReFlagNames { if ((v & bit) != 0) { parts.add("re." + name) } }
+  val rest = v & ~511
+  if (rest != 0) { parts.add("0x" + rest.toString(16)) }
+  return parts.join("|")
+}
+
+internal lazy val __pyRegexFlagType : PyType = __pyMakeRegexFlag()
+internal fun __pyMakeRegexFlag() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["__repr__"] = pyLibMethod("RegexFlag", "__repr__") { self, a -> __pyReFlagText(pyIndex(self)) }
+  m["__str__"] = m["__repr__"]
+  fun op(name : string, f : (int, int) -> int) {
+    m[name] = pyLibMethod("RegexFlag", name) { self, a ->
+      val o = a.pos[0]
+      pyIsInt(pyUnwrap(o)) ? __pyReFlag(f(pyIndex(pyUnwrap(self)), pyIndex(pyUnwrap(o)))) : pyNotImplemented
+    }
+  }
+  op("__or__", { x, y -> x | y })
+  op("__ror__", { x, y -> x | y })
+  op("__and__", { x, y -> x & y })
+  op("__rand__", { x, y -> x & y })
+  op("__xor__", { x, y -> x ^ y })
+  op("__rxor__", { x, y -> x ^ y })
+  m["__invert__"] = pyLibMethod("RegexFlag", "__invert__") { self, a -> __pyReFlag(511 & ~pyIndex(self)) }
+  return pyLibClass("RegexFlag", "re", [pyIntType], m)
+}
+internal fun __pyReFlag(v : int) : any? => pyCall1(__pyRegexFlagType, v)
+
+// A flags argument: an int (a RegexFlag is one).
+internal fun __pyReFlagsOf(x : any?) : int {
+  if (x == null) { return 0 }
+  if (!pyIsInt(pyUnwrap(x))) { throw pyTypeError("unsupported operand type(s) for &: '${pyTypeName(x)}' and 'int'") }
+  return pyIndex(pyUnwrap(x))
+}
+
+// ---- Patterns ----
+
+internal lazy val __pyRePatternType : PyType = pyNativeType("Pattern", "re", ["search", "match", "fullmatch", "split", "findall", "finditer",
+  "sub", "subn", "__repr__", "__eq__", "__hash__", "__copy__", "__deepcopy__", "flags", "groups", "groupindex", "pattern"], null).also {
+  it.cName = "re.Pattern"
+}
+
+// A compiled pattern: what it was made from (a str or bytes), the text the engine read (bytes as
+// characters 0 to 255), and the engine's pattern.
+class PyRePattern(val source : any?, val text : string, val compiled : any, val flags : int, val isBytes : bool) : PyNative() {
+  val groupCount : int = __regex.groupCount(compiled)
+  // The named groups in the order they are written in, as CPython's groupindex keeps them.
+  val names : List<Pair<string, int>> = __pyReNamesOf(compiled)
+  override fun pyType() : PyType => __pyRePatternType
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "pattern" -> source
+      "flags" -> flags
+      "groups" -> groupCount
+      "groupindex" -> {
+        val d = pyNewDict()
+        for (n, i) in names { d.set(n, i) }
+        PyMappingProxy(d)
+      }
+      else -> pyUnbound
+    }
+  }
+  fun groupNumber(x : any?) : int {
+    if (pyIsInt(x)) {
+      val i = pyIndex(x)
+      if (i < 0 or i > groupCount) { throw pyIndexError("no such group") }
+      return i
+    }
+    if (x is string) {
+      for (n, i) in names { if (n == x) { return i } }
+    }
+    throw pyIndexError("no such group")
+  }
+  fun nameOf(group : int) : string? {
+    for (n, i) in names { if (i == group) { return n } }
+    return null
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "search" -> __pyReMatchCall(this, a, 0)
+      "match" -> __pyReMatchCall(this, a, 1)
+      "fullmatch" -> __pyReMatchCall(this, a, 2)
+      "findall" -> {
+        a.only(["string", "pos", "endpos"])
+        val subject = a.pos.isNotEmpty() ? a.pos[0] : a.get("string", null)
+        val text = __pyReSubject(this, subject)
+        val range = __pyReRange(a, text.size)
+        __pyReFindall(this, subject, text, range.first, range.second)
+      }
+      "finditer" -> {
+        a.only(["string", "pos", "endpos"])
+        val subject = a.pos.isNotEmpty() ? a.pos[0] : a.get("string", null)
+        val text = __pyReSubject(this, subject)
+        val range = __pyReRange(a, text.size)
+        PyReIter(this, subject, text, range.first, range.second)
+      }
+      "sub", "subn" -> {
+        a.only(["repl", "string", "count"])
+        val repl = a.pos.isNotEmpty() ? a.pos[0] : a.get("repl", null)
+        val subject = a.pos.size > 1 ? a.pos[1] : a.get("string", null)
+        val count = pyIndex(a.pos.size > 2 ? a.pos[2] : a.get("count", 0))
+        val r = __pyReSubn(this, repl, subject, count)
+        name == "sub" ? r.first : PyTuple([r.first, r.second])
+      }
+      "split" -> {
+        a.only(["string", "maxsplit"])
+        val subject = a.pos.isNotEmpty() ? a.pos[0] : a.get("string", null)
+        __pyReSplit(this, subject, pyIndex(a.pos.size > 1 ? a.pos[1] : a.get("maxsplit", 0)))
+      }
+      "__repr__" -> __pyRePatternRepr(this)
+      "__eq__" -> {
+        val o = a.pos[0]
+        if (!(o is PyRePattern)) { pyNotImplemented } else {
+          val q = o as PyRePattern
+          q.flags == flags and q.isBytes == isBytes and q.text == text
+        }
+      }
+      "__hash__" -> pyHash(PyTuple([source, flags]))
+      "__copy__", "__deepcopy__" -> this
+      else -> throw pyAttributeError("'re.Pattern' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+internal fun __pyReNamesOf(compiled : any) : List<Pair<string, int>> {
+  val out : open List<Pair<string, int>> = []
+  for (n, i) in __regex.groupNames(compiled) { out.add(Pair(n, i)) }
+  return out.sortedBy { it.second }
+}
+
+internal fun __pyRePatternRepr(p : PyRePattern) : string {
+  var flags = p.flags
+  if (!p.isBytes and (flags & (4 | 32 | 256)) == 32) { flags = flags & ~32 }
+  val text = __pyReCut(pyRepr(p.source), 200)
+  if (flags == 0) { return "re.compile($text)" }
+  val parts : open List<string> = []
+  for (bit, name) in __pyReFlagNames {
+    if ((flags & bit) != 0) {
+      parts.add("re." + name)
+      flags = flags & ~bit
+    }
+  }
+  if (flags != 0) { parts.add("0x" + flags.toString(16)) }
+  return "re.compile($text, ${parts.join("|")})"
+}
+// The first `n` characters of a repr, as CPython's %.nR writes it.
+internal fun __pyReCut(s : string, n : int) : string => s.size > n ? s[..<n] : s
+
+// The text the engine reads for a subject: a str as it is, a bytes-like one as characters 0 to 255.
+internal fun __pyReSubject(p : PyRePattern, x : any?) : string {
+  if (x is string) {
+    if (p.isBytes) { throw pyTypeError("cannot use a bytes pattern on a string-like object") }
+    return x as string
+  }
+  val b = pyBytesLike(x)
+  if (b != null) {
+    if (!p.isBytes) { throw pyTypeError("cannot use a string pattern on a bytes-like object") }
+    return pyBytesText(b!!)
+  }
+  throw pyTypeError("expected string or bytes-like object, got '${pyTypeName(x)}'")
+}
+
+// pos and endpos, put between 0 and the length as CPython puts them.
+internal fun __pyReRange(a : PyArgs, n : int) : Pair<int, int> {
+  var pos = pyIndex(a.pos.size > 1 ? a.pos[1] : a.get("pos", 0))
+  val e = a.pos.size > 2 ? a.pos[2] : a.get("endpos", null)
+  var end = e == null ? n : pyIndex(e)
+  if (pos < 0) { pos = 0 } else if (pos > n) { pos = n }
+  if (end < 0) { end = 0 } else if (end > n) { end = n }
+  return Pair(pos, end)
+}
+
+// The engine's match: [start, end, each group's start and end..., the group closed last], or null.
+internal fun __pyReFind(p : PyRePattern, text : string, from : int, to : int, mode : int, notEmptyAt : int) : List<int>? {
+  if (from > to) { return null }
+  return __regex.findPython(p.compiled, text, from, to, mode, notEmptyAt)
+}
+
+internal fun __pyReMatchCall(p : PyRePattern, a : PyArgs, mode : int) : any? {
+  a.only(["string", "pos", "endpos"])
+  val subject = a.pos.isNotEmpty() ? a.pos[0] : a.get("string", null)
+  val text = __pyReSubject(p, subject)
+  val range = __pyReRange(a, text.size)
+  val spans = __pyReFind(p, text, range.first, range.second, mode, -1)
+  return spans == null ? null : PyReMatch(p, subject, text, spans!!, range.first, range.second)
+}
+
+// A part of the subject: a str, or bytes (a bytearray's part a bytearray, as CPython's slice).
+internal fun __pyRePart(subject : any?, text : string, b : int, e : int) : any? {
+  if (subject is string) { return text[b..<e] }
+  if (subject is PyByteArray) { return PyByteArray(pyBytesPart((subject as PyByteArray).bytes, b, e)) }
+  return pyBytesOfLatin1(text[b..<e])
+}
+
+// ---- Matches ----
+
+internal lazy val __pyReMatchType : PyType = pyNativeType("Match", "re", ["group", "groups", "groupdict", "start", "end", "span", "expand",
+  "__getitem__", "__repr__", "__copy__", "__deepcopy__", "pos", "endpos", "lastindex", "lastgroup", "re", "string", "regs"], null).also {
+  it.cName = "re.Match"
+}
+
+class PyReMatch(val pattern : PyRePattern, val subject : any?, val text : string, val spans : List<int>, val pos : int, val endpos : int) : PyNative() {
+  override fun pyType() : PyType => __pyReMatchType
+  fun start(g : int) : int => spans[2 * g]
+  fun end(g : int) : int => spans[2 * g + 1]
+  // A group's text, or `otherwise` where it took no part.
+  fun value(g : int, otherwise : any?) : any? => start(g) < 0 ? otherwise : __pyRePart(subject, text, start(g), end(g))
+  val lastIndex : int get() => spans[spans.size - 1]
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "pos" -> pos
+      "endpos" -> endpos
+      "lastindex" -> lastIndex < 0 ? null : lastIndex
+      "lastgroup" -> lastIndex < 0 ? null : pattern.nameOf(lastIndex)
+      "re" -> pattern
+      "string" -> subject
+      "regs" -> PyTuple((0..pattern.groupCount).map { PyTuple([start(it), end(it)]) as any? })
+      else -> pyUnbound
+    }
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "group" -> {
+        if (a.pos.isEmpty()) { value(0, null) }
+        else if (a.pos.size == 1) { value(pattern.groupNumber(a.pos[0]), null) }
+        else { PyTuple(a.pos.map { value(pattern.groupNumber(it), null) }) }
+      }
+      "__getitem__" -> value(pattern.groupNumber(a.pos[0]), null)
+      "groups" -> {
+        val d = a.pos.isNotEmpty() ? a.pos[0] : a.get("default", null)
+        PyTuple((1..pattern.groupCount).map { value(it, d) })
+      }
+      "groupdict" -> {
+        val d = a.pos.isNotEmpty() ? a.pos[0] : a.get("default", null)
+        val out = pyNewDict()
+        for (n, i) in pattern.names { out.set(n, value(i, d)) }
+        out
+      }
+      "start" -> start(pattern.groupNumber(a.pos.isNotEmpty() ? a.pos[0] : 0))
+      "end" -> end(pattern.groupNumber(a.pos.isNotEmpty() ? a.pos[0] : 0))
+      "span" -> {
+        val g = pattern.groupNumber(a.pos.isNotEmpty() ? a.pos[0] : 0)
+        PyTuple([start(g), end(g)])
+      }
+      "expand" -> __pyReExpand(this, __pyReTemplate(pattern, a.pos[0]))
+      "__repr__" -> "<re.Match object; span=(${start(0)}, ${end(0)}), match=${__pyReCut(pyRepr(value(0, null)), 50)}>"
+      "__copy__", "__deepcopy__" -> this
+      else -> throw pyAttributeError("'re.Match' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// finditer's iterator.
+class PyReIter(val pattern : PyRePattern, val subject : any?, val text : string, var from : int, val to : int) : PyIterator() {
+  var notEmptyAt = -1
+  var done = false
+  override fun next() : any? {
+    if (done or from > to) { return pyEnd }
+    val spans = __pyReFind(pattern, text, from, to, 0, notEmptyAt)
+    if (spans == null) {
+      done = true
+      return pyEnd
+    }
+    val s = spans!!
+    notEmptyAt = s[1] == s[0] ? s[1] : -1
+    from = s[1]
+    return PyReMatch(pattern, subject, text, s, 0, to)
+  }
+  override fun pyType() : PyType => __pyIterType("callable_iterator")
+}
+
+internal fun __pyReFindall(p : PyRePattern, subject : any?, text : string, pos : int, end : int) : any? {
+  val out : open List<any?> = []
+  var from = pos
+  var notEmptyAt = -1
+  while (from <= end) {
+    val spans = __pyReFind(p, text, from, end, 0, notEmptyAt)
+    if (spans == null) { break }
+    val s = spans!!
+    val m = PyReMatch(p, subject, text, s, pos, end)
+    if (p.groupCount == 0) { out.add(m.value(0, null)) }
+    else if (p.groupCount == 1) { out.add(m.value(1, __pyReEmpty(subject))) }
+    else { out.add(PyTuple((1..p.groupCount).map { m.value(it, __pyReEmpty(subject)) })) }
+    notEmptyAt = s[1] == s[0] ? s[1] : -1
+    from = s[1]
+  }
+  return pyNewList(out)
+}
+internal fun __pyReEmpty(subject : any?) : any? => subject is string ? "" : pyBytesOfLatin1("")
+
+internal fun __pyReSplit(p : PyRePattern, subject : any?, maxsplit : int) : any? {
+  val text = __pyReSubject(p, subject)
+  val out : open List<any?> = []
+  var last = 0
+  var from = 0
+  var n = 0
+  var notEmptyAt = -1
+  while (maxsplit == 0 or n < maxsplit) {
+    val spans = __pyReFind(p, text, from, text.size, 0, notEmptyAt)
+    if (spans == null) { break }
+    val s = spans!!
+    val m = PyReMatch(p, subject, text, s, 0, text.size)
+    out.add(__pyRePart(subject, text, last, s[0]))
+    for g in 1..p.groupCount { out.add(m.value(g, null)) }
+    n += 1
+    notEmptyAt = s[1] == s[0] ? s[1] : -1
+    last = s[1]
+    from = s[1]
+  }
+  out.add(__pyRePart(subject, text, last, text.size))
+  return pyNewList(out)
+}
+
+// ---- Templates ----
+
+// parse_template: the replacement's literals and group numbers one after another, each a string
+// (a literal, as the engine's text) or an int (a group).
+internal fun __pyReTemplate(p : PyRePattern, repl : any?) : List<any?> {
+  var source = ""
+  if (repl is string) {
+    source = repl as string
+  } else {
+    val b = pyBytesLike(repl)
+    if (b == null) { throw pyTypeError("expected str instance, ${pyTypeName(repl)} found") }
+    source = pyBytesText(b!!)
+  }
+  val out : open List<any?> = []
+  val literal = StringBuilder()
+  var i = 0
+  val n = source.size
+  // The tokenizer's position, as error() measures it: where the next token starts.
+  fun fail(msg : string, at : int) : PyError => __pyReError(repl is string ? msg : __pyReAsciiText(msg), repl, at)
+  fun addGroup(index : int, at : int) {
+    if (index > p.groupCount) { throw fail("invalid group reference $index", at) }
+    out.add(literal.toString())
+    literal.clear()
+    out.add(index)
+  }
+  while (i < n) {
+    val c = source[i]
+    if (c != '\\') {
+      literal.append(c)
+      i += 1
+      continue
+    }
+    if (i + 1 >= n) { throw fail("bad escape (end of pattern)", n - 1) }
+    val e = source[i + 1]
+    var next = i + 2
+    if (e == 'g') {
+      if (next >= n or source[next] != '<') { throw fail("missing <", next) }
+      next += 1
+      val nameStart = next
+      while (next < n and source[next] != '>') { next += 1 }
+      if (next >= n) {
+        if (next == nameStart) { throw fail("missing group name", next) }
+        throw fail("missing >, unterminated name", nameStart)
+      }
+      val name = source[nameStart..<next]
+      next += 1
+      if (name.isEmpty()) { throw fail("missing group name", next - 1) }
+      var index = -1
+      if (name.all { it >= '0' and it <= '9' }) {
+        index = name.size > 10 ? 1073741823 : name.toInt()
+        if (index >= 1073741823) { throw fail("invalid group reference ${__pyReDigits(name)}", nameStart) }
+      } else {
+        if (!(repl is string) and !name.all { pyOrd(it) < 128 }) { throw fail("bad character in group name ${pyAscii(name) as string}", nameStart) }
+        if (!pyIsIdentifier(name)) { throw fail("bad character in group name ${pyRepr(name)}", nameStart) }
+        for (gn, gi) in p.names { if (gn == name) { index = gi } }
+        if (index < 0) { throw pyIndexError("unknown group name ${pyRepr(name)}") }
+      }
+      addGroup(index, nameStart)
+      i = next
+      continue
+    }
+    if (e == '0') {
+      var v = 0
+      var k = 0
+      while (k < 2 and next < n and source[next] >= '0' and source[next] <= '7') {
+        v = v * 8 + (pyOrd(source[next]) - 48)
+        next += 1
+        k += 1
+      }
+      literal.append((v & 0xFF).char)
+      i = next
+      continue
+    }
+    if (e >= '1' and e <= '9') {
+      var digits = e.toString()
+      var octal = false
+      if (next < n and source[next] >= '0' and source[next] <= '9') {
+        digits += source[next]
+        next += 1
+        if (e <= '7' and digits[1] <= '7' and next < n and source[next] >= '0' and source[next] <= '7') {
+          digits += source[next]
+          next += 1
+          octal = true
+          val v = (pyOrd(digits[0]) - 48) * 64 + (pyOrd(digits[1]) - 48) * 8 + (pyOrd(digits[2]) - 48)
+          if (v > 255) { throw fail("octal escape value \\$digits outside of range 0-0o377", i) }
+          literal.append(v.char)
+        }
+      }
+      if (!octal) { addGroup(digits.toInt(), next - digits.size) }
+      i = next
+      continue
+    }
+    val escaped = when (e) {
+      'a' -> "\u{7}"
+      'b' -> "\u{8}"
+      'f' -> "\u{C}"
+      'n' -> "\n"
+      'r' -> "\r"
+      't' -> "\t"
+      'v' -> "\u{B}"
+      '\\' -> "\\"
+      else -> null
+    }
+    if (escaped != null) {
+      literal.append(escaped!!)
+    } else {
+      if ((e >= 'a' and e <= 'z') or (e >= 'A' and e <= 'Z')) { throw fail("bad escape \\$e", i) }
+      literal.append('\\')
+      literal.append(e)
+    }
+    i = next
+  }
+  out.add(literal.toString())
+  return out
+}
+internal fun __pyReDigits(s : string) : string {
+  var k = 0
+  while (k + 1 < s.size and s[k] == '0') { k += 1 }
+  return s[k..]
+}
+
+// A template given its match: a str, or bytes for a bytes pattern.
+internal fun __pyReExpand(m : PyReMatch, template : List<any?>) : any? {
+  val sb = StringBuilder()
+  for part in template {
+    if (part is string) { sb.append(part as string) }
+    else {
+      val g = part as int
+      if (m.start(g) >= 0) { sb.append(m.text[m.start(g)..<m.end(g)]) }
+    }
+  }
+  return m.pattern.isBytes ? pyBytesOfLatin1(sb.toString()) : sb.toString()
+}
+
+internal fun __pyReSubn(p : PyRePattern, repl : any?, subject : any?, count : int) : Pair<any?, int> {
+  val text = __pyReSubject(p, subject)
+  val callable = !(repl is string) and pyBytesLike(repl) == null and pyTruth(pyCallable(repl))
+  var template : List<any?>? = null
+  if (!callable) { template = __pyReTemplate(p, repl) }
+  val parts : open List<any?> = []
+  var i = 0
+  var n = 0
+  var from = 0
+  var notEmptyAt = -1
+  while (count == 0 or n < count) {
+    val spans = __pyReFind(p, text, from, text.size, 0, notEmptyAt)
+    if (spans == null) { break }
+    val s = spans!!
+    if (i < s[0]) { parts.add(__pyRePart(subject, text, i, s[0])) }
+    val m = PyReMatch(p, subject, text, s, 0, text.size)
+    val item = callable ? pyCall1(repl, m) : __pyReExpand(m, template!!)
+    if (item != null) { parts.add(item) }
+    i = s[1]
+    n += 1
+    notEmptyAt = s[1] == s[0] ? s[1] : -1
+    from = s[1]
+  }
+  if (i < text.size) { parts.add(__pyRePart(subject, text, i, text.size)) }
+  // Joined as str.join or bytes.join joins them.
+  if (!p.isBytes) {
+    val sb = StringBuilder()
+    for (k, x) in parts.withIndex() {
+      if (!(x is string)) { throw pyTypeError("sequence item $k: expected str instance, ${pyTypeName(x)} found") }
+      sb.append(x as string)
+    }
+    return Pair(sb.toString(), n)
+  }
+  val sb = StringBuilder()
+  for (k, x) in parts.withIndex() {
+    val b = pyBytesLike(x)
+    if (b == null) { throw pyTypeError("sequence item $k: expected a bytes-like object, ${pyTypeName(x)} found") }
+    sb.append(pyBytesText(b!!))
+  }
+  val joined = pyBytesOfLatin1(sb.toString())
+  return Pair(subject is PyByteArray ? PyByteArray(joined as Bytes) : joined, n)
+}
+
+// ---- Compiling, with a cache as CPython's ----
+
+internal val __pyReCache : open Map<string, PyRePattern> = {:}
+
+internal fun __pyReCompile(pattern : any?, flagsArg : any?) : PyRePattern {
+  val flags = __pyReFlagsOf(flagsArg)
+  if (pattern is PyRePattern) {
+    if (flags != 0) { throw pyValueError("cannot process flags argument with a compiled pattern") }
+    return pattern as PyRePattern
+  }
+  val isBytes = pattern is Bytes
+  if (!(pattern is string) and !isBytes) { throw pyTypeError("first argument must be string or compiled pattern") }
+  val text = isBytes ? pyBytesText(pattern as Bytes) : pattern as string
+  val key = (isBytes ? "b" : "s") + flags + ":" + text
+  val had = __pyReCache[key]
+  if (had != null) { return had!! }
+  val made = __regex.compilePython(text, flags, isBytes)
+  if (made is List) {
+    val e = made as List<any?>
+    var msg = e[0] as string
+    val arg = e[3] as string
+    // The name it is about where the engine marks it (U+FDD0 for its repr, U+FDD1 for its ascii).
+    msg = msg.replace("\u{FDD0}", pyRepr(arg)).replace("\u{FDD1}", pyAscii(arg) as string)
+    if (isBytes) { msg = __pyReAsciiText(msg) }
+    when (e[2] as int) {
+      1 -> throw pyOverflowError(msg)
+      2 -> throw pyValueError(msg)
+      else -> throw __pyReError(msg, (e[1] as int) >= 0 ? pattern : null, e[1] as int)
+    }
+  }
+  val p = PyRePattern(pattern, text, made, __regex.pythonFlags(made), isBytes)
+  if ((flags & 128) == 0) {
+    if (__pyReCache.size >= 512) { __pyReCache.clear() }
+    __pyReCache[key] = p
+  }
+  return p
+}
+
+// re.escape: the characters re reads as its own, each with a backslash.
+internal fun __pyReEscapeText(s : string) : string {
+  val special = "()[]{}?*+-|^$\\.&~# \t\n\r\u{B}\u{C}"
+  val sb = StringBuilder()
+  for c in s {
+    if (special.contains(c)) { sb.append('\\') }
+    sb.append(c)
+  }
+  return sb.toString()
+}
+
+// ---- mappingproxy (Pattern.groupindex) ----
+
+internal lazy val __pyMappingProxyType : PyType = pyNativeType("mappingproxy", "builtins", ["__getitem__", "__len__", "__iter__",
+  "__contains__", "keys", "values", "items", "get", "copy", "__repr__", "__str__", "__eq__"], null)
+
+class PyMappingProxy(val d : PyDict) : PyNative() {
+  override fun pyType() : PyType => __pyMappingProxyType
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__getitem__" -> {
+        val k = a.pos[0]
+        if (!d.has(k)) { throw pyKeyError(k) }
+        d.get(k, null)
+      }
+      "__len__" -> d.count
+      "__iter__" -> pyIter(d)
+      "__contains__" -> d.has(a.pos[0])
+      "get" -> d.get(a.pos[0], a.pos.size > 1 ? a.pos[1] : null)
+      "copy" -> d.copy()
+      "__repr__" -> "mappingproxy(${pyRepr(d)})"
+      "__str__" -> pyStr(d)
+      "__eq__" -> pyEqB(d, a.pos[0] is PyMappingProxy ? (a.pos[0] as PyMappingProxy).d : a.pos[0])
+      else -> pyCallV(pyGetAttr(d, name), a.pos, null)
+    }
+  }
+}
+
+// ---- The module ----
+
+fun pyReModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["NOFLAG"] = __pyReFlag(0)
+  for (bit, name) in __pyReFlagNames { m[name] = __pyReFlag(bit) }
+  m["A"] = m["ASCII"]
+  m["I"] = m["IGNORECASE"]
+  m["L"] = m["LOCALE"]
+  m["U"] = m["UNICODE"]
+  m["M"] = m["MULTILINE"]
+  m["S"] = m["DOTALL"]
+  m["X"] = m["VERBOSE"]
+  m["RegexFlag"] = __pyRegexFlagType
+  m["Pattern"] = __pyRePatternType
+  m["Match"] = __pyReMatchType
+  m["PatternError"] = __pyPatternErrorType
+  m["error"] = __pyPatternErrorType
+  m["compile"] = __pyB("compile") { a ->
+    a.only(["pattern", "flags"])
+    __pyReCompile(a.pos.isNotEmpty() ? a.pos[0] : a.get("pattern", null), a.pos.size > 1 ? a.pos[1] : a.get("flags", 0))
+  }
+  fun matcher(name : string, mode : int) {
+    m[name] = __pyB(name) { a ->
+      a.only(["pattern", "string", "flags"])
+      val p = __pyReCompile(a.pos.isNotEmpty() ? a.pos[0] : a.get("pattern", null), a.pos.size > 2 ? a.pos[2] : a.get("flags", 0))
+      val subject = a.pos.size > 1 ? a.pos[1] : a.get("string", null)
+      val text = __pyReSubject(p, subject)
+      val spans = __pyReFind(p, text, 0, text.size, mode, -1)
+      spans == null ? null : PyReMatch(p, subject, text, spans!!, 0, text.size)
+    }
+  }
+  matcher("search", 0)
+  matcher("match", 1)
+  matcher("fullmatch", 2)
+  m["findall"] = __pyB("findall") { a ->
+    a.only(["pattern", "string", "flags"])
+    val p = __pyReCompile(a.pos.isNotEmpty() ? a.pos[0] : a.get("pattern", null), a.pos.size > 2 ? a.pos[2] : a.get("flags", 0))
+    val subject = a.pos.size > 1 ? a.pos[1] : a.get("string", null)
+    val text = __pyReSubject(p, subject)
+    __pyReFindall(p, subject, text, 0, text.size)
+  }
+  m["finditer"] = __pyB("finditer") { a ->
+    a.only(["pattern", "string", "flags"])
+    val p = __pyReCompile(a.pos.isNotEmpty() ? a.pos[0] : a.get("pattern", null), a.pos.size > 2 ? a.pos[2] : a.get("flags", 0))
+    val subject = a.pos.size > 1 ? a.pos[1] : a.get("string", null)
+    val text = __pyReSubject(p, subject)
+    PyReIter(p, subject, text, 0, text.size)
+  }
+  fun subber(name : string) {
+    m[name] = __pyB(name) { a ->
+      a.only(["pattern", "repl", "string", "count", "flags"])
+      val p = __pyReCompile(a.pos.isNotEmpty() ? a.pos[0] : a.get("pattern", null), a.pos.size > 4 ? a.pos[4] : a.get("flags", 0))
+      val r = __pyReSubn(p, a.pos.size > 1 ? a.pos[1] : a.get("repl", null), a.pos.size > 2 ? a.pos[2] : a.get("string", null),
+        pyIndex(a.pos.size > 3 ? a.pos[3] : a.get("count", 0)))
+      name == "sub" ? r.first : PyTuple([r.first, r.second])
+    }
+  }
+  subber("sub")
+  subber("subn")
+  m["split"] = __pyB("split") { a ->
+    a.only(["pattern", "string", "maxsplit", "flags"])
+    val p = __pyReCompile(a.pos.isNotEmpty() ? a.pos[0] : a.get("pattern", null), a.pos.size > 3 ? a.pos[3] : a.get("flags", 0))
+    __pyReSplit(p, a.pos.size > 1 ? a.pos[1] : a.get("string", null), pyIndex(a.pos.size > 2 ? a.pos[2] : a.get("maxsplit", 0)))
+  }
+  m["escape"] = __pyB("escape") { a ->
+    val x = a.pos[0]
+    if (x is string) { __pyReEscapeText(x as string) }
+    else {
+      val b = pyBytesLike(x)
+      if (b == null) { throw pyTypeError("expected str or bytes-like object, got '${pyTypeName(x)}'") }
+      pyBytesOfLatin1(__pyReEscapeText(pyBytesText(b!!)))
+    }
+  }
+  m["purge"] = __pyB("purge") { a -> __pyReCache.clear(); null }
+  return pyNativeModule("re", m)
+}

@@ -159,6 +159,11 @@ fun pyStr(x : any?) : string {
   return when (x) {
     is string -> x as string
     is int -> (x as int).toString()
+    is PyNative -> {
+      // The runtime's own objects with a __str__ of their own (part 5.3: mappingproxy).
+      val r = pyNativeSpecial(x as PyNative, "__str__", [])
+      r === pyUnbound ? pyRepr(x) : r as string
+    }
     is PyObject -> {
       val o = x as PyObject
       val m = o.cls.lookup("__str__")

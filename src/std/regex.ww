@@ -34,7 +34,15 @@ enum RegexOption(internal val bit : int) {
   dotMatchesAll(4),
   // Characters compared by their canonical decomposition: not available yet (it needs Unicode
   // data); a Regex given it is an UnsupportedOperationException.
-  canonEq(0)
+  canonEq(0),
+  // The pattern is in Python's syntax, read and matched as CPython's re does (Snippy's re is
+  // made on it): (?P<name>...), (?P=name), (?(1)yes|no), {,3}, \Z for the very end, ^ and $ by
+  // \n alone, \w, \d, \s and \b as Unicode's (str.isalnum, isdecimal, isspace), case as CPython
+  // folds it, and CPython's words for what is wrong. The other options are not used with it:
+  // write (?i), (?m), (?s), (?x) or (?a) at the pattern's start.
+  //
+  //   Regex("(?P<key>\\w+)=(?P<value>\\d+)", RegexOption.python).find("é=42")?.groups["value"]?.value   // 42
+  python(128)
 }
 
 // A compiled pattern.
@@ -251,4 +259,8 @@ external object __regex {
   fun allSpans(pattern : any, text : string, from : int, to : int) : List<int>
   fun replace(pattern : any, text : string, replacement : string, firstOnly : bool) : string
   fun split(pattern : any, text : string, limit : int) : List<string>
+  // Python's syntax, for Snippy's re: see src/regex_api.cpp.
+  fun compilePython(pattern : string, flags : int, bytes : bool) : any
+  fun pythonFlags(pattern : any) : int
+  fun findPython(pattern : any, text : string, from : int, to : int, mode : int, notEmptyAt : int) : List<int>?
 }

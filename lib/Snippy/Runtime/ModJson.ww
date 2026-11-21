@@ -1,0 +1,715 @@
+import Snippy.Text.*
+// json (the Snippy plan, part 5.3, step 4), in WinterWolf, after CPython's json package and its C
+// accelerator (_json.c), which CPython runs: the scanner reads as the C scanner does, so each
+// mistake is found where CPython finds it and said in its words; the encoder writes as
+// _make_iterencode does, its pieces as it yields them (dump writes each), floats by repr; the
+// JSONEncoder and JSONDecoder classes are Python classes to be made subclasses of.
+
+// ---- JSONDecodeError ----
+
+internal lazy val __pyJsonDecodeErrorType : PyType = __pyMakeJsonDecodeError()
+internal fun __pyMakeJsonDecodeError() : PyType {
+  val t = __pyExc("JSONDecodeError", pyValueErrorType)
+  t.module = "json.decoder"
+  t.construct = { cls, args, kw ->
+    if (args.size != 3) { throw pyTypeError("JSONDecodeError.__init__() missing required positional arguments") }
+    __pyJsonDecodeError(args[0] as string, args[1] as string, pyIndex(args[2])).exc
+  }
+  return t
+}
+
+// JSONDecodeError(msg, doc, pos): "msg: line L column C (char P)".
+internal fun __pyJsonDecodeError(msg : string, doc : string, pos : int) : PyError {
+  var lines = 0
+  var lastNewline = -1
+  for k in 0..<Math.min(pos, doc.size) {
+    if (doc[k] == '\n') {
+      lines += 1
+      lastNewline = k
+    }
+  }
+  val lineno = lines + 1
+  val colno = pos - lastNewline
+  val err = pyError(__pyJsonDecodeErrorType, "$msg: line $lineno column $colno (char $pos)")
+  val d = err.exc.dict!!
+  d.set("msg", msg)
+  d.set("doc", doc)
+  d.set("pos", pos)
+  d.set("lineno", lineno)
+  d.set("colno", colno)
+  return err
+}
+
+// ---- Reading ----
+
+// Where no value starts: CPython's StopIteration(idx), which the decoder says as "Expecting value".
+class PyJsonStop(val at : int) : RuntimeException(null)
+
+internal fun __pyJsonSpace(c : char) : bool => c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+// What a decoder was made with.
+class PyJsonScanner(val strict : bool, val objectHook : any?, val pairsHook : any?, val parseFloat : any?, val parseInt : any?,
+                    val parseConstant : any?) {
+  var end = 0  // where the value read last ended
+
+  // scan_once: the value at `idx`, `end` after it; PyJsonStop where none starts there.
+  fun scan(s : string, idx : int) : any? {
+    val n = s.size
+    if (idx >= n) { throw PyJsonStop(idx) }
+    val c = s[idx]
+    if (c == '"') { return string(s, idx + 1) }
+    if (c == '{') { return obj(s, idx + 1) }
+    if (c == '[') { return array(s, idx + 1) }
+    if (c == 'n' and idx + 3 < n and s[(idx + 1)..<(idx + 4)] == "ull") { end = idx + 4; return null }
+    if (c == 't' and idx + 3 < n and s[(idx + 1)..<(idx + 4)] == "rue") { end = idx + 4; return true }
+    if (c == 'f' and idx + 4 < n and s[(idx + 1)..<(idx + 5)] == "alse") { end = idx + 5; return false }
+    if (c == 'N' and idx + 2 < n and s[(idx + 1)..<(idx + 3)] == "aN") { end = idx + 3; return constant("NaN") }
+    if (c == 'I' and idx + 7 < n and s[idx..<(idx + 8)] == "Infinity") { end = idx + 8; return constant("Infinity") }
+    if (c == '-' and idx + 8 < n and s[idx..<(idx + 9)] == "-Infinity") { end = idx + 9; return constant("-Infinity") }
+    return number(s, idx)
+  }
+
+  fun constant(name : string) : any? {
+    if (parseConstant != null) { return pyCall1(parseConstant, name) }
+    return name == "NaN" ? pyNaN : name == "Infinity" ? pyInf : -pyInf
+  }
+
+  // _match_number_unicode.
+  fun number(s : string, start : int) : any? {
+    val last = s.size - 1
+    var idx = start
+    fun digit(i : int) : bool => s[i] >= '0' and s[i] <= '9'
+    if (s[idx] == '-') {
+      idx += 1
+      if (idx > last) { throw PyJsonStop(start) }
+    }
+    if (s[idx] >= '1' and s[idx] <= '9') {
+      idx += 1
+      while (idx <= last and digit(idx)) { idx += 1 }
+    } else if (s[idx] == '0') {
+      idx += 1
+    } else {
+      throw PyJsonStop(start)
+    }
+    var isFloat = false
+    if (idx < last and s[idx] == '.' and digit(idx + 1)) {
+      isFloat = true
+      idx += 2
+      while (idx <= last and digit(idx)) { idx += 1 }
+    }
+    if (idx < last and (s[idx] == 'e' or s[idx] == 'E')) {
+      val eStart = idx
+      idx += 1
+      if (idx < last and (s[idx] == '-' or s[idx] == '+')) { idx += 1 }
+      while (idx <= last and digit(idx)) { idx += 1 }
+      if (digit(idx - 1)) { isFloat = true } else { idx = eStart }
+    }
+    val text = s[start..<idx]
+    end = idx
+    if (isFloat) { return parseFloat != null ? pyCall1(parseFloat, text) : pyFloatFromText(text) }
+    return parseInt != null ? pyCall1(parseInt, text) : pyIntFromText(text, 10)
+  }
+
+  // scanstring_unicode: the string whose first character is at `start` (after its quote).
+  fun string(s : string, start : int) : string {
+    val n = s.size
+    val begin = start - 1
+    val sb = StringBuilder()
+    var at = start
+    while (true) {
+      var next = at
+      var c : char = '\u{0}'
+      var found = false
+      while (next < n) {
+        c = s[next]
+        if (c == '"' or c == '\\') { found = true; break }
+        if (pyOrd(c) <= 0x1F and strict) { throw __pyJsonDecodeError("Invalid control character at", s, next) }
+        next += 1
+      }
+      if (!found) { throw __pyJsonDecodeError("Unterminated string starting at", s, begin) }
+      if (next > at) { sb.append(s[at..<next]) }
+      next += 1
+      if (c == '"') {
+        end = next
+        return sb.toString()
+      }
+      if (next == n) { throw __pyJsonDecodeError("Unterminated string starting at", s, begin) }
+      val e = s[next]
+      if (e != 'u') {
+        at = next + 1
+        val out = when (e) {
+          '"' -> '"'
+          '\\' -> '\\'
+          '/' -> '/'
+          'b' -> '\u{8}'
+          'f' -> '\u{C}'
+          'n' -> '\n'
+          'r' -> '\r'
+          't' -> '\t'
+          else -> throw __pyJsonDecodeError("Invalid \\escape", s, at - 2)
+        }
+        sb.append(out)
+        continue
+      }
+      next += 1
+      var stop = next + 4
+      if (stop >= n) { throw __pyJsonDecodeError("Invalid \\uXXXX escape", s, next - 1) }
+      var cp = 0
+      while (next < stop) {
+        val h = __pyJsonHex(s[next])
+        if (h < 0) { throw __pyJsonDecodeError("Invalid \\uXXXX escape", s, stop - 5) }
+        cp = cp * 16 + h
+        next += 1
+      }
+      if (cp >= 0xD800 and cp <= 0xDBFF and stop + 6 < n and s[next] == '\\' and s[next + 1] == 'u') {
+        next += 2
+        stop += 6
+        var low = 0
+        while (next < stop) {
+          val h = __pyJsonHex(s[next])
+          if (h < 0) { throw __pyJsonDecodeError("Invalid \\uXXXX escape", s, stop - 5) }
+          low = low * 16 + h
+          next += 1
+        }
+        if (low >= 0xDC00 and low <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00) } else { stop -= 6 }
+      }
+      sb.append(pyChrText(cp))
+      at = stop
+    }
+    return ""
+  }
+
+  // _parse_object_unicode: the object whose first character is at `start` (after its brace).
+  fun obj(s : string, start : int) : any? {
+    val last = s.size - 1
+    var idx = start
+    val pairs : open List<any?> = []
+    while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+    if (idx > last or s[idx] != '}') {
+      while (true) {
+        if (idx > last or s[idx] != '"') { throw __pyJsonDecodeError("Expecting property name enclosed in double quotes", s, idx) }
+        val key = string(s, idx + 1)
+        idx = end
+        while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+        if (idx > last or s[idx] != ':') { throw __pyJsonDecodeError("Expecting ':' delimiter", s, idx) }
+        idx += 1
+        while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+        val value = scan(s, idx)
+        pairs.add(PyTuple([key, value]))
+        idx = end
+        while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+        if (idx <= last and s[idx] == '}') { break }
+        if (idx > last or s[idx] != ',') { throw __pyJsonDecodeError("Expecting ',' delimiter", s, idx) }
+        val comma = idx
+        idx += 1
+        while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+        if (idx <= last and s[idx] == '}') { throw __pyJsonDecodeError("Illegal trailing comma before end of object", s, comma) }
+      }
+    }
+    val after = idx + 1
+    var result : any? = null
+    if (pairsHook != null) {
+      result = pyCall1(pairsHook, pyNewList(pairs))
+    } else {
+      val d = pyNewDict()
+      for p in pairs {
+        val t = p as PyTuple
+        d.set(t.items[0], t.items[1])
+      }
+      result = objectHook != null ? pyCall1(objectHook, d) : d
+    }
+    end = after
+    return result
+  }
+
+  // _parse_array_unicode.
+  fun array(s : string, start : int) : any? {
+    val last = s.size - 1
+    var idx = start
+    val values : open List<any?> = []
+    while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+    if (idx > last or s[idx] != ']') {
+      while (true) {
+        values.add(scan(s, idx))
+        idx = end
+        while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+        if (idx <= last and s[idx] == ']') { break }
+        if (idx > last or s[idx] != ',') { throw __pyJsonDecodeError("Expecting ',' delimiter", s, idx) }
+        val comma = idx
+        idx += 1
+        while (idx <= last and __pyJsonSpace(s[idx])) { idx += 1 }
+        if (idx <= last and s[idx] == ']') { throw __pyJsonDecodeError("Illegal trailing comma before end of array", s, comma) }
+      }
+    }
+    end = idx + 1
+    return pyNewList(values)
+  }
+}
+
+internal fun __pyJsonHex(c : char) : int {
+  if (c >= '0' and c <= '9') { return pyOrd(c) - 48 }
+  if (c >= 'a' and c <= 'f') { return pyOrd(c) - 87 }
+  if (c >= 'A' and c <= 'F') { return pyOrd(c) - 55 }
+  return -1
+}
+
+// A character of a code point, a lone surrogate as Snippy's str keeps one.
+internal fun pyChrText(cp : int) : string => pyChrOf(cp) as string
+
+// The scanner a decoder object's attributes make.
+internal fun __pyJsonScannerOf(dec : any?) : PyJsonScanner {
+  fun attr(name : string) : any? => pyGetAttrOr(dec, name, null)
+  val pf = attr("parse_float")
+  val pi = attr("parse_int")
+  return PyJsonScanner(pyTruth(pyGetAttrOr(dec, "strict", true)), attr("object_hook"), attr("object_pairs_hook"),
+    pf === pyFloatType ? null : pf, pi === pyIntType ? null : pi, attr("parse_constant"))
+}
+
+// raw_decode: the value at `idx` and where it ends.
+internal fun __pyJsonRawDecode(sc : PyJsonScanner, s : string, idx : int) : PyTuple {
+  if (idx < 0) { throw pyValueError("idx cannot be negative") }
+  try {
+    val v = sc.scan(s, idx)
+    return PyTuple([v, sc.end])
+  } catch (stop : PyJsonStop) {
+    throw __pyJsonDecodeError("Expecting value", s, stop.at)
+  }
+}
+
+internal fun __pyJsonDecode(sc : PyJsonScanner, s : string) : any? {
+  var idx = 0
+  while (idx < s.size and __pyJsonSpace(s[idx])) { idx += 1 }
+  val r = __pyJsonRawDecode(sc, s, idx)
+  var end = r.items[1] as int
+  while (end < s.size and __pyJsonSpace(s[end])) { end += 1 }
+  if (end != s.size) { throw __pyJsonDecodeError("Extra data", s, end) }
+  return r.items[0]
+}
+
+// What loads reads: a str, or bytes in UTF-8, 16 or 32 as detect_encoding tells them apart.
+internal fun __pyJsonText(x : any?) : string {
+  if (x is string) {
+    val s = x as string
+    if (s.size > 0 and pyOrd(s[0]) == 0xFEFF) { throw __pyJsonDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)", s, 0) }
+    return s
+  }
+  if (!(x is Bytes) and !(x is PyByteArray)) {
+    throw pyTypeError("the JSON object must be str, bytes or bytearray, not ${pyTypeOf(x).name}")
+  }
+  val b = pyBytesLike(x)!!
+  return pyCallV(pyGetAttr(b, "decode"), [__pyJsonEncoding(b), "surrogatepass"], null) as string
+}
+
+internal fun __pyJsonEncoding(b : Bytes) : string {
+  fun at(i : int) : int => b[i].toInt()
+  fun starts(vals : List<int>) : bool {
+    if (b.size < vals.size) { return false }
+    for (k, v) in vals.withIndex() { if (at(k) != v) { return false } }
+    return true
+  }
+  if (starts([0, 0, 0xFE, 0xFF]) or starts([0xFF, 0xFE, 0, 0])) { return "utf-32" }
+  if (starts([0xFE, 0xFF]) or starts([0xFF, 0xFE])) { return "utf-16" }
+  if (starts([0xEF, 0xBB, 0xBF])) { return "utf-8-sig" }
+  if (b.size >= 4) {
+    if (at(0) == 0) { return at(1) != 0 ? "utf-16-be" : "utf-32-be" }
+    if (at(1) == 0) { return at(2) != 0 or at(3) != 0 ? "utf-16-le" : "utf-32-le" }
+  } else if (b.size == 2) {
+    if (at(0) == 0) { return "utf-16-be" }
+    if (at(1) == 0) { return "utf-16-le" }
+  }
+  return "utf-8"
+}
+
+// ---- Writing ----
+
+// A str as JSON writes it: with only ASCII where `ascii`, else escaping only what must be.
+fun pyJsonString(s : string, ascii : bool) : string {
+  val sb = StringBuilder()
+  sb.append('"')
+  for c in s {
+    val cp = pyOrd(c)
+    when (c) {
+      '"' -> sb.append("\\\"")
+      '\\' -> sb.append("\\\\")
+      '\n' -> sb.append("\\n")
+      '\r' -> sb.append("\\r")
+      '\t' -> sb.append("\\t")
+      '\u{8}' -> sb.append("\\b")
+      '\u{C}' -> sb.append("\\f")
+      else -> {
+        if (cp < 0x20 or (ascii and cp > 0x7E)) {
+          if (cp >= 0x10000) {
+            val v = cp - 0x10000
+            sb.append("\\u" + __pyReHex(0xD800 | ((v >> 10) & 0x3FF), 4) + "\\u" + __pyReHex(0xDC00 | (v & 0x3FF), 4))
+          } else {
+            sb.append("\\u" + __pyReHex(cp, 4))
+          }
+        } else {
+          sb.append(c)
+        }
+      }
+    }
+  }
+  sb.append('"')
+  return sb.toString()
+}
+
+// _make_iterencode: the pieces, as its generators yield them, put in `out`.
+class PyJsonWriter(val enc : any?, val out : open List<string>) {
+  val ascii : bool = pyTruth(pyGetAttr(enc, "ensure_ascii"))
+  val allowNan : bool = pyTruth(pyGetAttr(enc, "allow_nan"))
+  val sortKeys : bool = pyTruth(pyGetAttr(enc, "sort_keys"))
+  val skipKeys : bool = pyTruth(pyGetAttr(enc, "skipkeys"))
+  val circular : bool = pyTruth(pyGetAttr(enc, "check_circular"))
+  val itemSeparator : string = pyGetAttr(enc, "item_separator") as string
+  val keySeparator : string = pyGetAttr(enc, "key_separator") as string
+  val indent : string? = __pyJsonIndent(pyGetAttr(enc, "indent"))
+  val markers : open List<any?> = []
+
+  fun str(s : any?) : string => pyJsonString(pyUnwrap(s) as string, ascii)
+  fun floatText(x : any?) : string {
+    val f = pyUnwrap(x) as float
+    var text = ""
+    if (f.isNaN()) { text = "NaN" }
+    else if (f == pyInf) { text = "Infinity" }
+    else if (f == -pyInf) { text = "-Infinity" }
+    else { return pyRepr(f) }
+    if (!allowNan) { throw pyValueError("Out of range float values are not JSON compliant: " + pyRepr(f)) }
+    return text
+  }
+  fun intText(x : any?) : string => pyRepr(pyUnwrap(x))
+  fun mark(o : any?) {
+    if (!circular) { return }
+    for m in markers { if (m === o) { throw pyValueError("Circular reference detected") } }
+    markers.add(o)
+  }
+  fun unmark(o : any?) {
+    if (!circular) { return }
+    for (k, m) in markers.withIndex() { if (m === o) { markers.removeAt(k); return } }
+  }
+  fun note(e : PyError, text : string) {
+    pyCall1(pyGetAttr(e.exc, "add_note"), text)
+  }
+  // A simple value's text, or null where it is a list, a dict or something else.
+  fun simple(v : any?) : string? {
+    if (v is string or pyIsInstance(v, pyStrType)) { return str(v) }
+    if (v == null) { return "null" }
+    if (v == true) { return "true" }
+    if (v == false) { return "false" }
+    if (pyIsInstance(v, pyIntType)) { return intText(v) }
+    if (pyIsInstance(v, pyFloatType)) { return floatText(v) }
+    return null
+  }
+
+  fun list(lst : any?, level0 : int) {
+    var level = level0
+    val items = pyIterable(lst)
+    if (items.isEmpty()) {
+      out.add("[]")
+      return
+    }
+    mark(lst)
+    var buf = "["
+    var newlineIndent : string? = null
+    var separator = itemSeparator
+    if (indent != null) {
+      level += 1
+      newlineIndent = "\n" + indent!!.repeat(level)
+      separator = itemSeparator + newlineIndent!!
+      buf += newlineIndent!!
+    }
+    for (i, v) in items.withIndex() {
+      if (i > 0) { buf = separator }
+      try {
+        val t = simple(v)
+        if (t != null) {
+          out.add(buf + t!!)
+        } else {
+          out.add(buf)
+          value(v, level)
+        }
+      } catch (e : PyError) {
+        note(e, "when serializing ${__pyJsonTypeName(lst)} item $i")
+        throw e
+      }
+    }
+    if (newlineIndent != null) {
+      level -= 1
+      out.add("\n" + indent!!.repeat(level))
+    }
+    out.add("]")
+    unmark(lst)
+  }
+
+  fun dict(dct : any?, level0 : int) {
+    var level = level0
+    var items : open List<any?> = pyIterable(pyCall0(pyGetAttr(dct, "items"))).toOpenList()
+    if (items.isEmpty()) {
+      out.add("{}")
+      return
+    }
+    mark(dct)
+    out.add("{")
+    var newlineIndent : string? = null
+    var separator = itemSeparator
+    if (indent != null) {
+      level += 1
+      newlineIndent = "\n" + indent!!.repeat(level)
+      separator = itemSeparator + newlineIndent!!
+    }
+    if (sortKeys) { pySortList(items, null, false) }
+    var first = true
+    for item in items {
+      val pair = pyIterable(item)
+      var key = pair[0]
+      val v = pair[1]
+      var keyText = ""
+      if (key is string or pyIsInstance(key, pyStrType)) { keyText = pyUnwrap(key) as string }
+      else if (pyIsInstance(key, pyFloatType)) { keyText = floatText(key) }
+      else if (key == true) { keyText = "true" }
+      else if (key == false) { keyText = "false" }
+      else if (key == null) { keyText = "null" }
+      else if (pyIsInstance(key, pyIntType)) { keyText = intText(key) }
+      else if (skipKeys) { continue }
+      else { throw pyTypeError("keys must be str, int, float, bool or None, not ${pyTypeOf(key).name}") }
+      if (first) {
+        first = false
+        if (newlineIndent != null) { out.add(newlineIndent!!) }
+      } else {
+        out.add(separator)
+      }
+      out.add(pyJsonString(keyText, ascii))
+      out.add(keySeparator)
+      try {
+        val t = simple(v)
+        if (t != null) { out.add(t!!) } else { value(v, level) }
+      } catch (e : PyError) {
+        note(e, "when serializing ${__pyJsonTypeName(dct)} item ${pyRepr(keyText)}")
+        throw e
+      }
+    }
+    if (!first and newlineIndent != null) {
+      level -= 1
+      out.add("\n" + indent!!.repeat(level))
+    }
+    out.add("}")
+    unmark(dct)
+  }
+
+  // _iterencode: any value.
+  fun value(o : any?, level : int) {
+    val t = simple(o)
+    if (t != null) {
+      out.add(t!!)
+      return
+    }
+    if (pyIsInstance(o, pyListType) or pyIsInstance(o, pyTupleType)) { list(o, level); return }
+    if (pyIsInstance(o, pyDictType)) { dict(o, level); return }
+    mark(o)
+    val made = pyCall1(pyGetAttr(enc, "default"), o)
+    try {
+      value(made, level)
+    } catch (e : PyError) {
+      note(e, "when serializing ${__pyJsonTypeName(o)} object")
+      throw e
+    }
+    unmark(o)
+  }
+}
+
+// A type's name as the C encoder's notes give it (%T): with its module, but builtins'.
+internal fun __pyJsonTypeName(x : any?) : string {
+  val t = pyTypeOf(x)
+  return t.module == "builtins" ? t.qualname : t.module + "." + t.qualname
+}
+
+internal fun __pyJsonIndent(x : any?) : string? {
+  if (x == null) { return null }
+  if (x is string) { return x as string }
+  val n = pyIndex(x)
+  return n > 0 ? " ".repeat(n) : ""
+}
+
+// ---- The classes ----
+
+internal val __pyJsonEncoderNames = ["skipkeys", "ensure_ascii", "check_circular", "allow_nan", "sort_keys", "indent", "separators", "default"]
+internal val __pyJsonDecoderNames = ["object_hook", "parse_float", "parse_int", "parse_constant", "strict", "object_pairs_hook"]
+
+// Keyword-only arguments of a Python class's __init__, as CPython checks them.
+internal fun __pyJsonOnlyKeywords(cls : string, a : PyArgs, names : List<string>) {
+  if (a.pos.isNotEmpty()) {
+    throw pyTypeError("$cls.__init__() takes 1 positional argument but ${a.pos.size + 1} were given")
+  }
+  for k in a.kw.keys {
+    if (!(k in names)) { throw pyTypeError("$cls.__init__() got an unexpected keyword argument '$k'" + pyDidYouMean(names, k)) }
+  }
+}
+
+internal lazy val __pyJsonEncoderType : PyType = pyLibClass("JSONEncoder", "json.encoder", [pyObjectType], {
+  "item_separator": ", ",
+  "key_separator": ": ",
+  "__init__": pyLibMethod("JSONEncoder", "__init__") { self, a ->
+    __pyJsonOnlyKeywords("JSONEncoder", a, __pyJsonEncoderNames)
+    pySetAttr(self, "skipkeys", a.get("skipkeys", false))
+    pySetAttr(self, "ensure_ascii", a.get("ensure_ascii", true))
+    pySetAttr(self, "check_circular", a.get("check_circular", true))
+    pySetAttr(self, "allow_nan", a.get("allow_nan", true))
+    pySetAttr(self, "sort_keys", a.get("sort_keys", false))
+    val indent = a.get("indent", null)
+    pySetAttr(self, "indent", indent)
+    val separators = a.get("separators", null)
+    if (separators != null) {
+      val two = pyIterable(separators)
+      if (two.size != 2) { throw pyValueError("too many values to unpack (expected 2)") }
+      pySetAttr(self, "item_separator", two[0])
+      pySetAttr(self, "key_separator", two[1])
+    } else if (indent != null) {
+      pySetAttr(self, "item_separator", ",")
+    }
+    val d = a.get("default", null)
+    if (d != null) { pySetAttr(self, "default", d) }
+    null
+  },
+  "default": pyLibMethod("JSONEncoder", "default") { self, a ->
+    throw pyTypeError("Object of type ${pyTypeOf(a.pos[0]).name} is not JSON serializable")
+  },
+  "encode": pyLibMethod("JSONEncoder", "encode") { self, a ->
+    val o = a.pos[0]
+    if (o is string or pyIsInstance(o, pyStrType)) {
+      pyJsonString(pyUnwrap(o) as string, pyTruth(pyGetAttr(self, "ensure_ascii")))
+    } else {
+      val out : open List<string> = []
+      PyJsonWriter(self, out).value(o, 0)
+      out.join("")
+    }
+  },
+  "iterencode": pyLibMethod("JSONEncoder", "iterencode") { self, a ->
+    val out : open List<string> = []
+    PyJsonWriter(self, out).value(a.pos[0], 0)
+    pyIter(pyNewList(out.map { it as any? }.toOpenList()))
+  }
+})
+
+internal lazy val __pyJsonDecoderType : PyType = pyLibClass("JSONDecoder", "json.decoder", [pyObjectType], {
+  "__init__": pyLibMethod("JSONDecoder", "__init__") { self, a ->
+    __pyJsonOnlyKeywords("JSONDecoder", a, __pyJsonDecoderNames)
+    pySetAttr(self, "object_hook", a.get("object_hook", null))
+    pySetAttr(self, "parse_float", a.get("parse_float", null) ?: pyFloatType)
+    pySetAttr(self, "parse_int", a.get("parse_int", null) ?: pyIntType)
+    pySetAttr(self, "parse_constant", a.get("parse_constant", null))
+    pySetAttr(self, "strict", a.get("strict", true))
+    pySetAttr(self, "object_pairs_hook", a.get("object_pairs_hook", null))
+    pySetAttr(self, "memo", pyNewDict())
+    null
+  },
+  "decode": pyLibMethod("JSONDecoder", "decode") { self, a -> __pyJsonDecode(__pyJsonScannerOf(self), a.pos[0] as string) },
+  "raw_decode": pyLibMethod("JSONDecoder", "raw_decode") { self, a ->
+    val idx = a.pos.size > 1 ? pyIndex(a.pos[1]) : pyIndex(a.get("idx", 0))
+    __pyJsonRawDecode(__pyJsonScannerOf(self), a.pos[0] as string, idx)
+  }
+})
+
+// dumps and dump: the encoder their arguments make, the default one where they make none.
+internal fun __pyJsonEncoderOf(a : PyArgs, from : int) : any? {
+  val known = ["skipkeys", "ensure_ascii", "check_circular", "allow_nan", "cls", "indent", "separators", "default", "sort_keys"]
+  var plain = true
+  for k in a.kw.keys {
+    if (k == "obj" or k == "fp") { continue }
+    val v = a.kw[k]
+    val usual = when (k) {
+      "skipkeys", "sort_keys" -> !pyTruth(v)
+      "ensure_ascii", "check_circular", "allow_nan" -> pyTruth(v)
+      "cls", "indent", "separators", "default" -> v == null
+      else -> false
+    }
+    if (!usual or !(k in known)) { plain = false }
+  }
+  if (a.pos.size > from) { throw pyTypeError("dumps() takes $from positional argument${from == 1 ? "" : "s"} but ${a.pos.size} were given") }
+  val cls = a.get("cls", null) ?: __pyJsonEncoderType
+  val names : open List<string> = []
+  val values : open List<any?> = []
+  for k in a.kw.keys {
+    if (k == "cls" or k == "obj" or k == "fp") { continue }
+    names.add(k)
+    values.add(a.kw[k])
+  }
+  return plain ? pyCallV(__pyJsonEncoderType, [], null) : pyCallV(cls, values, names)
+}
+
+internal fun __pyJsonDecoderOf(a : PyArgs) : any? {
+  val names : open List<string> = []
+  val values : open List<any?> = []
+  for k in a.kw.keys {
+    if (k == "cls" or k == "s" or k == "fp") { continue }
+    val v = a.kw[k]
+    if (v == null and k in ["object_hook", "parse_float", "parse_int", "parse_constant", "object_pairs_hook"]) { continue }
+    names.add(k)
+    values.add(v)
+  }
+  return pyCallV(a.get("cls", null) ?: __pyJsonDecoderType, values, names)
+}
+
+fun pyJsonDecoderModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["JSONDecoder"] = __pyJsonDecoderType
+  m["JSONDecodeError"] = __pyJsonDecodeErrorType
+  m["scanstring"] = __pyB("scanstring") { a ->
+    val sc = PyJsonScanner(a.pos.size > 2 ? pyTruth(a.pos[2]) : true, null, null, null, null, null)
+    val s = sc.string(a.pos[0] as string, pyIndex(a.pos[1]))
+    PyTuple([s, sc.end])
+  }
+  return pyNativeModule("json.decoder", m)
+}
+
+fun pyJsonEncoderModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["JSONEncoder"] = __pyJsonEncoderType
+  m["encode_basestring"] = __pyB("encode_basestring") { a -> pyJsonString(a.pos[0] as string, false) }
+  m["encode_basestring_ascii"] = __pyB("encode_basestring_ascii") { a -> pyJsonString(a.pos[0] as string, true) }
+  m["INFINITY"] = pyInf
+  return pyNativeModule("json.encoder", m)
+}
+
+fun pyJsonModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["__version__"] = "2.0.9"
+  m["__all__"] = pyNewList(["dump", "dumps", "load", "loads", "JSONDecoder", "JSONDecodeError", "JSONEncoder"])
+  m["JSONDecoder"] = __pyJsonDecoderType
+  m["JSONDecodeError"] = __pyJsonDecodeErrorType
+  m["JSONEncoder"] = __pyJsonEncoderType
+  m["decoder"] = __pyStdModule("json.decoder")
+  m["encoder"] = __pyStdModule("json.encoder")
+  m["detect_encoding"] = __pyB("detect_encoding") { a -> __pyJsonEncoding(pyBytesLike(a.pos[0])!!) }
+  m["dumps"] = __pyB("dumps") { a ->
+    val obj = a.pos.isNotEmpty() ? a.pos[0] : a.get("obj", null)
+    val enc = __pyJsonEncoderOf(a, 1)
+    pyCall1(pyGetAttr(enc, "encode"), obj)
+  }
+  m["dump"] = __pyB("dump") { a ->
+    val obj = a.pos.isNotEmpty() ? a.pos[0] : a.get("obj", null)
+    val fp = a.pos.size > 1 ? a.pos[1] : a.get("fp", null)
+    val enc = __pyJsonEncoderOf(a, 2)
+    val write = pyGetAttr(fp, "write")
+    for chunk in pyIterable(pyCall1(pyGetAttr(enc, "iterencode"), obj)) { pyCall1(write, chunk) }
+    null
+  }
+  m["loads"] = __pyB("loads") { a ->
+    val s = __pyJsonText(a.pos.isNotEmpty() ? a.pos[0] : a.get("s", null))
+    pyCall1(pyGetAttr(__pyJsonDecoderOf(a), "decode"), s)
+  }
+  m["load"] = __pyB("load") { a ->
+    val fp = a.pos.isNotEmpty() ? a.pos[0] : a.get("fp", null)
+    val s = __pyJsonText(pyCall0(pyGetAttr(fp, "read")))
+    pyCall1(pyGetAttr(__pyJsonDecoderOf(a), "decode"), s)
+  }
+  return pyNativeModule("json", m)
+}
+
+// A module of this library's, made once, as import makes it.
+internal fun __pyStdModule(name : string) : any? {
+  val had = pyModules.get(name, pyUnbound)
+  if (had !== pyUnbound) { return had }
+  val m = __pyModuleMakers()[name]!!()
+  pyModules.set(name, m)
+  return m
+}

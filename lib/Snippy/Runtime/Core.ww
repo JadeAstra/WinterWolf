@@ -368,7 +368,11 @@ fun pyBind(f : PyFunction, args : List<any?>, kwnames : List<string>?) : List<an
           extra!!.set(k, v)
           continue
         }
-        throw pyTypeError("$fname got an unexpected keyword argument '$k'")
+        // CPython 3.14 suggests one of the names the arguments may be given by.
+        val names : open List<string> = []
+        for i in sp.posonly..<sp.positional { names.add(sp.params[i]) }
+        for i in kwStart..<(kwStart + sp.kwonly) { names.add(sp.params[i]) }
+        throw pyTypeError("$fname got an unexpected keyword argument '$k'" + pyDidYouMean(names, k))
       }
       if (slots[at] !== pyUnbound) { throw pyTypeError("$fname got multiple values for argument '$k'") }
       slots[at] = v

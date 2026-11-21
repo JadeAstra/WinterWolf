@@ -1,0 +1,40 @@
+// RegexOption.python: patterns in Python's syntax, read and matched as CPython's re does (Snippy's
+// re is made on it; tests/snippy_programs/lib/mod_re.py checks that against CPython itself). This
+// checks what a WinterWolf program sees of it through Regex.
+
+fun py(p : string) : Regex => Regex(p, RegexOption.python)
+
+// Python's own syntax: named groups and references to them, conditionals, {,n}, a { that is no repeat.
+val kv = py("(?P<key>\\w+)=(?P<value>\\d+)").find("é=42")!!
+print(kv.groupValues, kv.groups["value"]?.value)   // expect: ["é=42", "é", "42"] 42
+print(py("(?P<q>['\"])?x(?(q)(?P=q))").find("'x'")?.value, py("(a)?(?(1)b|c)").find("c")?.value)   // expect: 'x' c
+print(py("a{,2}").find("aaa")?.value, py("a{").find("a{")?.value, py("x{1,y}").matches("x{1,y}"))   // expect: aa a{ true
+
+// Unicode's classes and words, and CPython's case: the long s and the Kelvin sign as s and k.
+print(py("\\w+").findAll("naïve café").map { it.value }.toList(), py("(?a)\\w+").findAll("naïve").map { it.value }.toList())   // expect: ["naïve", "café"] ["na", "ve"]
+print(py("\\d+").find("x١٢3")?.value, py("\\bé").containsMatchIn("é"), py("\\s").matches("\u{3000}"))   // expect: ١٢3 true true
+print(py("(?i)s").findAll("sſS").count(), py("(?i)k").matches("\u{212A}"), py("(?i)[a-z]+").find("ÀbC")?.value)   // expect: 3 true bC
+
+// Lines by \n alone, ^ in MULTILINE at the end too, \Z the very end.
+print(py("(?m)^").findAll("a\n").count(), py("a$").findAll("a\na\n").count(), py("a\\Z").containsMatchIn("a\n"))   // expect: 2 1 false
+print(py(".").matches("\r"), py(".").matches("\n"), py("(?s).").matches("\n"))   // expect: true false true
+
+// Look-behind of one width, atomic groups and possessive repeats as Python 3.11 has them.
+print(py("(?<=ab)c").find("abc")?.range, py("(?>a+)b").matches("aab"), py("x*+x").containsMatchIn("xxx"))   // expect: 2..2 true false
+
+// CPython's words for what is wrong, and where.
+for p in ["(", "a**", "[z-a]", "(?P<1>x)", "\\q", "(?<=a|bc)d", "(?P=n)", "x(?i)", "(?P<a>x)(?P<a>y)"] {
+  try { py(p) } catch (e : PatternSyntaxException) { print(e.description, e.index) }
+}
+// expect: missing ), unterminated subpattern 0
+// expect: multiple repeat 2
+// expect: bad character range z-a 1
+// expect: bad character in group name '1' 4
+// expect: bad escape \q 0
+// expect: look-behind requires fixed-width pattern -1
+// expect: unknown group name 'n' 4
+// expect: global flags not at the start of the expression 1
+// expect: redefinition of group name 'a' as group 2; was group 1 12
+
+// Java's replacement syntax still, as Regex.replace has it.
+print(py("(?P<w>\\w+) (\\w+)").replace("hello world", "\$2 \${w}"))   // expect: world hello

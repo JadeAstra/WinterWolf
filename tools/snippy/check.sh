@@ -23,8 +23,8 @@ for f in $files; do
   if ! cmp -s /tmp/snippy.out "$f.out" || ! cmp -s /tmp/snippy.err "$f.err"; then
     bad=$((bad + 1))
     echo "=== $f differs"
-    diff "$f.out" /tmp/snippy.out | head -${LINES_SHOWN:-12}
-    diff "$f.err" /tmp/snippy.err | head -8
+    diff -a "$f.out" /tmp/snippy.out | head -${LINES_SHOWN:-12}
+    diff -a "$f.err" /tmp/snippy.err | head -8
     if [ -s /tmp/snippy.stderr ] && ! cmp -s /tmp/snippy.err "$f.err"; then head -5 /tmp/snippy.stderr; fi
   fi
 done

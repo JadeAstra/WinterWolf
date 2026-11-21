@@ -135,10 +135,62 @@ void registerRegex(VM& vm) {
             auto* made = new Pattern(pattern, static_cast<uint32_t>(vm.toInt(args[1], "options")));
             return Value::object(vm.alloc<ObjResource>("regex", reinterpret_cast<int64_t>(made), &releasePattern));
         } catch (const regex::SyntaxError& e) {
-            const Value what = vm.str(e.description);
+            // Python's syntax (RegexOption.python): the name it is about in quotes.
+            std::string description = e.description;
+            std::string name = "'";
+            for (char32_t c : e.arg) appendUtf8(name, static_cast<uint32_t>(c));
+            name += "'";
+            for (const char* mark : {WW_PY_REPR, WW_PY_ASCII})
+                for (size_t at; (at = description.find(mark)) != std::string::npos;) description.replace(at, std::strlen(mark), name);
+            const Value what = vm.str(description);
             TempRoot keep(vm, what);
             return Value::object(newList(vm, {what, Value::integer(e.index)}));
         }
+    });
+    // A pattern in Python's syntax (Snippy's re): `flags` CPython's (re.IGNORECASE...), `bytes`
+    // for a bytes pattern given as a string of its bytes. The pattern compiled, or [what is wrong,
+    // where (-1 for nowhere), what CPython raises (0 re.error, 1 OverflowError, 2 ValueError),
+    // the name a WW_PY_REPR or WW_PY_ASCII in it stands for].
+    def("compilePython", 3, 3, [](VM& vm, int, Value* args) -> Value {
+        const ObjString* source = textOf(vm, args[0]);
+        std::u32string pattern;
+        pattern.reserve(source->length);
+        for (size_t i = 0; i < source->length; i++) pattern.push_back(static_cast<char32_t>(source->at(i)));
+        const int64_t flags = vm.toInt(args[1], "flags");
+        uint32_t bits = regex::kPython | (static_cast<uint32_t>(flags & 0xFFFF) << regex::kPyFlagsShift);
+        if (args[2].truthy()) bits |= regex::kPyBytes;
+        try {
+            auto* made = new Pattern(pattern, bits);
+            return Value::object(vm.alloc<ObjResource>("regex", reinterpret_cast<int64_t>(made), &releasePattern));
+        } catch (const regex::SyntaxError& e) {
+            const Value what = vm.str(e.description);
+            TempRoot keep(vm, what);
+            std::string arg;
+            for (char32_t ch : e.arg) appendUtf8(arg, static_cast<uint32_t>(ch));
+            const Value argText = vm.str(arg);
+            TempRoot keepArg(vm, argText);
+            return Value::object(newList(vm, {what, Value::integer(e.index), Value::integer(e.kind), argText}));
+        }
+    });
+    def("pythonFlags", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::integer(patternOf(vm, args[0]).pythonFlags()); });
+    // A match of a pattern in Python's syntax from `from`, the text taken to end at `to`, as find
+    // gives it with the number of the group closed last after it (-1 for none); one that starts at
+    // `notEmptyAt` may not be empty there. Mode as find's.
+    def("findPython", 6, 6, [](VM& vm, int, Value* args) -> Value {
+        const Pattern& pattern = patternOf(vm, args[0]);
+        const std::function<void()> stop = [&vm] { vm.throwIfStopped(); };
+        const ObjString* text = textOf(vm, args[1]);
+        const int64_t from = vm.toInt(args[2], "position");
+        const int64_t to = vm.toInt(args[3], "end");
+        if (from < 0 || to < from || static_cast<size_t>(to) > text->length)
+            throw vm.runtimeError(Thrown::IndexOutOfBoundsException,
+                                  "from " + std::to_string(from) + " to " + std::to_string(to) + " is out of bounds of a text of " +
+                                      std::to_string(text->length) + " characters");
+        std::vector<int64_t>& groups = scratchGroups();
+        if (!pattern.match(text, static_cast<size_t>(from), modeOf(vm.toInt(args[4], "mode")), groups, &stop, static_cast<size_t>(to),
+                           vm.toInt(args[5], "notEmptyAt")))
+            return Value::null();
+        return intList(vm, groups.data(), groups.size());
     });
     def("groupCount", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::integer(patternOf(vm, args[0]).groupCount()); });
     def("groupNames", 1, 1, [](VM& vm, int, Value* args) -> Value {
@@ -185,7 +237,7 @@ void registerRegex(VM& vm) {
         std::vector<int64_t>& groups = scratchGroups();
         size_t from = static_cast<size_t>(start);
         while (static_cast<int64_t>(from) <= end && pattern.match(text, from, Pattern::Mode::Search, groups, &stop) && groups[1] <= end) {
-            all.insert(all.end(), groups.begin(), groups.end());
+            all.insert(all.end(), groups.begin(), groups.begin() + 2 * (pattern.groupCount() + 1));  // not Python's lastindex
             const size_t b = static_cast<size_t>(groups[0]), e = static_cast<size_t>(groups[1]);
             from = e == b ? e + 1 : e;
         }

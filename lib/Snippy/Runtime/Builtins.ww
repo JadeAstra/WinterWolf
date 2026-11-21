@@ -84,9 +84,85 @@ class PyArgs(val args : List<any?>, kwnames : List<string>?, val fname : string)
   // Only these keywords.
   fun only(names : List<string>) {
     for k in kw.keys {
-      if (!(k in names)) { throw pyTypeError("$fname got an unexpected keyword argument '$k'") }
+      if (!(k in names)) { throw pyTypeError("$fname got an unexpected keyword argument '$k'" + pyDidYouMean(names, k)) }
     }
   }
+}
+
+// ". Did you mean 'x'?" where one of `candidates` is near enough to `name`, as CPython 3.14
+// adds to an unexpected keyword argument; else "".
+fun pyDidYouMean(candidates : List<string>, name : string) : string {
+  val s = pySuggestion(candidates, name)
+  return s == null ? "" : ". Did you mean '${s!!}'?"
+}
+
+// CPython's suggestion (Python/suggestions.c): the candidate nearest `name` by Levenshtein's
+// distance, a change of case costing 1 and any other change 2, none needing more than about a
+// third of the characters changed; null where there is none.
+fun pySuggestion(candidates : List<string>, name : string) : string? {
+  if (candidates.size >= 750) { return null }
+  var best : string? = null
+  var bestDistance = 1000000000
+  for item in candidates {
+    if (item == name) { continue }
+    var most = (name.size + item.size + 3) * 2 / 6
+    if (most > bestDistance - 1) { most = bestDistance - 1 }
+    val d = __pyLevenshtein(name, item, most)
+    if (d > most) { continue }
+    if (best == null or d < bestDistance) {
+      best = item
+      bestDistance = d
+    }
+  }
+  return best
+}
+
+internal fun __pySubstitutionCost(a : char, b : char) : int {
+  val x = pyOrd(a)
+  val y = pyOrd(b)
+  if ((x & 31) != (y & 31)) { return 2 }
+  if (x == y) { return 0 }
+  val lx = x >= 65 and x <= 90 ? x + 32 : x
+  val ly = y >= 65 and y <= 90 ? y + 32 : y
+  return lx == ly ? 1 : 2
+}
+
+internal fun __pyLevenshtein(a0 : string, b0 : string, most : int) : int {
+  var aFrom = 0
+  var aTo = a0.size
+  var bFrom = 0
+  var bTo = b0.size
+  while (aFrom < aTo and bFrom < bTo and a0[aFrom] == b0[bFrom]) { aFrom += 1; bFrom += 1 }
+  while (aFrom < aTo and bFrom < bTo and a0[aTo - 1] == b0[bTo - 1]) { aTo -= 1; bTo -= 1 }
+  var a = a0[aFrom..<aTo]
+  var b = b0[bFrom..<bTo]
+  if (a.isEmpty() or b.isEmpty()) { return (a.size + b.size) * 2 }
+  if (a.size > 40 or b.size > 40) { return most + 1 }
+  if (b.size < a.size) {
+    val t = a
+    a = b
+    b = t
+  }
+  if ((b.size - a.size) * 2 > most) { return most + 1 }
+  val row : open List<int> = []
+  for i in 0..<a.size { row.add((i + 1) * 2) }
+  var result = 0
+  for bi in 0..<b.size {
+    val code = b[bi]
+    var distance = bi * 2
+    result = distance
+    var minimum = 1000000000
+    for i in 0..<a.size {
+      val substitute = distance + __pySubstitutionCost(code, a[i])
+      distance = row[i]
+      val insertDelete = Math.min(result, distance) + 2
+      result = Math.min(insertDelete, substitute)
+      row[i] = result
+      if (result < minimum) { minimum = result }
+    }
+    if (minimum > most) { return most + 1 }
+  }
+  return result
 }
 
 internal fun __pyB(name : string, code : (PyArgs) -> any?) : PyBuiltin {

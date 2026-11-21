@@ -21,6 +21,10 @@ fun pyStandardModules() : open Map<string, () -> PyModule> {
   m["time"] = { -> pyTimeModule() }
   m["datetime"] = { -> pyDatetimeModule() }
   m["textwrap"] = { -> pyTextwrapModule() }
+  m["re"] = { -> pyReModule() }
+  m["json"] = { -> pyJsonModule() }
+  m["json.decoder"] = { -> pyJsonDecoderModule() }
+  m["json.encoder"] = { -> pyJsonEncoderModule() }
   return m
 }
 

@@ -141,6 +141,36 @@ bool isLineTerminator(uint32_t c, bool unixLines) {
 }
 bool isAsciiWord(uint32_t c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 
+// ---- What a character is to Python's re ----
+// From CPython's own tables (tools/snippy/regex_unicode.py), the same on every system.
+
+#include "regex_unicode.inc"
+
+const PyRecord& pyRecord(uint32_t c) {
+    if (c > 0x10FFFF) c = 0xFFFF;  // nothing past Unicode is a word, a digit or a space
+    return kPyRecord[kPyEntry[static_cast<size_t>(kPyBlock[c >> 7]) * 128 + (c & 127)]];
+}
+bool pyIs(uint32_t c, uint8_t flag) { return (pyRecord(c).flags & flag) != 0; }
+// CPython's lowercase of a character (_sre.unicode_tolower).
+uint32_t pyLower(uint32_t c) { return c > 0x10FFFF ? c : static_cast<uint32_t>(static_cast<int64_t>(c) + pyRecord(c).lower); }
+// The one form of the characters that are the same without case, as CPython's re compares them:
+// the lowercase, with the lowercase letters that share an uppercase one (re._casefix) as one.
+uint32_t pyForm(uint32_t c) { return c > 0x10FFFF ? c : static_cast<uint32_t>(static_cast<int64_t>(c) + pyRecord(c).form); }
+// The characters of the form `form` where they are more than one: [first, last).
+std::pair<const uint32_t (*)[2], const uint32_t (*)[2]> pyCaseGroup(uint32_t form) {
+    const auto* begin = std::begin(kPyCaseGroup);
+    const auto* end = std::end(kPyCaseGroup);
+    const auto* lo = std::lower_bound(begin, end, form, [](const uint32_t(&e)[2], uint32_t f) { return e[0] < f; });
+    const auto* hi = lo;
+    while (hi != end && (*hi)[0] == form) hi++;
+    return {lo, hi};
+}
+// Whether a character has another case to Python's re.
+bool pyCased(uint32_t c) {
+    const auto [lo, hi] = pyCaseGroup(pyForm(c));
+    return lo != hi;
+}
+
 // The classes a pattern names: \d, \p{Lu} and the like, each a test of one character.
 enum class Pred : uint8_t {
     AsciiDigit, AsciiWord, AsciiSpace, HSpace, VSpace,
@@ -148,6 +178,7 @@ enum class Pred : uint8_t {
     Letter, Upper, Lower, TitleOrModifier, OtherLetter, Mark, Digit, Punct, Symbol, Separator, SpaceSeparator, LineSeparator,
     ParagraphSeparator, Control, Surrogate, PrivateUse, Unassigned, Format, Any, Whitespace, LetterOrDigit, Alphabetic,
     UnicodeWord,
+    PyWord, PyDecimal, PySpace,  // Python's \w, \d and \s on str: str.isalnum() or _, str.isdecimal(), str.isspace()
 };
 
 bool test(Pred p, uint32_t c) {
@@ -205,6 +236,9 @@ bool test(Pred p, uint32_t c) {
         case Pred::LetterOrDigit: return (kindsOf(c) & (kLetter | kDigit)) != 0;
         case Pred::Alphabetic: return (kindsOf(c) & kLetter) != 0;
         case Pred::UnicodeWord: return (kindsOf(c) & (kLetter | kDigit | kMark)) != 0 || c == '_' || c == 0x200C || c == 0x200D;
+        case Pred::PyWord: return pyIs(c, kPyWord);
+        case Pred::PyDecimal: return pyIs(c, kPyDecimal);
+        case Pred::PySpace: return pyIs(c, kPySpace);
     }
     return false;
 }
@@ -246,6 +280,9 @@ enum class Op : uint8_t {
     // Jmp would take three instructions and an entry for each character ([^"]* over a long
     // attribute's value, say).
     Run,
+    // Python's: a character the same as `c` without case (c its form, pyForm); and on to the next
+    // instruction where group `a` has matched, else to `b` ((?(1)yes|no)).
+    CharFoldPy, IfGroup,
 };
 
 struct Inst {
@@ -265,7 +302,7 @@ struct Program {
     std::vector<Inst> code;
     std::vector<ClassNode> classes;
     std::vector<std::array<uint64_t, 2>> asciiBits;  // for each class: which ASCII characters are in it
-    std::vector<uint8_t> classFold;  // 0 case counts, 1 ASCII letters either case, 2 every letter
+    std::vector<uint8_t> classFold;  // 0 case counts, 1 ASCII letters either case, 2 every letter, 3 as Python's re (IN_UNI_IGNORE)
     int start = 0;
     int groups = 0;  // capturing groups
     int loops = 0;   // registers for loops that may match nothing
@@ -281,6 +318,11 @@ struct Program {
     bool anchored = false;
     bool hasFirst = false;
     uint32_t first = 0;
+    // Python's syntax: its flags as CPython gives them, and the slot after the groups' that holds
+    // the number of the group closed last.
+    bool python = false;
+    int pyFlags = 0;
+    int lastSlot = -1;
 };
 
 namespace {
@@ -313,11 +355,36 @@ bool inClassRaw(const Program& p, int index, uint32_t c) {
     return n.negated ? !in : in;
 }
 
+// A class of Python's without case, as CPython's IN_UNI_IGNORE tests it: its tests on the
+// character's lowercase, its characters and ranges holding one of those the same as it without case.
+bool inClassPy(const Program& p, int index, uint32_t c) {
+    const ClassNode& n = p.classes[static_cast<size_t>(index)];
+    const auto holds = [&](uint32_t x) {
+        for (const auto& [lo, hi] : n.ranges)
+            if (x >= lo && x <= hi) return true;
+        return false;
+    };
+    const uint32_t lower = pyLower(c);
+    bool in = holds(c) || holds(lower);
+    if (!in) {
+        const auto [first, last] = pyCaseGroup(pyForm(c));
+        for (auto e = first; e != last && !in; e++) in = holds((*e)[1]);
+    }
+    if (!in)
+        for (const auto& [pred, opposite] : n.preds)
+            if (test(pred, lower) != opposite) {
+                in = true;
+                break;
+            }
+    return n.negated ? !in : in;
+}
+
 bool inClass(const Program& p, int index, uint32_t c) {
     if (c < 128) {
         const auto& bits = p.asciiBits[static_cast<size_t>(index)];
         return (bits[c >> 6] >> (c & 63)) & 1;
     }
+    if (p.classFold[static_cast<size_t>(index)] == 3) return inClassPy(p, index, c);
     if (inClassRaw(p, index, c)) return true;
     if (p.classFold[static_cast<size_t>(index)] != 2) return false;  // past ASCII only Unicode case folds
     const uint32_t u = upperOf(c), l = lowerOf(c);
@@ -327,13 +394,17 @@ bool inClass(const Program& p, int index, uint32_t c) {
 // ---- Parsing ----
 
 struct Node {
-    enum Kind { Empty, Char, Class, Dot, Assert, Group, Concat, Alt, Repeat, BackRef, Look, Atomic };
+    // Cond: Python's (?(group)yes|no), kids {yes, no}, no -1 where there is none.
+    enum Kind { Empty, Char, Class, Dot, Assert, Group, Concat, Alt, Repeat, BackRef, Look, Atomic, Cond };
     explicit Node(Kind k) : kind(k) {}
     Kind kind;
     uint32_t c = 0;
     bool fold = false;       // Char: compared by its Unicode fold
     bool asciiFold = false;  // Char: an ASCII letter in either case
-    int foldMode = 0;        // BackRef: 0 case counts, 1 ASCII, 2 Unicode
+    bool pyFold = false;     // Char: compared as Python's re does without case (c is its form)
+    int foldMode = 0;        // BackRef: 0 case counts, 1 ASCII, 2 Unicode, 3 Python's lowercase
+    int variant = 0;         // Assert: 1 for Python's (LineStart: after any \n, the end too; boundaries: Unicode's words)
+    int64_t behindWidth = -1;  // Look behind, Python's: how far back it starts, its fixed width
     bool dotAll = false, unixLines = false;
     Op assertOp = Op::Begin;
     int group = -1;            // Group: its number, or -1; BackRef: the group
@@ -353,6 +424,7 @@ public:
     }
 
     int parse() {
+        if (flags_ & kPython) return pyParseAll();
         if (flags_ & kLiteral) {
             const int seq = add(Node{Node::Concat});
             for (char32_t ch : s_) {
@@ -1043,6 +1115,805 @@ private:
         depth_ = depthBefore;
         return self;
     }
+
+    // ---- Python's syntax, after CPython's re/_parser.py ----
+    // Read as CPython reads a pattern, step for step, so that a pattern that is none fails with
+    // CPython's words at CPython's place, the first of its mistakes CPython finds. Its tokens are
+    // a character, or a backslash and the character after it.
+
+    struct PyTok {
+        char32_t a = 0, b = 0;
+        int len = 0;  // 0: the end of the pattern
+        bool is(char32_t c) const { return len == 1 && a == c; }
+        bool none() const { return len == 0; }
+    };
+    PyTok tn_;          // the next token
+    size_t ti_ = 0;     // where the one after it starts
+    int pyFlags_ = 0;   // CPython's flags where the parser is
+    bool bytes_ = false;
+    int lookbehindGroups_ = -1;                                 // state.lookbehindgroups, -1 for None
+    std::vector<std::pair<uint64_t, uint64_t>> groupWidths_{{0, 0}};  // each closed group's width
+    std::vector<bool> groupClosed_{false};
+    std::vector<std::pair<int64_t, int>> groupRefPos_;          // (?(n)...): n, and where it was written
+
+    static std::string utf8Of(const std::u32string& s) {
+        std::string out;
+        for (char32_t ch : s) appendUtf8(out, static_cast<uint32_t>(ch));
+        return out;
+    }
+    static std::string tokText(const PyTok& t) {
+        std::u32string s;
+        if (t.len >= 1) s.push_back(t.a);
+        if (t.len == 2) s.push_back(t.b);
+        return utf8Of(s);
+    }
+
+    void tAdvance() {
+        size_t index = ti_;
+        if (index >= s_.size()) {
+            tn_ = PyTok{};
+            return;
+        }
+        PyTok t;
+        t.a = s_[index];
+        t.len = 1;
+        if (t.a == '\\') {
+            index++;
+            if (index >= s_.size()) pyFailAt("bad escape (end of pattern)", static_cast<int>(s_.size()) - 1);
+            t.b = s_[index];
+            t.len = 2;
+        }
+        ti_ = index + 1;
+        tn_ = t;
+    }
+    int tTell() const { return static_cast<int>(ti_) - tn_.len; }
+    bool tMatch(char32_t c) {
+        if (!tn_.is(c)) return false;
+        tAdvance();
+        return true;
+    }
+    PyTok tGet() {
+        const PyTok t = tn_;
+        tAdvance();
+        return t;
+    }
+    void tSeek(int index) {
+        ti_ = static_cast<size_t>(index);
+        tAdvance();
+    }
+    std::u32string tGetWhile(int n, bool (*in)(char32_t)) {
+        std::u32string out;
+        for (int k = 0; k < n; k++) {
+            if (tn_.len != 1 || !in(tn_.a)) break;
+            out.push_back(tn_.a);
+            tAdvance();
+        }
+        return out;
+    }
+    std::u32string tGetUntil(char32_t terminator, const std::string& name) {
+        std::u32string out;
+        for (;;) {
+            const PyTok c = tGet();
+            if (c.none()) {
+                if (out.empty()) pyErr("missing " + name);
+                pyErr("missing " + utf8Of(std::u32string(1, terminator)) + ", unterminated name", static_cast<int>(out.size()));
+            }
+            if (c.is(terminator)) {
+                if (out.empty()) pyErr("missing " + name, 1);
+                break;
+            }
+            out.push_back(c.a);
+            if (c.len == 2) out.push_back(c.b);
+        }
+        return out;
+    }
+
+    [[noreturn]] void pyFailAt(const std::string& msg, int at, int kind = 0, std::u32string arg = {}) {
+        SyntaxError e(msg, at, utf8_);
+        e.kind = kind;
+        e.arg = std::move(arg);
+        throw e;
+    }
+    [[noreturn]] void pyErr(const std::string& msg, int offset = 0, std::u32string arg = {}) { pyFailAt(msg, tTell() - offset, 0, std::move(arg)); }
+
+    static bool isDigit(char32_t c) { return c >= '0' && c <= '9'; }
+    static bool isOctal(char32_t c) { return c >= '0' && c <= '7'; }
+    static bool isHex(char32_t c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+    static bool isAsciiLetter(char32_t c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+    static bool isAscii(const std::u32string& s) {
+        for (char32_t c : s)
+            if (c >= 0x80) return false;
+        return true;
+    }
+    static bool isIdentifier(const std::u32string& s) {
+        if (s.empty() || !pyIs(static_cast<uint32_t>(s[0]), kPyIdStart)) return false;
+        for (size_t k = 1; k < s.size(); k++)
+            if (!pyIs(static_cast<uint32_t>(s[k]), kPyIdContinue)) return false;
+        return true;
+    }
+    static bool isAsciiDecimal(const std::u32string& s) {
+        if (s.empty()) return false;
+        for (char32_t c : s)
+            if (!isDigit(c)) return false;
+        return true;
+    }
+    // A number of digits as CPython's int() and %d give it: its digits without leading zeros.
+    static std::string digitsOf(const std::u32string& s) {
+        size_t k = 0;
+        while (k + 1 < s.size() && s[k] == '0') k++;
+        return utf8Of(s.substr(k));
+    }
+    // Its value, or past `most` where it is more.
+    static uint64_t valueOf(const std::u32string& s, uint64_t most) {
+        uint64_t n = 0;
+        for (char32_t c : s) {
+            n = n * 10 + static_cast<uint64_t>(c - '0');
+            if (n > most) return most + 1;
+        }
+        return n;
+    }
+
+    void checkGroupName(const std::u32string& name, int offset) {
+        if (bytes_ && !isAscii(name)) pyErr("bad character in group name " WW_PY_ASCII, static_cast<int>(name.size()) + offset, name);
+        if (!isIdentifier(name)) pyErr("bad character in group name " WW_PY_REPR, static_cast<int>(name.size()) + offset, name);
+    }
+    bool checkGroup(int64_t gid) const {
+        return gid < static_cast<int64_t>(groupClosed_.size()) && groupClosed_[static_cast<size_t>(gid)];
+    }
+    void checkLookbehindGroup(int64_t gid) {
+        if (lookbehindGroups_ < 0) return;
+        if (!checkGroup(gid)) pyErr("cannot refer to an open group");
+        if (gid >= lookbehindGroups_) pyErr("cannot refer to group defined in the same lookbehind subpattern");
+    }
+
+    // Python's flags turned into the parser's.
+    void pySetFlags(int f) {
+        pyFlags_ = f;
+        uint32_t out = kPython | kUnixLines | (bytes_ ? kPyBytes : 0);
+        if (f & kPyIgnoreCase) out |= kCaseInsensitive;
+        if (f & kPyMultiline) out |= kMultiline;
+        if (f & kPyDotAll) out |= kDotAll;
+        if (f & kPyVerbose) out |= kComments;
+        flags_ = out;
+    }
+    // Whether classes and case are Unicode's: a str pattern without re.ASCII or re.LOCALE.
+    bool pyUnicode() const { return !bytes_ && !(pyFlags_ & (kPyAscii | kPyLocale)); }
+
+    int pyChar(uint32_t c) {
+        Node n{Node::Char};
+        n.c = c;
+        if (flags_ & kCaseInsensitive) {
+            if (pyUnicode()) {
+                if (pyCased(c)) {
+                    n.pyFold = true;
+                    n.c = pyForm(c);
+                }
+            } else if (isAsciiLetter(static_cast<char32_t>(c))) {
+                n.asciiFold = true;
+                n.c = c | 0x20;
+            }
+        }
+        return add(n);
+    }
+    int pyAssert(Op op, int variant = 0) {
+        Node n{Node::Assert};
+        n.assertOp = op;
+        n.unixLines = true;
+        n.variant = variant;
+        return add(n);
+    }
+    // \d, \s, \w and their opposites as tests.
+    std::pair<Pred, bool> pyCategory(char32_t c) {
+        const bool u = pyUnicode();
+        switch (c) {
+            case 'd': return {u ? Pred::PyDecimal : Pred::AsciiDigit, false};
+            case 'D': return {u ? Pred::PyDecimal : Pred::AsciiDigit, true};
+            case 's': return {u ? Pred::PySpace : Pred::AsciiSpace, false};
+            case 'S': return {u ? Pred::PySpace : Pred::AsciiSpace, true};
+            case 'w': return {u ? Pred::PyWord : Pred::AsciiWord, false};
+            default: return {u ? Pred::PyWord : Pred::AsciiWord, true};
+        }
+    }
+    int pyClassNode(ClassNode c, bool cased) {
+        p_.classes.push_back(std::move(c));
+        uint8_t fold = 0;
+        if (flags_ & kCaseInsensitive) fold = pyUnicode() ? (cased ? 3 : 0) : 1;
+        p_.classFold.push_back(fold);
+        Node n{Node::Class};
+        n.cls = static_cast<int>(p_.classes.size()) - 1;
+        return add(n);
+    }
+
+    // What an item of a class is: a character, or a category (\d...).
+    struct PyItem {
+        bool category = false;
+        uint32_t c = 0;
+        std::pair<Pred, bool> pred{Pred::Any, false};
+    };
+
+    // \x, \u, \U, \N and octal escapes, the same in and out of a class: true where `escape` was one.
+    bool pyNumberEscape(std::u32string& escape, uint32_t& out) {
+        const char32_t c = escape[1];
+        auto hex = [&](int digits) {
+            escape += tGetWhile(digits, isHex);
+            if (static_cast<int>(escape.size()) != digits + 2) pyErr("incomplete escape " + utf8Of(escape), static_cast<int>(escape.size()));
+            uint64_t n = 0;
+            for (size_t k = 2; k < escape.size(); k++) {
+                const char32_t d = escape[k];
+                n = n * 16 + static_cast<uint64_t>(d <= '9' ? d - '0' : (d | 0x20) - 'a' + 10);
+            }
+            if (n > 0x10FFFF) pyErr("bad escape " + utf8Of(escape), static_cast<int>(escape.size()));  // chr() refuses it
+            out = static_cast<uint32_t>(n);
+        };
+        if (c == 'x') {
+            hex(2);
+            return true;
+        }
+        if (c == 'u' && !bytes_) {
+            hex(4);
+            return true;
+        }
+        if (c == 'U' && !bytes_) {
+            hex(8);
+            return true;
+        }
+        if (c == 'N' && !bytes_) {
+            if (!tMatch('{')) pyErr("missing {");
+            const std::u32string name = tGetUntil('}', "character name");
+            // The names of characters come with unicodedata's (Snippy 5.3, step 5).
+            pyErr("undefined character name " WW_PY_REPR,static_cast<int>(name.size()) + 4, name);
+        }
+        return false;
+    }
+
+    PyItem pyClassEscape(const PyTok& t) {
+        std::u32string escape{t.a, t.b};
+        const char32_t c = t.b;
+        PyItem item;
+        switch (c) {
+            case 'a': item.c = 7; return item;
+            case 'b': item.c = 8; return item;
+            case 'f': item.c = '\f'; return item;
+            case 'n': item.c = '\n'; return item;
+            case 'r': item.c = '\r'; return item;
+            case 't': item.c = '\t'; return item;
+            case 'v': item.c = 0x0B; return item;
+            case '\\': item.c = '\\'; return item;
+            case 'd': case 'D': case 's': case 'S': case 'w': case 'W':
+                item.category = true;
+                item.pred = pyCategory(c);
+                return item;
+            default: break;
+        }
+        uint32_t value;
+        if (pyNumberEscape(escape, value)) {
+            item.c = value;
+            return item;
+        }
+        if (isOctal(c)) {
+            escape += tGetWhile(2, isOctal);
+            uint32_t n = 0;
+            for (size_t k = 1; k < escape.size(); k++) n = n * 8 + static_cast<uint32_t>(escape[k] - '0');
+            if (n > 0377) pyErr("octal escape value " + utf8Of(escape) + " outside of range 0-0o377", static_cast<int>(escape.size()));
+            item.c = n;
+            return item;
+        }
+        if (isDigit(c) || isAsciiLetter(c)) pyErr("bad escape " + utf8Of(escape), static_cast<int>(escape.size()));
+        item.c = static_cast<uint32_t>(c);
+        return item;
+    }
+
+    int pyEscape(const PyTok& t) {
+        std::u32string escape{t.a, t.b};
+        const char32_t c = t.b;
+        switch (c) {
+            case 'A': return pyAssert(Op::Begin);
+            case 'b': return pyAssert(Op::WordBoundary, pyUnicode() ? 1 : 0);
+            case 'B': return pyAssert(Op::NotWordBoundary, pyUnicode() ? 1 : 0);
+            case 'z': case 'Z': return pyAssert(Op::End);
+            case 'd': case 'D': case 's': case 'S': case 'w': case 'W': {
+                ClassNode cls;
+                cls.preds.push_back(pyCategory(c));
+                return pyClassNode(std::move(cls), false);
+            }
+            case 'a': return pyChar(7);
+            case 'f': return pyChar('\f');
+            case 'n': return pyChar('\n');
+            case 'r': return pyChar('\r');
+            case 't': return pyChar('\t');
+            case 'v': return pyChar(0x0B);
+            case '\\': return pyChar('\\');
+            default: break;
+        }
+        uint32_t value;
+        if (pyNumberEscape(escape, value)) return pyChar(value);
+        if (c == '0') {
+            escape += tGetWhile(2, isOctal);
+            uint32_t n = 0;
+            for (size_t k = 1; k < escape.size(); k++) n = n * 8 + static_cast<uint32_t>(escape[k] - '0');
+            return pyChar(n);
+        }
+        if (isDigit(c)) {
+            // An octal escape, or the number of a group.
+            if (tn_.len == 1 && isDigit(tn_.a)) {
+                escape.push_back(tGet().a);
+                if (isOctal(escape[1]) && isOctal(escape[2]) && tn_.len == 1 && isOctal(tn_.a)) {
+                    escape.push_back(tGet().a);
+                    const uint32_t n = static_cast<uint32_t>((escape[1] - '0') * 64 + (escape[2] - '0') * 8 + (escape[3] - '0'));
+                    if (n > 0377) pyErr("octal escape value " + utf8Of(escape) + " outside of range 0-0o377", static_cast<int>(escape.size()));
+                    return pyChar(n);
+                }
+            }
+            const int64_t group = static_cast<int64_t>(valueOf(escape.substr(1), 1000));
+            if (group < p_.groups + 1) {
+                if (!checkGroup(group)) pyErr("cannot refer to an open group", static_cast<int>(escape.size()));
+                checkLookbehindGroup(group);
+                return pyBackRef(static_cast<int>(group));
+            }
+            pyErr("invalid group reference " + digitsOf(escape.substr(1)), static_cast<int>(escape.size()) - 1);
+        }
+        if (isAsciiLetter(c)) pyErr("bad escape " + utf8Of(escape), static_cast<int>(escape.size()));
+        return pyChar(static_cast<uint32_t>(c));
+    }
+
+    int pyBackRef(int group) {
+        Node ref{Node::BackRef};
+        ref.group = group;
+        if (flags_ & kCaseInsensitive) ref.foldMode = pyUnicode() ? 3 : 1;
+        return add(ref);
+    }
+
+    // _parse_sub: a|b|c.
+    int pySub(bool verbose, int nested) {
+        const Nest nest(*this, static_cast<size_t>(tTell()));
+        std::vector<int> items;
+        for (;;) {
+            items.push_back(pyParse(verbose, nested + 1, nested == 0 && items.empty()));
+            if (!tMatch('|')) break;
+            if (nested == 0) verbose = (pyFlags_ & kPyVerbose) != 0;
+        }
+        if (items.size() == 1) return items[0];
+        Node alt{Node::Alt};
+        alt.kids = items;
+        return add(alt);
+    }
+
+    // _parse: the items of one branch.
+    int pyParse(bool verbose, int nested, bool first) {
+        std::vector<int> items;
+        for (;;) {
+            if (tn_.none() || tn_.is('|') || tn_.is(')')) break;
+            const PyTok t = tGet();
+            if (verbose) {
+                if (t.len == 1 && (t.a == ' ' || t.a == '\t' || t.a == '\n' || t.a == '\r' || t.a == 0x0B || t.a == '\f')) continue;
+                if (t.is('#')) {
+                    for (;;) {
+                        const PyTok x = tGet();
+                        if (x.none() || x.is('\n')) break;
+                    }
+                    continue;
+                }
+            }
+            if (t.len == 2) {
+                items.push_back(pyEscape(t));
+                continue;
+            }
+            const char32_t c = t.a;
+            switch (c) {
+                case '[': items.push_back(pyClass()); continue;
+                case '*': case '+': case '?': case '{': {
+                    const int here = tTell();
+                    int64_t min = 0, max = -1;  // -1: no end (MAXREPEAT)
+                    if (c == '?') {
+                        max = 1;
+                    } else if (c == '+') {
+                        min = 1;
+                    } else if (c == '{') {
+                        if (tn_.is('}')) {
+                            items.push_back(pyChar('{'));
+                            continue;
+                        }
+                        std::u32string lo, hi;
+                        while (tn_.len == 1 && isDigit(tn_.a)) lo.push_back(tGet().a);
+                        if (tMatch(',')) {
+                            while (tn_.len == 1 && isDigit(tn_.a)) hi.push_back(tGet().a);
+                        } else {
+                            hi = lo;
+                        }
+                        if (!tMatch('}')) {
+                            items.push_back(pyChar('{'));
+                            tSeek(here);
+                            continue;
+                        }
+                        constexpr uint64_t kMaxRepeat = 4294967295u;
+                        if (!lo.empty()) {
+                            const uint64_t v = valueOf(lo, kMaxRepeat);
+                            if (v >= kMaxRepeat) pyFailAt("the repetition number is too large", -1, 1);
+                            min = static_cast<int64_t>(v);
+                        }
+                        if (!hi.empty()) {
+                            const uint64_t v = valueOf(hi, kMaxRepeat);
+                            if (v >= kMaxRepeat) pyFailAt("the repetition number is too large", -1, 1);
+                            max = static_cast<int64_t>(v);
+                            if (max < min) pyErr("min repeat greater than max repeat", tTell() - here);
+                        }
+                    }
+                    if (items.empty() || nodes_[static_cast<size_t>(items.back())].kind == Node::Assert)
+                        pyErr("nothing to repeat", tTell() - here + 1);
+                    if (nodes_[static_cast<size_t>(items.back())].kind == Node::Repeat) pyErr("multiple repeat", tTell() - here + 1);
+                    Node rep{Node::Repeat};
+                    rep.kids = {items.back()};
+                    // Past what the engine can count, the pattern is too large to compile anyway.
+                    rep.min = static_cast<int>(std::min<int64_t>(min, INT32_MAX));
+                    rep.max = max < 0 ? -1 : static_cast<int>(std::min<int64_t>(max, INT32_MAX));
+                    if (tMatch('?')) rep.greed = Node::Lazy;
+                    else if (tMatch('+')) rep.greed = Node::Possessive;
+                    items.back() = add(rep);
+                    continue;
+                }
+                case '.': {
+                    Node n{Node::Dot};
+                    n.dotAll = (flags_ & kDotAll) != 0;
+                    n.unixLines = true;
+                    items.push_back(add(n));
+                    continue;
+                }
+                case '(': {
+                    const int g = pyGroup(verbose, nested, first, items.empty());
+                    if (g == -2) {
+                        verbose = (pyFlags_ & kPyVerbose) != 0;  // global flags: (?x) at the start
+                        continue;
+                    }
+                    if (g >= 0) items.push_back(g);
+                    continue;
+                }
+                case '^': items.push_back(pyAssert((flags_ & kMultiline) ? Op::LineStart : Op::Begin, 1)); continue;
+                case '$': items.push_back(pyAssert((flags_ & kMultiline) ? Op::LineEnd : Op::EndFinal)); continue;
+                default: items.push_back(pyChar(static_cast<uint32_t>(c))); continue;
+            }
+        }
+        Node seq{Node::Concat};
+        seq.kids = std::move(items);
+        return add(seq);
+    }
+
+    // After "[": the class, or the one character it holds.
+    int pyClass() {
+        const int here = tTell() - 1;
+        std::vector<PyItem> items;
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;
+        const bool negate = tMatch('^');
+        size_t count = 0;  // items and ranges
+        for (;;) {
+            const PyTok t = tGet();
+            if (t.none()) pyErr("unterminated character set", tTell() - here);
+            if (t.is(']') && count > 0) break;
+            const PyItem one = t.len == 2 ? pyClassEscape(t) : PyItem{false, static_cast<uint32_t>(t.a), {Pred::Any, false}};
+            if (tMatch('-')) {
+                const PyTok that = tGet();
+                if (that.none()) pyErr("unterminated character set", tTell() - here);
+                if (that.is(']')) {
+                    items.push_back(one);
+                    items.push_back(PyItem{false, '-', {Pred::Any, false}});
+                    count += 2;
+                    break;
+                }
+                const PyItem two = that.len == 2 ? pyClassEscape(that) : PyItem{false, static_cast<uint32_t>(that.a), {Pred::Any, false}};
+                const std::string range = "bad character range " + tokText(t) + "-" + tokText(that);
+                if (one.category || two.category || two.c < one.c) pyErr(range, t.len + 1 + that.len);
+                ranges.push_back({one.c, two.c});
+                count++;
+            } else {
+                items.push_back(one);
+                count++;
+            }
+        }
+        if (!negate && ranges.empty() && items.size() >= 1 && !items[0].category) {
+            bool same = true;  // one character, written once or more
+            for (const PyItem& i : items) same = same && !i.category && i.c == items[0].c;
+            if (same) return pyChar(items[0].c);
+        }
+        ClassNode cls;
+        cls.negated = negate;
+        bool cased = false;
+        for (const PyItem& i : items) {
+            if (i.category) {
+                cls.preds.push_back(i.pred);
+            } else {
+                cls.ranges.push_back({i.c, i.c});
+                cased = cased || pyCased(i.c);
+            }
+        }
+        for (const auto& r : ranges) {
+            cls.ranges.push_back(r);
+            if (!cased && (flags_ & kCaseInsensitive) && pyUnicode()) {
+                if (r.second - r.first < 0x400) {
+                    for (uint32_t x = r.first; x <= r.second && !cased; x++) cased = pyCased(x);
+                } else {
+                    for (const auto& e : kPyCaseGroup) cased = cased || (e[1] >= r.first && e[1] <= r.second);
+                }
+            }
+        }
+        return pyClassNode(std::move(cls), cased);
+    }
+
+    // _parse_flags, after "(?" and its first character: true for flags of the whole pattern ((?i)),
+    // else the flags turned on and off for a group's part ((?i:...), (?-i:...)).
+    bool pyParseFlags(PyTok ch, int& add, int& del) {
+        auto flagOf = [](const PyTok& t) -> int {
+            if (t.len != 1) return 0;
+            switch (t.a) {
+                case 'i': return kPyIgnoreCase;
+                case 'L': return kPyLocale;
+                case 'm': return kPyMultiline;
+                case 's': return kPyDotAll;
+                case 'x': return kPyVerbose;
+                case 'a': return kPyAscii;
+                case 'u': return kPyUnicode;
+                default: return 0;
+            }
+        };
+        auto alpha = [](const PyTok& t) { return t.len == 1 && pyIs(static_cast<uint32_t>(t.a), kPyAlpha); };
+        constexpr int kType = kPyAscii | kPyLocale | kPyUnicode;
+        add = del = 0;
+        if (!ch.is('-')) {
+            for (;;) {
+                const int flag = flagOf(ch);
+                if (!bytes_) {
+                    if (ch.is('L')) pyErr("bad inline flags: cannot use 'L' flag with a str pattern");
+                } else {
+                    if (ch.is('u')) pyErr("bad inline flags: cannot use 'u' flag with a bytes pattern");
+                }
+                add |= flag;
+                if ((flag & kType) && (add & kType) != flag) pyErr("bad inline flags: flags 'a', 'u' and 'L' are incompatible");
+                ch = tGet();
+                if (ch.none()) pyErr("missing -, : or )");
+                if (ch.is(')') || ch.is('-') || ch.is(':')) break;
+                if (!flagOf(ch)) pyErr(alpha(ch) ? "unknown flag" : "missing -, : or )", ch.len);
+            }
+        }
+        if (ch.is(')')) {
+            pySetFlags(pyFlags_ | add);
+            return true;
+        }
+        if (ch.is('-')) {
+            ch = tGet();
+            if (ch.none()) pyErr("missing flag");
+            if (!flagOf(ch)) pyErr(alpha(ch) ? "unknown flag" : "missing flag", ch.len);
+            for (;;) {
+                const int flag = flagOf(ch);
+                if (flag & kType) pyErr("bad inline flags: cannot turn off flags 'a', 'u' and 'L'");
+                del |= flag;
+                ch = tGet();
+                if (ch.none()) pyErr("missing :");
+                if (ch.is(':')) break;
+                if (!flagOf(ch)) pyErr(alpha(ch) ? "unknown flag" : "missing :", ch.len);
+            }
+        }
+        if (add & del) pyErr("bad inline flags: flag turned on and off", 1);
+        return false;
+    }
+
+    // After "(": the group's node, -1 for nothing ((?#...)), -2 for flags of the whole pattern.
+    int pyGroup(bool verbose, int nested, bool first, bool nothingYet) {
+        const int start = tTell() - 1;
+        bool capture = true, atomic = false;
+        bool named = false;
+        std::u32string name;
+        int addFlags = 0, delFlags = 0;
+        if (tMatch('?')) {
+            const PyTok ch = tGet();
+            if (ch.none()) pyErr("unexpected end of pattern");
+            if (ch.is('P')) {
+                if (tMatch('<')) {
+                    name = tGetUntil('>', "group name");
+                    checkGroupName(name, 1);
+                    named = true;
+                } else if (tMatch('=')) {
+                    name = tGetUntil(')', "group name");
+                    checkGroupName(name, 1);
+                    const auto found = p_.names.find(utf8Of(name));
+                    if (found == p_.names.end()) pyErr("unknown group name " WW_PY_REPR, static_cast<int>(name.size()) + 1, name);
+                    if (!checkGroup(found->second)) pyErr("cannot refer to an open group", static_cast<int>(name.size()) + 1);
+                    checkLookbehindGroup(found->second);
+                    return pyBackRef(found->second);
+                } else {
+                    const PyTok c = tGet();
+                    if (c.none()) pyErr("unexpected end of pattern");
+                    pyErr("unknown extension ?P" + tokText(c), c.len + 2);
+                }
+            } else if (ch.is(':')) {
+                capture = false;
+            } else if (ch.is('#')) {
+                for (;;) {
+                    if (tn_.none()) pyErr("missing ), unterminated comment", tTell() - start);
+                    if (tGet().is(')')) break;
+                }
+                return -1;
+            } else if (ch.is('=') || ch.is('!') || ch.is('<')) {
+                PyTok kind = ch;
+                bool behind = false;
+                const int before = lookbehindGroups_;
+                if (kind.is('<')) {
+                    kind = tGet();
+                    if (kind.none()) pyErr("unexpected end of pattern");
+                    if (!kind.is('=') && !kind.is('!')) pyErr("unknown extension ?<" + tokText(kind), kind.len + 2);
+                    behind = true;
+                    if (lookbehindGroups_ < 0) lookbehindGroups_ = p_.groups + 1;
+                }
+                const int body = pySub(verbose, nested + 1);
+                if (behind && before < 0) lookbehindGroups_ = -1;
+                if (!tMatch(')')) pyErr("missing ), unterminated subpattern", tTell() - start);
+                Node look{Node::Look};
+                look.kids = {body};
+                look.negative = kind.is('!');
+                look.behind = behind;
+                return add(look);
+            } else if (ch.is('(')) {
+                const std::u32string cond = tGetUntil(')', "group name");
+                int64_t group;
+                if (!isAsciiDecimal(cond)) {
+                    checkGroupName(cond, 1);
+                    const auto found = p_.names.find(utf8Of(cond));
+                    if (found == p_.names.end()) pyErr("unknown group name " WW_PY_REPR, static_cast<int>(cond.size()) + 1, cond);
+                    group = found->second;
+                } else {
+                    constexpr uint64_t kMaxGroups = 1073741823;
+                    const uint64_t v = valueOf(cond, kMaxGroups);
+                    if (v == 0) pyErr("bad group number", static_cast<int>(cond.size()) + 1);
+                    if (v >= kMaxGroups) pyErr("invalid group reference " + digitsOf(cond), static_cast<int>(cond.size()) + 1);
+                    group = static_cast<int64_t>(v);
+                    bool seen = false;
+                    for (const auto& r : groupRefPos_) seen = seen || r.first == group;
+                    if (!seen) groupRefPos_.push_back({group, tTell() - static_cast<int>(cond.size()) - 1});
+                }
+                checkLookbehindGroup(group);
+                const int yes = pyParse(verbose, nested + 1, false);
+                int no = -1;
+                if (tMatch('|')) {
+                    no = pyParse(verbose, nested + 1, false);
+                    if (tn_.is('|')) pyErr("conditional backref with more than two branches");
+                }
+                if (!tMatch(')')) pyErr("missing ), unterminated subpattern", tTell() - start);
+                Node c{Node::Cond};
+                c.group = static_cast<int>(group);
+                c.kids = {yes, no};
+                return add(c);
+            } else if (ch.is('>')) {
+                capture = false;
+                atomic = true;
+            } else if (ch.len == 1 && std::u32string(U"iLmsxau-").find(ch.a) != std::u32string::npos) {
+                if (pyParseFlags(ch, addFlags, delFlags)) {
+                    if (!first || !nothingYet) pyErr("global flags not at the start of the expression", tTell() - start);
+                    return -2;
+                }
+                capture = false;
+            } else {
+                pyErr("unknown extension ?" + tokText(ch), ch.len + 1);
+            }
+        }
+        int group = -1;
+        if (capture) {
+            group = p_.groups + 1;
+            if (named) {
+                const std::string key = utf8Of(name);
+                const auto had = p_.names.find(key);
+                if (had != p_.names.end())
+                    pyErr("redefinition of group name " WW_PY_REPR " as group " + std::to_string(group) + "; was group " + std::to_string(had->second),
+                          static_cast<int>(name.size()) + 1, name);
+                p_.names[key] = group;
+            }
+            p_.groups = group;
+            groupWidths_.push_back({0, 0});
+            groupClosed_.push_back(false);
+        }
+        const bool subVerbose = (verbose || (addFlags & kPyVerbose)) && !(delFlags & kPyVerbose);
+        const int saved = pyFlags_;
+        int inner = pyFlags_;
+        if (addFlags & (kPyAscii | kPyLocale | kPyUnicode)) inner &= ~(kPyAscii | kPyLocale | kPyUnicode);
+        pySetFlags((inner | addFlags) & ~delFlags);
+        const int body = pySub(subVerbose, nested + 1);
+        if (!tMatch(')')) pyErr("missing ), unterminated subpattern", tTell() - start);
+        pySetFlags(saved);
+        if (group >= 0) {
+            groupWidths_[static_cast<size_t>(group)] = pyWidth(body);
+            groupClosed_[static_cast<size_t>(group)] = true;
+        }
+        Node g{atomic ? Node::Atomic : Node::Group};
+        g.group = group;
+        g.kids = {body};
+        return add(g);
+    }
+
+    // SubPattern.getwidth: the fewest and most characters a part matches, as CPython counts them
+    // (its most 2**64, here UINT64_MAX, where there is no end).
+    std::pair<uint64_t, uint64_t> pyWidth(int i) const {
+        constexpr uint64_t kMost = UINT64_MAX;
+        auto plus = [](uint64_t a, uint64_t b) { return a > kMost - b ? kMost : a + b; };
+        auto times = [](uint64_t a, uint64_t b) { return a == 0 || b == 0 ? 0 : a > kMost / b ? kMost : a * b; };
+        const Node& n = nodes_[static_cast<size_t>(i)];
+        switch (n.kind) {
+            case Node::Char: case Node::Class: case Node::Dot: return {1, 1};
+            case Node::Empty: case Node::Assert: case Node::Look: return {0, 0};
+            case Node::BackRef: return groupWidths_[static_cast<size_t>(n.group)];
+            case Node::Group: case Node::Atomic: return pyWidth(n.kids[0]);
+            case Node::Concat: {
+                uint64_t lo = 0, hi = 0;
+                for (int k : n.kids) {
+                    const auto [a, b] = pyWidth(k);
+                    lo = plus(lo, a);
+                    hi = plus(hi, b);
+                }
+                return {lo, hi};
+            }
+            case Node::Alt: {
+                uint64_t lo = kMost, hi = 0;
+                for (int k : n.kids) {
+                    const auto [a, b] = pyWidth(k);
+                    lo = std::min(lo, a);
+                    hi = std::max(hi, b);
+                }
+                return {lo, hi};
+            }
+            case Node::Repeat: {
+                const auto [a, b] = pyWidth(n.kids[0]);
+                const uint64_t lo = times(a, static_cast<uint64_t>(n.min));
+                const uint64_t hi = n.max < 0 ? (b ? kMost : 0) : times(b, static_cast<uint64_t>(n.max));
+                return {lo, hi};
+            }
+            case Node::Cond: {
+                auto [a, b] = pyWidth(n.kids[0]);
+                if (n.kids[1] >= 0) {
+                    const auto [c, d] = pyWidth(n.kids[1]);
+                    a = std::min(a, c);
+                    b = std::max(b, d);
+                } else {
+                    a = 0;
+                }
+                return {a, b};
+            }
+        }
+        return {0, 0};
+    }
+
+    // What CPython's compiler refuses: a look-behind that is not of one width.
+    void pyCheckBehind(int i) {
+        Node& n = nodes_[static_cast<size_t>(i)];
+        if (n.kind == Node::Look && n.behind) {
+            const auto [lo, hi] = pyWidth(n.kids[0]);
+            if (lo > 0xFFFFFFFFu) pyFailAt("looks too much behind", -1);
+            if (lo != hi) pyFailAt("look-behind requires fixed-width pattern", -1);
+            nodes_[static_cast<size_t>(i)].behindWidth = static_cast<int64_t>(lo);
+        }
+        const std::vector<int> kids = nodes_[static_cast<size_t>(i)].kids;
+        for (int k : kids)
+            if (k >= 0) pyCheckBehind(k);
+    }
+
+    int pyParseAll() {
+        bytes_ = (flags_ & kPyBytes) != 0;
+        pySetFlags(static_cast<int>(flags_ >> kPyFlagsShift));
+        tAdvance();
+        const int root = pySub((pyFlags_ & kPyVerbose) != 0, 0);
+        // fix_flags
+        int f = pyFlags_;
+        if (!bytes_) {
+            if (f & kPyLocale) pyFailAt("cannot use LOCALE flag with a str pattern", -1, 2);
+            if (!(f & kPyAscii)) f |= kPyUnicode;
+            else if (f & kPyUnicode) pyFailAt("ASCII and UNICODE flags are incompatible", -1, 2);
+        } else {
+            if (f & kPyUnicode) pyFailAt("cannot use UNICODE flag with a bytes pattern", -1, 2);
+            if ((f & kPyLocale) && (f & kPyAscii)) pyFailAt("ASCII and LOCALE flags are incompatible", -1, 2);
+        }
+        if (!tn_.none()) pyErr("unbalanced parenthesis");
+        for (const auto& [g, at] : groupRefPos_)
+            if (g >= p_.groups + 1) pyFailAt("invalid group reference " + std::to_string(g), at);
+        pyCheckBehind(root);
+        p_.python = true;
+        p_.pyFlags = f;
+        p_.lastSlot = 2 * (p_.groups + 1);
+        return root;
+    }
 };
 
 // ---- Compiling ----
@@ -1057,6 +1928,7 @@ public:
             case Node::Char: case Node::Class: case Node::Dot: return false;
             case Node::Empty: case Node::Assert: case Node::Look: case Node::BackRef: return true;
             case Node::Group: case Node::Atomic: return canBeEmpty(n.kids[0]);
+            case Node::Cond: return canBeEmpty(n.kids[0]) || n.kids[1] < 0 || canBeEmpty(n.kids[1]);
             case Node::Concat:
                 for (int k : n.kids)
                     if (!canBeEmpty(k)) return false;
@@ -1078,6 +1950,14 @@ public:
             case Node::Empty: case Node::Assert: case Node::Look: lo = hi = 0; return;
             case Node::BackRef: lo = 0; hi = -1; return;
             case Node::Group: case Node::Atomic: lengths(n.kids[0], lo, hi); return;
+            case Node::Cond: {
+                lengths(n.kids[0], lo, hi);
+                int64_t a = 0, b = 0;
+                if (n.kids[1] >= 0) lengths(n.kids[1], a, b);
+                lo = std::min(lo, a);
+                hi = (hi < 0 || b < 0) ? -1 : std::max(hi, b);
+                return;
+            }
             case Node::Concat: {
                 lo = hi = 0;
                 for (int k : n.kids) {
@@ -1137,7 +2017,7 @@ public:
         switch (n.kind) {
             case Node::Empty: return;
             case Node::Char: {
-                Inst inst{n.fold ? Op::CharFold : n.asciiFold ? Op::CharFoldAscii : Op::Char};
+                Inst inst{n.pyFold ? Op::CharFoldPy : n.fold ? Op::CharFold : n.asciiFold ? Op::CharFoldAscii : Op::Char};
                 inst.c = n.c;
                 emit(inst);
                 return;
@@ -1157,6 +2037,7 @@ public:
             case Node::Assert: {
                 Inst inst{n.assertOp};
                 inst.flag = n.unixLines;
+                inst.c = static_cast<uint32_t>(n.variant);
                 emit(inst);
                 return;
             }
@@ -1211,7 +2092,10 @@ public:
                 Inst inst{Op::Look};
                 inst.flag = n.negative;
                 inst.behind = n.behind;
-                if (n.behind) {
+                if (n.behind && n.behindWidth >= 0) {
+                    // Python's: of one width, worked out as CPython does.
+                    inst.minLen = inst.maxLen = static_cast<int>(std::min<int64_t>(n.behindWidth, INT32_MAX));
+                } else if (n.behind) {
                     int64_t lo, hi;
                     lengths(n.kids[0], lo, hi);
                     inst.minLen = static_cast<int>(lo);
@@ -1225,6 +2109,22 @@ public:
                 Inst inst{Op::Atomic};
                 inst.a = sub(n.kids[0], false);
                 emit(inst);
+                return;
+            }
+            case Node::Cond: {
+                // IfGroup g, no; yes; jmp out; no: no; out:
+                Inst test{Op::IfGroup};
+                test.a = n.group;
+                const int at = emit(test);
+                compile(n.kids[0]);
+                if (n.kids[1] >= 0) {
+                    const int jump = emit(Inst{Op::Jmp});
+                    this->at(at).b = here();
+                    compile(n.kids[1]);
+                    this->at(jump).a = here();
+                } else {
+                    this->at(at).b = here();
+                }
                 return;
             }
             case Node::Repeat: {
@@ -1322,12 +2222,12 @@ public:
                 p_.splitNumber[static_cast<size_t>(pc)] = p_.splits;
                 p_.splits += 2;
             }
-            if (op == Op::BackRef) memo = false;
+            if (op == Op::BackRef || op == Op::IfGroup) memo = false;
         }
         // A back reference in a part's program counts too.
         for (const auto& body : pending_)
             for (const Inst& inst : body)
-                if (inst.op == Op::BackRef || inst.op == Op::LoopSet) memo = false;
+                if (inst.op == Op::BackRef || inst.op == Op::LoopSet || inst.op == Op::IfGroup) memo = false;
         p_.memo = memo && p_.splits > 0;
         for (size_t k = 0; k < pending_.size(); k++) {
             const int base = here();
@@ -1336,7 +2236,7 @@ public:
                 if (inst.op == Op::Split) {
                     inst.a += base;
                     inst.b += base;
-                } else if (inst.op == Op::LoopCheck) {
+                } else if (inst.op == Op::LoopCheck || inst.op == Op::IfGroup) {
                     inst.b += base;
                 } else if (inst.op == Op::Jmp) {
                     inst.a += base;
@@ -1362,7 +2262,7 @@ void firstOf(const std::vector<Node>& nodes, int i, Program& p) {
     const Node& n = nodes[static_cast<size_t>(i)];
     switch (n.kind) {
         case Node::Char:
-            if (!n.fold && !n.asciiFold) {
+            if (!n.fold && !n.asciiFold && !n.pyFold) {
                 p.hasFirst = true;
                 p.first = n.c;
             }
@@ -1413,8 +2313,9 @@ std::vector<Entry>& scratchStack() {
 
 class Runner {
 public:
-    Runner(const Program& p, const ObjString* s, std::vector<int64_t>& caps, size_t searchStart, const std::function<void()>* stop)
-        : p_(p), s_(s), n_(s->length), caps_(caps), regs_(static_cast<size_t>(p.loops + p.groups + 1), -1), stack_(scratchStack()), searchStart_(searchStart), stop_(stop) {}
+    Runner(const Program& p, const ObjString* s, std::vector<int64_t>& caps, size_t searchStart, const std::function<void()>* stop, size_t end = SIZE_MAX,
+           int64_t notEmptyAt = -1)
+        : p_(p), s_(s), n_(std::min(s->length, end)), notEmptyAt_(notEmptyAt), caps_(caps), regs_(static_cast<size_t>(p.loops + p.groups + 1), -1), stack_(scratchStack()), searchStart_(searchStart), stop_(stop) {}
 
     // Every 65,536 times a match backs out or starts a part, the caller is asked whether to stop
     // (it throws to stop): a pattern that backs out exponentially, such as (a*)*b, runs on until
@@ -1431,6 +2332,7 @@ public:
     // target, a look-behind's program, it must end there; with requireEnd, at the end of the input.
     bool run(int pc, int64_t pos, int64_t& end, int64_t target = -1, bool requireEnd = false) {
         poll();
+        if (depth_ == 0) start_ = pos;
         const size_t base = stack_.size();
         for (;;) {
             const Inst& inst = p_.code[static_cast<size_t>(pc)];
@@ -1444,6 +2346,15 @@ public:
                     ok = pos < static_cast<int64_t>(n_) && fold(s_->at(static_cast<size_t>(pos))) == inst.c;
                     if (ok) pos++, pc++;
                     break;
+                case Op::CharFoldPy:
+                    ok = pos < static_cast<int64_t>(n_) && pyForm(s_->at(static_cast<size_t>(pos))) == inst.c;
+                    if (ok) pos++, pc++;
+                    break;
+                case Op::IfGroup: {
+                    const int64_t from = caps_[static_cast<size_t>(2 * inst.a)], to = caps_[static_cast<size_t>(2 * inst.a + 1)];
+                    pc = from >= 0 && to >= from ? pc + 1 : inst.b;
+                    break;
+                }
                 case Op::CharFoldAscii: {
                     const uint32_t c = pos < static_cast<int64_t>(n_) ? s_->at(static_cast<size_t>(pos)) : 0;
                     ok = pos < static_cast<int64_t>(n_) && c < 0x80 && (c | 0x20) == inst.c;
@@ -1488,6 +2399,11 @@ public:
                         stack_.push_back(Entry{Entry::Capture, 0, caps_[static_cast<size_t>(inst.a)], inst.a});
                         caps_[static_cast<size_t>(start)] = regs_[static_cast<size_t>(p_.loops + start / 2)];
                         caps_[static_cast<size_t>(inst.a)] = pos;
+                        if (p_.lastSlot >= 0) {
+                            // Python's lastindex: the group closed last.
+                            stack_.push_back(Entry{Entry::Capture, 0, caps_[static_cast<size_t>(p_.lastSlot)], p_.lastSlot});
+                            caps_[static_cast<size_t>(p_.lastSlot)] = inst.a / 2;
+                        }
                     }
                     pc++;
                     break;
@@ -1501,7 +2417,8 @@ public:
                     pc = regs_[static_cast<size_t>(inst.a)] == pos ? inst.b : pc + 1;
                     break;
                 case Op::Match:
-                    if ((target >= 0 && pos != target) || (requireEnd && pos != static_cast<int64_t>(n_))) {
+                    if ((target >= 0 && pos != target) || (requireEnd && pos != static_cast<int64_t>(n_)) ||
+                        (depth_ == 0 && pos == notEmptyAt_ && start_ == notEmptyAt_)) {
                         ok = false;
                         break;
                     }
@@ -1560,7 +2477,8 @@ public:
                     if (ok) pc++;
                     break;
                 case Op::LineStart:
-                    ok = lineStart(pos, inst.flag);
+                    // Python's ^ in MULTILINE: at the start and after every \n, the end of the text too.
+                    ok = inst.c == 1 ? pos == 0 || ch(pos - 1) == '\n' : lineStart(pos, inst.flag);
                     if (ok) pc++;
                     break;
                 case Op::EndFinal:
@@ -1573,8 +2491,9 @@ public:
                     break;
                 case Op::WordBoundary:
                 case Op::NotWordBoundary: {
-                    const bool before = pos > 0 && isAsciiWord(s_->at(static_cast<size_t>(pos - 1)));
-                    const bool after = pos < static_cast<int64_t>(n_) && isAsciiWord(s_->at(static_cast<size_t>(pos)));
+                    const auto word = [&](uint32_t c) { return inst.c == 1 ? pyIs(c, kPyWord) : isAsciiWord(c); };
+                    const bool before = pos > 0 && word(s_->at(static_cast<size_t>(pos - 1)));
+                    const bool after = pos < static_cast<int64_t>(n_) && word(s_->at(static_cast<size_t>(pos)));
                     ok = (before != after) == (inst.op == Op::WordBoundary);
                     if (ok) pc++;
                     break;
@@ -1593,7 +2512,8 @@ public:
                     ok = pos + length <= static_cast<int64_t>(n_);
                     for (int64_t k = 0; ok && k < length; k++) {
                         const uint32_t a = s_->at(static_cast<size_t>(from + k)), b = s_->at(static_cast<size_t>(pos + k));
-                        if (inst.c == 2) ok = fold(a) == fold(b);
+                        if (inst.c == 3) ok = pyLower(a) == pyLower(b);
+                        else if (inst.c == 2) ok = fold(a) == fold(b);
                         else if (inst.c == 1) ok = a == b || (a < 0x80 && b < 0x80 && ((a | 0x20) == (b | 0x20)) && (a | 0x20) >= 'a' && (a | 0x20) <= 'z');
                         else ok = a == b;
                     }
@@ -1603,6 +2523,7 @@ public:
                 case Op::Look: {
                     const size_t mark = stack_.size();
                     bool found = false;
+                    depth_++;
                     if (!inst.behind) {
                         int64_t e;
                         found = run(inst.a, pos, e);
@@ -1613,6 +2534,7 @@ public:
                             found = run(inst.a, pos - k, e, pos);
                         }
                     }
+                    depth_--;
                     if (inst.flag) {
                         // Negative: what the part did is undone either way.
                         if (found) unwindTo(mark);
@@ -1627,7 +2549,9 @@ public:
                 case Op::Atomic: {
                     const size_t mark = stack_.size();
                     int64_t e;
+                    depth_++;
                     ok = run(inst.a, pos, e);
+                    depth_--;
                     if (ok) {
                         keepOnlyRestores(mark);
                         pos = e;
@@ -1717,6 +2641,7 @@ public:
             case Op::Char: return c == inst.c;
             case Op::CharFold: return fold(c) == inst.c;
             case Op::CharFoldAscii: return c < 0x80 && (c | 0x20) == inst.c;
+            case Op::CharFoldPy: return pyForm(c) == inst.c;
             case Op::AnyAll: return true;
             case Op::AnyLine: return !isLineTerminator(c, inst.flag);
             default: return inClass(p_, inst.a, c);
@@ -1740,6 +2665,9 @@ private:
     const Program& p_;
     const ObjString* s_;
     const size_t n_;
+    const int64_t notEmptyAt_;  // a match that starts here may not be empty
+    int64_t start_ = 0;         // where the match being tried starts
+    int depth_ = 0;             // inside how many look-arounds and atomic groups
     std::vector<int64_t>& caps_;
     std::vector<int64_t> regs_;
     std::vector<Entry>& stack_;
@@ -1847,6 +2775,10 @@ Pattern::Pattern(const std::u32string& pattern, uint32_t flags) : program_(std::
         if (!tested[k]) continue;
         std::array<uint64_t, 2> bits{0, 0};
         for (uint32_t c = 0; c < 128; c++) {
+            if (p.classFold[k] == 3) {
+                if (inClassPy(p, static_cast<int>(k), c)) bits[c >> 6] |= uint64_t{1} << (c & 63);
+                continue;
+            }
             bool in = inClassRaw(p, static_cast<int>(k), c);
             const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
             if (!in && p.classFold[k] != 0 && letter) {
@@ -1867,14 +2799,16 @@ Pattern::Pattern(const std::u32string& pattern, uint32_t flags) : program_(std::
 Pattern::~Pattern() = default;
 
 int Pattern::groupCount() const { return program_->groups; }
+int Pattern::pythonFlags() const { return program_->pyFlags; }
 const std::map<std::string, int>& Pattern::groupNames() const { return program_->names; }
 
-bool Pattern::match(const ObjString* text, size_t from, Mode mode, std::vector<int64_t>& groups, const std::function<void()>* stop) const {
+bool Pattern::match(const ObjString* text, size_t from, Mode mode, std::vector<int64_t>& groups, const std::function<void()>* stop, size_t end,
+                    int64_t notEmptyAt) const {
     const Program& p = *program_;
-    groups.assign(static_cast<size_t>(2 * (p.groups + 1)), -1);
-    const size_t n = text->length;
+    groups.assign(static_cast<size_t>(2 * (p.groups + 1) + (p.python ? 1 : 0)), -1);
+    const size_t n = std::min(text->length, end);
     if (from > n) return false;
-    Runner runner(p, text, groups, from, stop);
+    Runner runner(p, text, groups, from, stop, end, notEmptyAt);
     if (mode != Mode::Search) {
         int64_t end;
         if (!runner.run(p.start, static_cast<int64_t>(from), end, -1, mode == Mode::Entire)) return false;
