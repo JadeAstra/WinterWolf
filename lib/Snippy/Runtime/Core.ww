@@ -76,6 +76,8 @@ class PyObject(var cls : PyType) : PyIdentified() {
 // A Snippy class.
 class PyType(var name : string, var qualname : string, var module : string) : PyCallable() {
   op ==(other : any?) : bool => this === other
+  // Its name in messages where CPython's type is written in C with its module (part 5.3: 'datetime.date').
+  var cName : string? = null
   var bases : List<PyType> = []
   var mro : List<PyType> = []
   val dict : open Map<string, any?> = {:}

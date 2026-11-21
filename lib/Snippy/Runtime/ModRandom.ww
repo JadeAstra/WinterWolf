@@ -1,0 +1,567 @@
+import Snippy.Text.*
+import Crypto.*
+// random (the Snippy plan, part 5.3, step 3), in WinterWolf: CPython's Mersenne Twister
+// (_randommodule.c) with its seeding, and random.py's ways of making numbers into choices, each
+// drawing as many numbers as CPython's in the same order, so that a seeded program gives the same
+// results. Random is a Python class, which a program may subclass: one that gives its own
+// random() alone has _randbelow work from it, as CPython's __init_subclass__ arranges.
+
+// The generator's state: 624 words and where it is in them.
+class PyTwister : PyNative() {
+  val mt : open List<int> = []
+  var index = 625
+  init { for i in 0..<624 { mt.add(0) } }
+  override fun pyType() : PyType => pyObjectType
+  override fun call(name : string, a : PyArgs) : any? => null
+
+  fun initGenrand(s : int) {
+    mt[0] = s & 0xFFFFFFFF
+    for i in 1..<624 {
+      val prev = mt[i - 1]
+      mt[i] = (1812433253 * (prev ^ (prev >>> 30)) + i) & 0xFFFFFFFF
+    }
+    index = 624
+  }
+  fun initByArray(key : List<int>) {
+    initGenrand(19650218)
+    var i = 1
+    var j = 0
+    var k = 624 > key.size ? 624 : key.size
+    while (k > 0) {
+      val prev = mt[i - 1]
+      mt[i] = ((mt[i] ^ (((prev ^ (prev >>> 30)) * 1664525) & 0xFFFFFFFF)) + key[j] + j) & 0xFFFFFFFF
+      i += 1
+      j += 1
+      if (i >= 624) { mt[0] = mt[623]; i = 1 }
+      if (j >= key.size) { j = 0 }
+      k -= 1
+    }
+    k = 623
+    while (k > 0) {
+      val prev = mt[i - 1]
+      mt[i] = ((mt[i] ^ (((prev ^ (prev >>> 30)) * 1566083941) & 0xFFFFFFFF)) - i) & 0xFFFFFFFF
+      i += 1
+      if (i >= 624) { mt[0] = mt[623]; i = 1 }
+      k -= 1
+    }
+    mt[0] = 0x80000000
+  }
+  fun next32() : int {
+    if (index >= 624) {
+      for kk in 0..<624 {
+        val y = (mt[kk] & 0x80000000) | (mt[(kk + 1) % 624] & 0x7FFFFFFF)
+        mt[kk] = mt[(kk + 397) % 624] ^ (y >>> 1) ^ ((y & 1) != 0 ? 0x9908B0DF : 0)
+      }
+      index = 0
+    }
+    var y = mt[index]
+    index += 1
+    y = y ^ (y >>> 11)
+    y = y ^ ((y << 7) & 0x9D2C5680)
+    y = y ^ ((y << 15) & 0xEFC60000)
+    y = y ^ (y >>> 18)
+    return y & 0xFFFFFFFF
+  }
+  fun random() : float {
+    val a = next32() >>> 5
+    val b = next32() >>> 6
+    return (a.toFloat() * 67108864.0 + b.toFloat()) * (1.0 / 9007199254740992.0)
+  }
+  fun bits(k : int) : any? {
+    if (k == 0) { return 0 }
+    if (k <= 32) { return next32() >>> (32 - k) }
+    var r = BigInt.of(0)
+    var shift = 0
+    var left = k
+    while (left > 0) {
+      var w = next32()
+      if (left < 32) { w = w >>> (32 - left) }
+      r = r + (BigInt.of(w) << shift)
+      shift += 32
+      left -= 32
+    }
+    return pyNorm(r)
+  }
+}
+
+internal fun __pyTwisterOf(self : any?) : PyTwister {
+  val t = pyGetAttrOr(self, "_twister", null)
+  if (t is PyTwister) { return t as PyTwister }
+  val made = PyTwister()
+  pySetAttr(self, "_twister", made)
+  return made
+}
+
+// seed(a): None from the system's randomness; an int's absolute value; str, bytes and bytearray
+// as an int of their bytes and their SHA-512; a float by its hash, as CPython's random_seed.
+internal fun __pySeed(self : any?, a : any?) {
+  val t = __pyTwisterOf(self)
+  var n : BigInt? = null
+  if (a == null) {
+    val b = SecureRandom.bytes(32)
+    var v = BigInt.of(0)
+    for i in 0..<b.size { v = (v << 8) + BigInt.of(b[i].toInt()) }
+    n = v
+  } else if (a is string or a is Bytes or a is PyByteArray) {
+    val raw = a is string ? pyEncode(a as string, "utf-8", "surrogatepass") as Bytes : pyBytesLike(a)!!
+    val joined = raw + Sha512.hash(raw)
+    var v = BigInt.of(0)
+    for i in 0..<joined.size { v = (v << 8) + BigInt.of(joined[i].toInt()) }
+    n = v
+  } else if (pyIsInt(a)) {
+    n = pyBig(pyIndexValue(a)).abs()
+  } else if (a is float) {
+    n = BigInt.of(pyHash(a)).abs()
+  } else {
+    throw pyTypeError("The only supported seed types are:\nNone, int, float, str, bytes, and bytearray.")
+  }
+  val key : open List<int> = []
+  var v = n!!
+  if (v.isZero) { key.add(0) }
+  while (!v.isZero) {
+    key.add((v & BigInt.of(0xFFFFFFFF)).toInt())
+    v = v >> 32
+  }
+  t.initByArray(key)
+  pySetAttr(self, "gauss_next", null)
+}
+
+// self.random(): the class's own where a subclass gave one, else the generator's.
+internal fun __pyRand(self : any?) : float {
+  val own = pyTypeOf(self).lookup("random")
+  if (own === __pyRandomMethod) { return __pyTwisterOf(self).random() }
+  return pyToFloat(pyCallM0(self, "random"))
+}
+
+internal fun __pyGetRandBits(self : any?, k : int) : any? {
+  val own = pyTypeOf(self).lookup("getrandbits")
+  if (own === __pyGetRandBitsMethod) { return __pyTwisterOf(self).bits(k) }
+  return pyCall1(pyGetAttr(self, "getrandbits"), k)
+}
+
+// _randbelow(n): from getrandbits, or, for a subclass that gives random() and not getrandbits(),
+// from random() as CPython's _randbelow_without_getrandbits.
+fun pyRandBelow(self : any?, n0 : any?) : any? {
+  val n = pyBig(pyIndexValue(n0))
+  val t = pyTypeOf(self)
+  val ownRandom = t.lookup("random") !== __pyRandomMethod
+  val ownBits = t.lookup("getrandbits") !== __pyGetRandBitsMethod
+  if (ownRandom and !ownBits) {
+    val maxsize = BigInt.of(1) << 53
+    val rem = maxsize % n
+    val limit = (maxsize - rem).toFloat() / maxsize.toFloat()
+    var r = __pyRand(self)
+    while (r >= limit) { r = __pyRand(self) }
+    return pyNorm(BigInt.of(Math.trunc(r * maxsize.toFloat())) % n)
+  }
+  if (n.isZero) { return 0 }
+  val k = n.bitLength
+  var r = pyBig(__pyGetRandBits(self, k))
+  while (r >= n) { r = pyBig(__pyGetRandBits(self, k)) }
+  return pyNorm(r)
+}
+
+// bisect.bisect_right(a, x, lo, hi).
+fun pyBisectRight(a : List<any?>, x : any?, lo0 : int, hi0 : int) : int {
+  var lo = lo0
+  var hi = hi0
+  while (lo < hi) {
+    val mid = (lo + hi) / 2
+    if (pyTruth(pyLt(x, a[mid]))) { hi = mid } else { lo = mid + 1 }
+  }
+  return lo
+}
+
+internal val __pyNvMagic = 4.0 * Math.exp(-0.5) / Math.sqrt(2.0)
+internal val __pyLog4 = Math.ln(4.0)
+internal val __pySgMagic = 1.0 + Math.ln(4.5)
+
+internal fun __pyGammaVariate(self : any?, alpha : float, beta : float) : float {
+  if (alpha <= 0.0 or beta <= 0.0) { throw pyValueError("gammavariate: alpha and beta must be > 0.0") }
+  if (alpha > 1.0) {
+    val ainv = Math.sqrt(2.0 * alpha - 1.0)
+    val bbb = alpha - __pyLog4
+    val ccc = alpha + ainv
+    while (true) {
+      val u1 = __pyRand(self)
+      if (!(1e-7 < u1 and u1 < 0.9999999)) { continue }
+      val u2 = 1.0 - __pyRand(self)
+      val v = Math.ln(u1 / (1.0 - u1)) / ainv
+      val x = alpha * Math.exp(v)
+      val z = u1 * u1 * u2
+      val r = bbb + ccc * v - x
+      if (r + __pySgMagic - 4.5 * z >= 0.0 or r >= Math.ln(z)) { return x * beta }
+    }
+  }
+  if (alpha == 1.0) { return -Math.ln(1.0 - __pyRand(self)) * beta }
+  var x = 0.0
+  while (true) {
+    val u = __pyRand(self)
+    val b = (Math.e + alpha) / Math.e
+    val p = b * u
+    x = p <= 1.0 ? p.pow(1.0 / alpha) : -Math.ln((b - p) / alpha)
+    val u1 = __pyRand(self)
+    if (p > 1.0) {
+      if (u1 <= x.pow(alpha - 1.0)) { break }
+    } else if (u1 <= Math.exp(-x)) { break }
+  }
+  return x * beta
+}
+
+internal fun __pyNormal(self : any?, mu : float, sigma : float) : float {
+  var z = 0.0
+  while (true) {
+    val u1 = __pyRand(self)
+    val u2 = 1.0 - __pyRand(self)
+    z = __pyNvMagic * (u1 - 0.5) / u2
+    val zz = z * z / 4.0
+    if (zz <= -Math.ln(u2)) { break }
+  }
+  return mu + z * sigma
+}
+
+internal fun __pyBinomial(self : any?, n : int, p : float) : int {
+  if (n < 0) { throw pyValueError("n must be non-negative") }
+  if (p <= 0.0 or p >= 1.0) {
+    if (p == 0.0) { return 0 }
+    if (p == 1.0) { return n }
+    throw pyValueError("p must be in the range 0.0 <= p <= 1.0")
+  }
+  if (n == 1) { return __pyRand(self) < p ? 1 : 0 }
+  if (p > 0.5) { return n - __pyBinomial(self, n, 1.0 - p) }
+  if (n.toFloat() * p < 10.0) {
+    var x = 0
+    var y = 0
+    val c = Math.log2(1.0 - p)
+    if (c == 0.0) { return x }
+    while (true) {
+      y += __pyFloorF(Math.log2(__pyRand(self)) / c).toInt() + 1
+      if (y > n) { return x }
+      x += 1
+    }
+  }
+  var setup = false
+  val spq = Math.sqrt(n.toFloat() * p * (1.0 - p))
+  val b = 1.15 + 2.53 * spq
+  val a = -0.0873 + 0.0248 * b + 0.01 * p
+  val c = n.toFloat() * p + 0.5
+  val vr = 0.92 - 4.2 / b
+  var alpha = 0.0
+  var lpq = 0.0
+  var m = 0.0
+  var h = 0.0
+  while (true) {
+    var u = __pyRand(self)
+    u -= 0.5
+    val us = 0.5 - Math.abs(u)
+    val kf = __pyFloorF((2.0 * a / us + b) * u + c)
+    if (kf < 0.0 or kf > n.toFloat()) { continue }
+    val k = kf.toInt()
+    var v = __pyRand(self)
+    if (us >= 0.07 and v <= vr) { return k }
+    if (!setup) {
+      alpha = (2.83 + 5.1 / b) * spq
+      lpq = Math.ln(p / (1.0 - p))
+      m = __pyFloorF((n + 1).toFloat() * p)
+      h = pyLgamma(m + 1.0) + pyLgamma(n.toFloat() - m + 1.0)
+      setup = true
+    }
+    v *= alpha / (a / (us * us) + b)
+    if (Math.ln(v) <= h - pyLgamma(k.toFloat() + 1.0) - pyLgamma((n - k).toFloat() + 1.0) + (k.toFloat() - m) * lpq) { return k }
+  }
+  return 0
+}
+
+internal lazy val __pyRandomMethod : PyBuiltin = pyLibMethod("Random", "random") { self, a -> __pyTwisterOf(self).random() }
+internal lazy val __pyGetRandBitsMethod : PyBuiltin = pyLibMethod("Random", "getrandbits") { self, a ->
+  if (a.pos.isEmpty()) { throw pyTypeError("getrandbits() takes exactly one argument (0 given)") }
+  val k = pyIndex(a.pos[0])
+  if (k < 0) { throw pyValueError("Cannot convert negative int") }
+  __pyTwisterOf(self).bits(k)
+}
+
+internal lazy val __pyRandomType : PyType = __pyMakeRandomType()
+
+internal fun __pyMakeRandomType() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["VERSION"] = 3
+  m["__init__"] = pyLibMethod("Random", "__init__") { self, a ->
+    __pySeed(self, a.pos.isNotEmpty() ? a.pos[0] : a.get("x", null))
+    null
+  }
+  m["seed"] = pyLibMethod("Random", "seed") { self, a ->
+    val version = a.pos.size > 1 ? a.pos[1] : a.get("version", 2)
+    if (pyIndex(version) != 2 and pyIndex(version) != 1) { throw pyValueError("version must be 1 or 2") }
+    __pySeed(self, a.pos.isNotEmpty() ? a.pos[0] : a.get("a", null))
+    null
+  }
+  m["random"] = __pyRandomMethod
+  m["getrandbits"] = __pyGetRandBitsMethod
+  m["getstate"] = pyLibMethod("Random", "getstate") { self, a ->
+    val t = __pyTwisterOf(self)
+    val words : open List<any?> = []
+    for w in t.mt { words.add(w) }
+    words.add(t.index)
+    PyTuple([3, PyTuple(words), pyGetAttrOr(self, "gauss_next", null)])
+  }
+  m["setstate"] = pyLibMethod("Random", "setstate") { self, a ->
+    val st = pyIterable(a.pos[0])
+    if (st.size != 3 or !pyEqB(st[0], 3)) { throw pyValueError("state with version ${pyRepr(st.isEmpty() ? null : st[0])} passed to Random.setstate() of version 3") }
+    val words = pyIterable(st[1])
+    if (words.size != 625) { throw pyValueError("state vector is the wrong size") }
+    val t = __pyTwisterOf(self)
+    for i in 0..<624 { t.mt[i] = pyIndex(words[i]) & 0xFFFFFFFF }
+    t.index = pyIndex(words[624])
+    pySetAttr(self, "gauss_next", st[2])
+    null
+  }
+  m["randbytes"] = pyLibMethod("Random", "randbytes") { self, a ->
+    val n = pyIndex(a.pos[0])
+    val v = pyBig(__pyGetRandBits(self, n * 8))
+    val out = Bytes(n)
+    for i in 0..<n { out[i] = ((v >> (8 * i)) & BigInt.of(255)).toInt().toByte() }
+    out
+  }
+  m["_randbelow"] = pyLibMethod("Random", "_randbelow") { self, a -> pyRandBelow(self, a.pos[0]) }
+  m["randrange"] = pyLibMethod("Random", "randrange") { self, a ->
+    val start = a.pos.isNotEmpty() ? a.pos[0] : a.get("start", null)
+    val stop = a.pos.size > 1 ? a.pos[1] : a.get("stop", null)
+    val stepArg = a.pos.size > 2 ? a.pos[2] : a.get("step", 1)
+    val istart = pyBig(pyIndexValue(start))
+    if (stop == null) {
+      if (!pyEqB(stepArg, 1)) { throw pyTypeError("Missing a non-None stop argument") }
+      if (istart > 0) { pyRandBelow(self, pyNorm(istart)) } else { throw pyValueError("empty range for randrange()") }
+    } else {
+      val istop = pyBig(pyIndexValue(stop))
+      val width = istop - istart
+      val istep = pyBig(pyIndexValue(stepArg))
+      if (istep == BigInt.of(1)) {
+        if (width > 0) { pyNorm(istart + pyBig(pyRandBelow(self, pyNorm(width)))) } else {
+          throw pyValueError("empty range in randrange(${pyRepr(start)}, ${pyRepr(stop)})")
+        }
+      } else {
+        if (istep.isZero) { throw pyValueError("zero step for randrange()") }
+        val n = istep > 0 ? (width + istep - 1).floorDiv(istep) : (width + istep + 1).floorDiv(istep)
+        if (n <= 0) { throw pyValueError("empty range in randrange(${pyRepr(start)}, ${pyRepr(stop)}, ${pyRepr(stepArg)})") }
+        pyNorm(istart + istep * pyBig(pyRandBelow(self, pyNorm(n))))
+      }
+    }
+  }
+  m["randint"] = pyLibMethod("Random", "randint") { self, a ->
+    val lo = pyBig(pyIndexValue(a.pos[0]))
+    val hi = pyBig(pyIndexValue(a.pos[1]))
+    if (hi < lo) { throw pyValueError("empty range in randint(${lo}, ${hi})") }
+    pyNorm(lo + pyBig(pyRandBelow(self, pyNorm(hi - lo + 1))))
+  }
+  m["choice"] = pyLibMethod("Random", "choice") { self, a ->
+    val seq = a.pos[0]
+    val n = pyLength(seq)
+    if (n == 0) { throw pyIndexError("Cannot choose from an empty sequence") }
+    pyGetItem(seq, pyRandBelow(self, n))
+  }
+  m["shuffle"] = pyLibMethod("Random", "shuffle") { self, a ->
+    val x = a.pos[0]
+    var i = pyLength(x) - 1
+    while (i >= 1) {
+      val j = pyRandBelow(self, i + 1)
+      val xi = pyGetItem(x, i)
+      val xj = pyGetItem(x, j)
+      pySetItem(x, i, xj)
+      pySetItem(x, j, xi)
+      i -= 1
+    }
+    null
+  }
+  m["sample"] = pyLibMethod("Random", "sample") { self, a ->
+    a.only(["k", "counts"])
+    val population = a.pos[0]
+    if (population is PySet or population is PyDict) { throw pyTypeError("Population must be a sequence.  For dicts or sets, use sorted(d).") }
+    val n = pyLength(population)
+    val kArg = a.pos.size > 1 ? a.pos[1] : a.get("k", null)
+    val k = pyIndex(kArg)
+    val counts = a.get("counts", null)
+    if (counts != null) {
+      val cum : open List<any?> = []
+      var total : any? = 0
+      for c in pyIterable(counts) { total = pyAdd(total, c); cum.add(total) }
+      if (cum.size != n) { throw pyValueError("The number of counts does not match the population") }
+      val last = cum.isEmpty() ? 0 : cum.removeAt(cum.size - 1)
+      if (!pyIsInt(last)) { throw pyTypeError("Counts must be integers") }
+      if (pyTruth(pyLt(last, 0))) { throw pyValueError("Counts must be non-negative") }
+      val picks = pyIterable(pyCallV(pyGetAttr(self, "sample"), [PyRange(0, pyIndex(last), 1), k], null))
+      pyNewList(picks.map { pyGetItem(population, pyBisectRight(cum, it, 0, cum.size)) }.toOpenList())
+    } else {
+      if (k < 0 or k > n) { throw pyValueError("Sample larger than population or is negative") }
+      val result : open List<any?> = []
+      for i in 0..<k { result.add(null) }
+      var setsize = 21
+      if (k > 5) {
+        val e = __pyCeilF(Math.ln((k * 3).toFloat()) / Math.ln(4.0)).toInt()
+        var p = 1
+        for i in 0..<e { p *= 4 }
+        setsize += p
+      }
+      if (n <= setsize) {
+        val pool : open List<any?> = pyIterable(population).toOpenList()
+        for i in 0..<k {
+          val j = pyIndex(pyRandBelow(self, n - i))
+          result[i] = pool[j]
+          pool[j] = pool[n - i - 1]
+        }
+      } else {
+        val selected : open Set<int> = Set<int>()
+        for i in 0..<k {
+          var j = pyIndex(pyRandBelow(self, n))
+          while (j in selected) { j = pyIndex(pyRandBelow(self, n)) }
+          selected.add(j)
+          result[i] = pyGetItem(population, j)
+        }
+      }
+      pyNewList(result)
+    }
+  }
+  m["choices"] = pyLibMethod("Random", "choices") { self, a ->
+    a.only(["weights", "cum_weights", "k"])
+    val population = a.pos[0]
+    val n = pyLength(population)
+    val weights = a.pos.size > 1 ? a.pos[1] : a.get("weights", null)
+    var cum = a.get("cum_weights", null)
+    val k = pyIndex(a.get("k", 1))
+    val out : open List<any?> = []
+    if (cum == null and weights == null) {
+      val nf = n.toFloat()
+      for i in 0..<k { out.add(pyGetItem(population, Math.trunc(__pyRand(self) * nf).toInt())) }
+    } else {
+      if (cum != null and weights != null) { throw pyTypeError("Cannot specify both weights and cumulative weights") }
+      val cumList : open List<any?> = []
+      if (cum == null) {
+        var total : any? = pyUnbound
+        for w in pyIterable(weights) { total = total === pyUnbound ? w : pyAdd(total, w); cumList.add(total) }
+      } else {
+        cumList.addAll(pyIterable(cum))
+      }
+      if (cumList.size != n) { throw pyValueError("The number of weights does not match the population") }
+      val total = pyToFloat(pyAdd(cumList[n - 1], 0.0))
+      if (total <= 0.0) { throw pyValueError("Total of weights must be greater than zero") }
+      if (total.isNaN() or total.isInfinite()) { throw pyValueError("Total of weights must be finite") }
+      for i in 0..<k { out.add(pyGetItem(population, pyBisectRight(cumList, __pyRand(self) * total, 0, n - 1))) }
+    }
+    pyNewList(out)
+  }
+  m["uniform"] = pyLibMethod("Random", "uniform") { self, a ->
+    val lo = a.pos[0]
+    val hi = a.pos[1]
+    pyAdd(lo, pyMul(pySub(hi, lo), __pyRand(self)))
+  }
+  m["triangular"] = pyLibMethod("Random", "triangular") { self, a ->
+    var low = pyToFloat(a.pos.isNotEmpty() ? a.pos[0] : a.get("low", 0.0))
+    var high = pyToFloat(a.pos.size > 1 ? a.pos[1] : a.get("high", 1.0))
+    val mode = a.pos.size > 2 ? a.pos[2] : a.get("mode", null)
+    var u = __pyRand(self)
+    if (high == low and mode != null) { low } else {
+      var c = mode == null ? 0.5 : (pyToFloat(mode) - low) / (high - low)
+      if (u > c) {
+        u = 1.0 - u
+        c = 1.0 - c
+        val t = low
+        low = high
+        high = t
+      }
+      low + (high - low) * Math.sqrt(u * c)
+    }
+  }
+  m["normalvariate"] = pyLibMethod("Random", "normalvariate") { self, a ->
+    __pyNormal(self, pyToFloat(a.pos.isNotEmpty() ? a.pos[0] : a.get("mu", 0.0)), pyToFloat(a.pos.size > 1 ? a.pos[1] : a.get("sigma", 1.0)))
+  }
+  m["gauss"] = pyLibMethod("Random", "gauss") { self, a ->
+    val mu = pyToFloat(a.pos.isNotEmpty() ? a.pos[0] : a.get("mu", 0.0))
+    val sigma = pyToFloat(a.pos.size > 1 ? a.pos[1] : a.get("sigma", 1.0))
+    var z = pyGetAttrOr(self, "gauss_next", null)
+    pySetAttr(self, "gauss_next", null)
+    if (z == null) {
+      val x2pi = __pyRand(self) * (2.0 * Math.pi)
+      val g2rad = Math.sqrt(-2.0 * Math.ln(1.0 - __pyRand(self)))
+      z = Math.cos(x2pi) * g2rad
+      pySetAttr(self, "gauss_next", Math.sin(x2pi) * g2rad)
+    }
+    mu + pyToFloat(z) * sigma
+  }
+  m["lognormvariate"] = pyLibMethod("Random", "lognormvariate") { self, a -> Math.exp(__pyNormal(self, pyToFloat(a.pos[0]), pyToFloat(a.pos[1]))) }
+  m["expovariate"] = pyLibMethod("Random", "expovariate") { self, a ->
+    val lambd = pyToFloat(a.pos.isNotEmpty() ? a.pos[0] : a.get("lambd", 1.0))
+    -Math.ln(1.0 - __pyRand(self)) / lambd
+  }
+  m["vonmisesvariate"] = pyLibMethod("Random", "vonmisesvariate") { self, a ->
+    val mu = pyToFloat(a.pos[0])
+    val kappa = pyToFloat(a.pos[1])
+    val twoPi = 2.0 * Math.pi
+    if (kappa <= 1e-6) { twoPi * __pyRand(self) } else {
+      val s = 0.5 / kappa
+      val r = s + Math.sqrt(1.0 + s * s)
+      var z = 0.0
+      while (true) {
+        val u1 = __pyRand(self)
+        z = Math.cos(Math.pi * u1)
+        val d = z / (r + z)
+        val u2 = __pyRand(self)
+        if (u2 < 1.0 - d * d or u2 <= (1.0 - d) * Math.exp(d)) { break }
+      }
+      val q = 1.0 / r
+      val f = (q + z) / (1.0 + q * z)
+      val u3 = __pyRand(self)
+      pyToFloat(pyMod(u3 > 0.5 ? mu + Math.acos(f) : mu - Math.acos(f), twoPi))
+    }
+  }
+  m["gammavariate"] = pyLibMethod("Random", "gammavariate") { self, a -> __pyGammaVariate(self, pyToFloat(a.pos[0]), pyToFloat(a.pos[1])) }
+  m["betavariate"] = pyLibMethod("Random", "betavariate") { self, a ->
+    val y = __pyGammaVariate(self, pyToFloat(a.pos[0]), 1.0)
+    if (y != 0.0) { y / (y + __pyGammaVariate(self, pyToFloat(a.pos[1]), 1.0)) } else { 0.0 }
+  }
+  m["paretovariate"] = pyLibMethod("Random", "paretovariate") { self, a ->
+    val u = 1.0 - __pyRand(self)
+    u.pow(-1.0 / pyToFloat(a.pos[0]))
+  }
+  m["weibullvariate"] = pyLibMethod("Random", "weibullvariate") { self, a ->
+    val u = 1.0 - __pyRand(self)
+    pyToFloat(a.pos[0]) * (-Math.ln(u)).pow(1.0 / pyToFloat(a.pos[1]))
+  }
+  m["binomialvariate"] = pyLibMethod("Random", "binomialvariate") { self, a ->
+    __pyBinomial(self, pyIndex(a.pos.isNotEmpty() ? a.pos[0] : a.get("n", 1)), pyToFloat(a.pos.size > 1 ? a.pos[1] : a.get("p", 0.5)))
+  }
+  return pyLibClass("Random", "random", [pyObjectType], m)
+}
+
+// SystemRandom: random() and getrandbits() from the system's randomness; seed() does nothing.
+internal lazy val __pySystemRandomType : PyType = pyLibClass("SystemRandom", "random", [__pyRandomType], {
+  "random": pyLibMethod("SystemRandom", "random") { self, a ->
+    val b = SecureRandom.bytes(7)
+    var v = 0
+    for i in 0..<7 { v = (v << 8) | b[i].toInt() }
+    (v >>> 3).toFloat() * (1.0 / 9007199254740992.0)
+  },
+  "getrandbits": pyLibMethod("SystemRandom", "getrandbits") { self, a ->
+    val k = pyIndex(a.pos[0])
+    if (k < 0) { throw pyValueError("number of bits must be non-negative") }
+    val n = (k + 7) / 8
+    val b = SecureRandom.bytes(n)
+    var v = BigInt.of(0)
+    for i in 0..<n { v = (v << 8) + BigInt.of(b[i].toInt()) }
+    pyNorm(v >> (n * 8 - k))
+  },
+  "seed": pyLibMethod("SystemRandom", "seed") { self, a -> null },
+  "getstate": pyLibMethod("SystemRandom", "getstate") { self, a -> throw pyError(pyNotImplementedErrorType, "System entropy source does not have state.") },
+  "setstate": pyLibMethod("SystemRandom", "setstate") { self, a -> throw pyError(pyNotImplementedErrorType, "System entropy source does not have state.") }
+})
+
+fun pyRandomModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  val inst = pyCall0(__pyRandomType)
+  for name in ["seed", "random", "getrandbits", "getstate", "setstate", "randbytes", "randrange", "randint", "choice", "shuffle",
+               "sample", "choices", "uniform", "triangular", "normalvariate", "gauss", "lognormvariate", "expovariate",
+               "vonmisesvariate", "gammavariate", "betavariate", "paretovariate", "weibullvariate", "binomialvariate"] {
+    m[name] = pyGetAttr(inst, name)
+  }
+  m["Random"] = __pyRandomType
+  m["SystemRandom"] = __pySystemRandomType
+  return pyNativeModule("random", m)
+}

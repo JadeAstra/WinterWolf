@@ -15,6 +15,12 @@ fun pyStandardModules() : open Map<string, () -> PyModule> {
   m["copy"] = { -> pyCopyModule() }
   m["functools"] = { -> pyFunctoolsModule() }
   m["itertools"] = { -> pyItertoolsModule() }
+  m["random"] = { -> pyRandomModule() }
+  m["fractions"] = { -> pyFractionsModule() }
+  m["statistics"] = { -> pyStatisticsModule() }
+  m["time"] = { -> pyTimeModule() }
+  m["datetime"] = { -> pyDatetimeModule() }
+  m["textwrap"] = { -> pyTextwrapModule() }
   return m
 }
 

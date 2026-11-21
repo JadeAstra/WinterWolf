@@ -1,4 +1,5 @@
 # collections and copy (the Snippy plan, part 5.3, step 2), as CPython 3.14 gives them.
+import functools, itertools, operator
 import collections
 from collections import Counter, OrderedDict, defaultdict, deque, namedtuple, ChainMap, UserDict, UserList, UserString
 import copy
@@ -107,3 +108,19 @@ class Custom:
         r.calls = self.calls + 10
         return r
 print(copy.copy(Custom()).calls, copy.deepcopy(Custom()).calls, copy.copy((1, 2)), copy.deepcopy([1, (2, [3])]), copy.replace(Point(1, 2), y=5))
+
+# C types named with their module in messages and default reprs; Counter's multiset comparisons (5.3, step 3).
+for x in [collections.deque([1]), functools.partial(print), itertools.count(), operator.itemgetter(1), collections.OrderedDict(), collections.defaultdict(int), itertools.chain(), operator.attrgetter("a"), collections.Counter()]:
+    for f in [lambda: x + 1, lambda: x < x, lambda: -x]:
+        try:
+            print(f())
+        except TypeError as e:
+            print(e)
+    print(repr(x).split(" at ")[0], type(x).__name__)
+C = collections.Counter
+print(C(a=1) < C(a=2), C(a=1) <= C(a=1), C(a=1) < C(a=1), C(a=1, b=0) == C(a=1), C(a=2) > C(a=1, b=1), C(a=2, b=1) >= C(a=1), C() < C(a=1), C(a=1) < {"a": 2} if False else 0)
+try:
+    print(C() < {})
+except TypeError as e:
+    print(e)
+print(repr(iter([])).split(" at ")[0], repr(iter(range(0))).split(" at ")[0], repr(itertools.islice([], 1)).split(" at ")[0])

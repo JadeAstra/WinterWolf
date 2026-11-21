@@ -1,0 +1,515 @@
+import Snippy.Text.*
+// time (the Snippy plan, part 5.3, step 3), in WinterWolf: the clocks, struct_time, gmtime and
+// localtime, and strftime as glibc's (which Linux's CPython hands it to) and strptime as CPython's
+// _strptime, both of which datetime uses too.
+
+internal val __pyDayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+internal val __pyMonthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+  "October", "November", "December"]
+
+// ---- Calendar arithmetic (proleptic Gregorian), as datetime's ----
+
+fun pyIsLeap(y : int) : bool => y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+internal val __pyDaysInMonth = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+fun pyDaysInMonth(y : int, m : int) : int => m == 2 and pyIsLeap(y) ? 29 : __pyDaysInMonth[m]
+fun pyDaysBeforeYear(y : int) : int {
+  val y1 = y - 1
+  return y1 * 365 + y1 / 4 - y1 / 100 + y1 / 400
+}
+fun pyDaysBeforeMonth(y : int, m : int) : int {
+  var d = 0
+  for k in 1..<m { d += __pyDaysInMonth[k] }
+  if (m > 2 and pyIsLeap(y)) { d += 1 }
+  return d
+}
+// Ordinal 1 is January 1 of year 1.
+fun pyYmdToOrd(y : int, m : int, d : int) : int => pyDaysBeforeYear(y) + pyDaysBeforeMonth(y, m) + d
+fun pyOrdToYmd(n0 : int) : List<int> {
+  var n = n0 - 1
+  val n400 = n / 146097
+  n = n % 146097
+  var year = n400 * 400 + 1
+  val n100 = n / 36524
+  n = n % 36524
+  val n4 = n / 1461
+  n = n % 1461
+  val n1 = n / 365
+  n = n % 365
+  year += n100 * 100 + n4 * 4 + n1
+  if (n1 == 4 or n100 == 4) { return [year - 1, 12, 31] }
+  val leap = n1 == 3 and (n4 != 24 or n100 == 3)
+  var month = (n + 50) >> 5
+  var preceding = pyDaysBeforeMonth(year, month)
+  if (preceding > n) {
+    month -= 1
+    preceding = pyDaysBeforeMonth(year, month)
+  }
+  return [year, month, n - preceding + 1]
+}
+// Monday 0.
+fun pyWeekday(y : int, m : int, d : int) : int => (pyYmdToOrd(y, m, d) + 6) % 7
+// ISO year, week and weekday (1..7).
+fun pyIsoCalendar(y : int, m : int, d : int) : List<int> {
+  var year = y
+  fun week1Monday(yr : int) : int {
+    val first = pyYmdToOrd(yr, 1, 1)
+    val firstWeekday = (first + 6) % 7
+    var monday = first - firstWeekday
+    if (firstWeekday > 3) { monday += 7 }
+    return monday
+  }
+  var week1 = week1Monday(year)
+  val today = pyYmdToOrd(y, m, d)
+  var week = __pyFdivI(today - week1, 7)
+  var day = __pyFmodI(today - week1, 7)
+  if (week < 0) {
+    year -= 1
+    week1 = week1Monday(year)
+    week = __pyFdivI(today - week1, 7)
+    day = __pyFmodI(today - week1, 7)
+  } else if (week >= 52) {
+    if (today >= week1Monday(year + 1)) {
+      year += 1
+      week = 0
+    }
+  }
+  return [year, week + 1, day + 1]
+}
+internal fun __pyFdivI(a : int, b : int) : int { val q = a / b; return (a % b != 0 and ((a < 0) != (b < 0))) ? q - 1 : q }
+internal fun __pyFmodI(a : int, b : int) : int => a - __pyFdivI(a, b) * b
+
+// ---- A broken-down time, as C's struct tm ----
+
+class PyTm(val year : int, val mon : int, val mday : int, val hour : int, val min : int, val sec : int, val wday : int,
+           val yday : int, val isdst : int, val zone : string?, val gmtoff : int?, val micro : int = 0)
+
+fun pyTmFromSeconds(secs : int, offset : int, zone : string?) : PyTm {
+  val local = secs + offset
+  val days = __pyFdivI(local, 86400)
+  val ofDay = local - days * 86400
+  val ymd = pyOrdToYmd(days + 719163)
+  val yday = pyDaysBeforeMonth(ymd[0], ymd[1]) + ymd[2]
+  return PyTm(ymd[0], ymd[1], ymd[2], ofDay / 3600, ofDay / 60 % 60, ofDay % 60, pyWeekday(ymd[0], ymd[1], ymd[2]), yday, offset == 0 and zone == "UTC" ? 0 : 0, zone, offset)
+}
+
+internal fun __pyPadNum(n : int, width : int, pad : char) : string {
+  val s = Math.abs(n).toString()
+  val body = s.size >= width ? s : pad.toString().repeat(width - s.size) + s
+  return n < 0 ? "-" + body : body
+}
+
+// strftime as glibc's in the C locale: %a %A %b %B %c %C %d %D %e %F %g %G %h %H %I %j %k %l %m %M
+// %n %p %P %r %R %s %S %t %T %u %U %V %w %W %x %X %y %Y %z %Z %%; datetime adds %f before.
+fun pyStrftime(fmt : string, t : PyTm) : string {
+  val sb = StringBuilder()
+  var i = 0
+  val wdaySun = (t.wday + 1) % 7
+  val yday0 = t.yday - 1
+  while (i < fmt.size) {
+    val c = fmt[i]
+    if (c != '%' or i + 1 >= fmt.size) { sb.append(c); i += 1; continue }
+    val d = fmt[i + 1]
+    i += 2
+    when (d) {
+      'a' -> sb.append(__pyDayNames[t.wday][..<3])
+      'A' -> sb.append(__pyDayNames[t.wday])
+      'b', 'h' -> sb.append(__pyMonthNames[t.mon - 1][..<3])
+      'B' -> sb.append(__pyMonthNames[t.mon - 1])
+      'c' -> sb.append(pyStrftime("%a %b %e %H:%M:%S %Y", t))
+      'C' -> sb.append(__pyPadNum(__pyFdivI(t.year, 100), 2, '0'))
+      'd' -> sb.append(__pyPadNum(t.mday, 2, '0'))
+      'D', 'x' -> sb.append(pyStrftime("%m/%d/%y", t))
+      'e' -> sb.append(__pyPadNum(t.mday, 2, ' '))
+      'F' -> sb.append(pyStrftime("%Y-%m-%d", t))
+      'g' -> sb.append(__pyPadNum(__pyFmodI(pyIsoCalendar(t.year, t.mon, t.mday)[0], 100), 2, '0'))
+      'G' -> sb.append(pyIsoCalendar(t.year, t.mon, t.mday)[0].toString())
+      'H' -> sb.append(__pyPadNum(t.hour, 2, '0'))
+      'I' -> sb.append(__pyPadNum(t.hour % 12 == 0 ? 12 : t.hour % 12, 2, '0'))
+      'j' -> sb.append(__pyPadNum(t.yday, 3, '0'))
+      'k' -> sb.append(__pyPadNum(t.hour, 2, ' '))
+      'l' -> sb.append(__pyPadNum(t.hour % 12 == 0 ? 12 : t.hour % 12, 2, ' '))
+      'm' -> sb.append(__pyPadNum(t.mon, 2, '0'))
+      'M' -> sb.append(__pyPadNum(t.min, 2, '0'))
+      'n' -> sb.append('\n')
+      'p' -> sb.append(t.hour < 12 ? "AM" : "PM")
+      'P' -> sb.append(t.hour < 12 ? "am" : "pm")
+      'r' -> sb.append(pyStrftime("%I:%M:%S %p", t))
+      'R' -> sb.append(pyStrftime("%H:%M", t))
+      's' -> {
+        val days = pyYmdToOrd(t.year, t.mon, t.mday) - 719163
+        sb.append((days * 86400 + t.hour * 3600 + t.min * 60 + t.sec - (t.gmtoff ?: 0)).toString())
+      }
+      'S' -> sb.append(__pyPadNum(t.sec, 2, '0'))
+      't' -> sb.append('\t')
+      'T', 'X' -> sb.append(pyStrftime("%H:%M:%S", t))
+      'u' -> sb.append((t.wday + 1).toString())
+      'U' -> sb.append(__pyPadNum((yday0 + 7 - wdaySun) / 7, 2, '0'))
+      'V' -> sb.append(__pyPadNum(pyIsoCalendar(t.year, t.mon, t.mday)[1], 2, '0'))
+      'w' -> sb.append(wdaySun.toString())
+      'W' -> sb.append(__pyPadNum((yday0 + 7 - (wdaySun + 6) % 7) / 7, 2, '0'))
+      'y' -> sb.append(__pyPadNum(__pyFmodI(t.year, 100), 2, '0'))
+      'Y' -> sb.append(t.year.toString())
+      'z' -> {
+        val off = t.gmtoff
+        if (off != null) {
+          val o = off!!
+          val a = Math.abs(o)
+          sb.append((o < 0 ? "-" : "+") + __pyPadNum(a / 3600, 2, '0') + __pyPadNum(a / 60 % 60, 2, '0'))
+        }
+      }
+      'Z' -> sb.append(t.zone ?: "")
+      '%' -> sb.append('%')
+      else -> { sb.append('%'); sb.append(d) }
+    }
+  }
+  return sb.toString()
+}
+
+// ---- strptime, as CPython's _strptime ----
+
+class PyParsed {
+  var year = 1900
+  var month = 1
+  var day = 1
+  var hour = 0
+  var minute = 0
+  var second = 0
+  var micro = 0
+  var ampm = -1
+  var hour12 = -1
+  var julian = -1
+  var weekday = -1
+  var weekOfYear = -1
+  var weekStartsMonday = false
+  var isoYear = -1
+  var isoWeek = -1
+  var offset : int? = null
+  var zone : string? = null
+  var hadDate = false
+  var hadYear = false
+}
+
+internal fun __pyExpandStrptime(fmt : string) : string {
+  var s = fmt
+  for p in [Pair("%c", "%a %b %d %H:%M:%S %Y"), Pair("%x", "%m/%d/%y"), Pair("%X", "%H:%M:%S"), Pair("%D", "%m/%d/%y"),
+            Pair("%T", "%H:%M:%S"), Pair("%R", "%H:%M"), Pair("%F", "%Y-%m-%d"), Pair("%r", "%I:%M:%S %p")] { s = s.replace(p.first, p.second) }
+  return s
+}
+
+// Matches `text` from `ti` against `fmt` from `fi`, filling `out`; false where it cannot.
+internal fun __pyStrpMatch(text : string, ti : int, fmt : string, fi : int, out : PyParsed) : int {
+  if (fi >= fmt.size) { return ti }
+  val c = fmt[fi]
+  if (c == ' ' or c == '\t' or c == '\n') {
+    // Whitespace in the format: any whitespace, as \s+ (and none where the text has none, as CPython's).
+    var f = fi
+    while (f < fmt.size and (fmt[f] == ' ' or fmt[f] == '\t' or fmt[f] == '\n')) { f += 1 }
+    var t = ti
+    while (t < text.size and pyIsSpace(text[t])) { t += 1 }
+    if (t == ti) { return -1 }
+    return __pyStrpMatch(text, t, fmt, f, out)
+  }
+  if (c != '%' or fi + 1 >= fmt.size) {
+    if (ti < text.size and text[ti].toString().lower() == c.toString().lower()) { return __pyStrpMatch(text, ti + 1, fmt, fi + 1, out) }
+    return -1
+  }
+  val d = fmt[fi + 1]
+  val nf = fi + 2
+  fun number(minDigits : int, maxDigits : int, low : int, high : int, set : (int) -> unit) : int {
+    var allowSpace = d == 'd' or d == 'e'
+    var start = ti
+    if (allowSpace and start < text.size and text[start] == ' ') { start += 1 }
+    var most = 0
+    while (start + most < text.size and most < maxDigits and text[start + most] >= '0' and text[start + most] <= '9') { most += 1 }
+    var n = most
+    while (n >= minDigits and n >= 1) {
+      val v = text[start..<(start + n)].toInt()
+      if (v >= low and v <= high) {
+        set(v)
+        val r = __pyStrpMatch(text, start + n, fmt, nf, out)
+        if (r >= 0) { return r }
+      }
+      n -= 1
+    }
+    return -1
+  }
+  fun word(names : List<string>, set : (int) -> unit) : int {
+    // Longest name first, as the regex alternation sorted by length would take it.
+    val order = names.indices.toOpenList().sortedWith { a, b -> names[b].size - names[a].size }
+    for k in order {
+      val nm = names[k]
+      if (ti + nm.size <= text.size and text[ti..<(ti + nm.size)].lower() == nm.lower()) {
+        set(k)
+        val r = __pyStrpMatch(text, ti + nm.size, fmt, nf, out)
+        if (r >= 0) { return r }
+      }
+    }
+    return -1
+  }
+  return when (d) {
+    'Y' -> number(4, 4, 0, 9999, { v -> out.year = v; out.hadYear = true })
+    'y' -> number(2, 2, 0, 99, { v -> out.year = v <= 68 ? 2000 + v : 1900 + v; out.hadYear = true })
+    'm' -> number(1, 2, 1, 12, { v -> out.month = v; out.hadDate = true })
+    'd', 'e' -> number(1, 2, 1, 31, { v -> out.day = v; out.hadDate = true })
+    'H' -> number(1, 2, 0, 23, { v -> out.hour = v })
+    'I' -> number(1, 2, 1, 12, { v -> out.hour12 = v })
+    'M' -> number(1, 2, 0, 59, { v -> out.minute = v })
+    'S' -> number(1, 2, 0, 61, { v -> out.second = v })
+    'j' -> number(1, 3, 1, 366, { v -> out.julian = v })
+    'f' -> {
+      var n = 0
+      while (ti + n < text.size and n < 6 and text[ti + n] >= '0' and text[ti + n] <= '9') { n += 1 }
+      var r = -1
+      while (n >= 1) {
+        out.micro = (text[ti..<(ti + n)] + "000000"[..<(6 - n)]).toInt()
+        r = __pyStrpMatch(text, ti + n, fmt, nf, out)
+        if (r >= 0) { break }
+        n -= 1
+      }
+      r
+    }
+    'p' -> word(["AM", "PM"], { k -> out.ampm = k })
+    'b', 'h' -> word(__pyMonthNames.map { it[..<3] }, { k -> out.month = k + 1; out.hadDate = true })
+    'B' -> word(__pyMonthNames, { k -> out.month = k + 1; out.hadDate = true })
+    'a' -> word(__pyDayNames.map { it[..<3] }, { k -> out.weekday = k })
+    'A' -> word(__pyDayNames, { k -> out.weekday = k })
+    'w' -> number(1, 1, 0, 6, { v -> out.weekday = (v + 6) % 7 })
+    'u' -> number(1, 1, 1, 7, { v -> out.weekday = v - 1 })
+    'U' -> number(1, 2, 0, 53, { v -> out.weekOfYear = v; out.weekStartsMonday = false })
+    'W' -> number(1, 2, 0, 53, { v -> out.weekOfYear = v; out.weekStartsMonday = true })
+    'G' -> number(4, 4, 0, 9999, { v -> out.isoYear = v })
+    'V' -> number(1, 2, 1, 53, { v -> out.isoWeek = v })
+    'z' -> {
+      if (ti < text.size and (text[ti] == 'Z' or text[ti] == 'z')) {
+        out.offset = 0
+        __pyStrpMatch(text, ti + 1, fmt, nf, out)
+      } else if (ti < text.size and (text[ti] == '+' or text[ti] == '-')) {
+        val sign = text[ti] == '-' ? -1 : 1
+        var t = ti + 1
+        fun two() : int {
+          if (t + 2 > text.size or !(text[t] >= '0' and text[t] <= '9') or !(text[t + 1] >= '0' and text[t + 1] <= '9')) { return -1 }
+          val v = text[t..<(t + 2)].toInt()
+          t += 2
+          return v
+        }
+        val hh = two()
+        if (hh < 0) { -1 } else {
+          var mm = 0
+          var ss = 0
+          val colon = t < text.size and text[t] == ':'
+          if (colon) { t += 1 }
+          val m2 = two()
+          if (m2 < 0) { -1 } else {
+            mm = m2
+            if (t < text.size and (colon ? text[t] == ':' : (text[t] >= '0' and text[t] <= '9'))) {
+              if (colon) { t += 1 }
+              val s2 = two()
+              if (s2 >= 0) { ss = s2 }
+            }
+            out.offset = sign * (hh * 3600 + mm * 60 + ss)
+            __pyStrpMatch(text, t, fmt, nf, out)
+          }
+        }
+      } else { -1 }
+    }
+    'Z' -> {
+      var r = -1
+      for nm in ["UTC", "GMT"] {
+        if (ti + nm.size <= text.size and text[ti..<(ti + nm.size)].upper() == nm) {
+          out.zone = nm
+          r = __pyStrpMatch(text, ti + nm.size, fmt, nf, out)
+          if (r >= 0) { break }
+        }
+      }
+      r
+    }
+    '%' -> ti < text.size and text[ti] == '%' ? __pyStrpMatch(text, ti + 1, fmt, nf, out) : -1
+    else -> throw pyValueError("'${d}' is a bad directive in format '%${d}'")
+  }
+}
+
+// CPython's _strptime: the fields of `text` as `fmt` reads it, or a ValueError naming both.
+fun pyStrptime(text : string, fmt0 : string) : PyParsed {
+  val fmt = __pyExpandStrptime(fmt0)
+  // A bad directive or a lone % at the end, said first.
+  var k = 0
+  while (k < fmt.size) {
+    if (fmt[k] == '%') {
+      if (k + 1 >= fmt.size) { throw pyValueError("stray % in format '$fmt0'") }
+      k += 2
+    } else { k += 1 }
+  }
+  val out = PyParsed()
+  val whole = __pyStrpMatch(text, 0, fmt, 0, out)
+  if (whole < 0) {
+    // The longest match that leaves data over says so instead.
+    var best = -1
+    for end in (text.size - 1) downTo 1 {
+      val probe = PyParsed()
+      if (__pyStrpMatch(text[..<end], 0, fmt, 0, probe) == end) { best = end; break }
+    }
+    if (best > 0) { throw pyValueError("unconverted data remains: ${text[best..]}") }
+    throw pyValueError("time data ${pyRepr(text)} does not match format ${pyRepr(fmt0)}")
+  }
+  if (whole < text.size) { throw pyValueError("unconverted data remains: ${text[whole..]}") }
+  if (out.hour12 >= 0) {
+    out.hour = out.hour12 % 12 + (out.ampm == 1 ? 12 : 0)
+  }
+  if (out.isoYear >= 0 and out.isoWeek >= 0 and out.weekday >= 0) {
+    val jan4 = pyYmdToOrd(out.isoYear, 1, 4)
+    val monday = jan4 - (jan4 + 6) % 7
+    val ymd = pyOrdToYmd(monday + (out.isoWeek - 1) * 7 + out.weekday)
+    out.year = ymd[0]; out.month = ymd[1]; out.day = ymd[2]
+  } else if (out.julian < 0 and out.weekOfYear >= 0 and out.weekday >= 0) {
+    val first = pyYmdToOrd(out.year, 1, 1)
+    val firstWeekday = (first + 6) % 7
+    val weekStart = out.weekStartsMonday ? 0 : 6
+    var dayOfWeek = out.weekStartsMonday ? out.weekday : (out.weekday + 1) % 7
+    val firstWeekStart = (7 - ((firstWeekday - weekStart + 7) % 7)) % 7
+    val ord = out.weekOfYear == 0 ? first - (firstWeekday - out.weekday + 7) % 7 + (out.weekday >= firstWeekday ? 0 : 0)
+                                  : first + firstWeekStart + (out.weekOfYear - 1) * 7 + dayOfWeek
+    val ymd = pyOrdToYmd(ord)
+    out.year = ymd[0]; out.month = ymd[1]; out.day = ymd[2]
+  } else if (out.julian >= 0) {
+    val ymd = pyOrdToYmd(pyYmdToOrd(out.year, 1, 1) + out.julian - 1)
+    out.year = ymd[0]; out.month = ymd[1]; out.day = ymd[2]
+  }
+  if (out.day > pyDaysInMonth(out.year, out.month)) {
+    throw pyValueError("day is out of range for month")
+  }
+  return out
+}
+
+// ---- struct_time ----
+
+internal val __pyTmFields = ["tm_year", "tm_mon", "tm_mday", "tm_hour", "tm_min", "tm_sec", "tm_wday", "tm_yday", "tm_isdst"]
+
+internal lazy val __pyStructTimeType : PyType = __pyMakeStructTime()
+internal fun __pyMakeStructTime() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val items = pyIterable(args[1])
+    if (items.size < 9 or items.size > 11) {
+      throw pyTypeError("time.struct_time() takes an at least 9-sequence (${items.size}-sequence given)")
+    }
+    val o = PyObject(args[0] as PyType)
+    o.value = PyTuple(items[..<9].toList())
+    o.dict = PyDict()
+    o.dict!!.set("tm_zone", items.size > 9 ? items[9] : null)
+    o.dict!!.set("tm_gmtoff", items.size > 10 ? items[10] : null)
+    o
+  }))
+  for (i, f) in __pyTmFields.withIndex() {
+    m[f] = PyProperty(PyBuiltin(f, { args, kw -> ((args[0] as PyObject).value as PyTuple).items[i] }), null, null, null)
+  }
+  m["n_sequence_fields"] = 9
+  m["n_fields"] = 11
+  m["__repr__"] = pyLibMethod("struct_time", "__repr__") { self, a ->
+    val t = ((self as PyObject).value as PyTuple).items
+    "time.struct_time(" + __pyTmFields.indices.map { "${__pyTmFields[it]}=${pyRepr(t[it])}" }.join(", ") + ")"
+  }
+  val t = pyLibClass("struct_time", "time", [pyTupleType], m)
+  t.cName = "time.struct_time"
+  return t
+}
+
+fun pyStructTime(t : PyTm) : any? =>
+  pyCall1(__pyStructTimeType, PyTuple([t.year, t.mon, t.mday, t.hour, t.min, t.sec, t.wday, t.yday, t.isdst, t.zone, t.gmtoff]))
+
+// A struct_time (or 9-tuple) back as a broken-down time.
+fun pyTmOf(x : any?) : PyTm {
+  val items = pyIterable(x)
+  if (items.size < 9) { throw pyTypeError("Tuple or struct_time argument required") }
+  val v = items.map { pyIndex(it) }
+  val zone = x is PyObject and (x as PyObject).dict != null ? (x as PyObject).dict!!.get("tm_zone", null) : null
+  val off = x is PyObject and (x as PyObject).dict != null ? (x as PyObject).dict!!.get("tm_gmtoff", null) : null
+  if (v[1] < 1 or v[1] > 12) { if (v[1] != 0) { throw pyValueError("month out of range") } }
+  return PyTm(v[0], v[1] == 0 ? 1 : v[1], v[2] == 0 ? 1 : v[2], v[3], v[4], v[5], v[6], v[7] == 0 ? 1 : v[7], v[8], zone as string?, off == null ? null : pyIndex(off))
+}
+
+internal fun __pyNowNanos() : int => Instant.now().epochNanoseconds
+internal fun __pyOffsetAt(secs : int) : int => __localOffset(secs)
+internal fun __pyZoneName(offset : int) : string {
+  if (offset == 0) { return "UTC" }
+  val a = Math.abs(offset)
+  return (offset < 0 ? "-" : "+") + __pyPadNum(a / 3600, 2, '0') + (a % 3600 == 0 ? "" : __pyPadNum(a / 60 % 60, 2, '0'))
+}
+
+internal fun __pySecondsArg(a : PyArgs) : int? {
+  if (a.pos.isEmpty() or a.pos[0] == null) { return null }
+  val x = a.pos[0]
+  if (x is float) {
+    val f = x as float
+    if (f.isNaN()) { throw pyValueError("Invalid value NaN (not a number)") }
+    if (f.isInfinite()) { throw pyOverflowError("timestamp out of range for platform time_t") }
+    return __pyFloorF(f).toInt()
+  }
+  return pyIndex(x)
+}
+
+fun pyTimeModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  val now = __pyNowNanos() / 1000000000
+  val off = __pyOffsetAt(now)
+  m["timezone"] = -off
+  m["altzone"] = -off
+  m["daylight"] = 0
+  m["tzname"] = PyTuple([__pyZoneName(off), __pyZoneName(off)])
+  m["time"] = __pyB("time") { a -> __pyNowNanos().toFloat() / 1e9 }
+  m["time_ns"] = __pyB("time_ns") { a -> __pyNowNanos() }
+  m["perf_counter"] = __pyB("perf_counter") { a -> clock() }
+  m["perf_counter_ns"] = __pyB("perf_counter_ns") { a -> (clock() * 1e9).toInt() }
+  m["monotonic"] = __pyB("monotonic") { a -> clock() }
+  m["monotonic_ns"] = __pyB("monotonic_ns") { a -> (clock() * 1e9).toInt() }
+  m["process_time"] = __pyB("process_time") { a -> clock() }
+  m["process_time_ns"] = __pyB("process_time_ns") { a -> (clock() * 1e9).toInt() }
+  m["thread_time"] = __pyB("thread_time") { a -> clock() }
+  m["sleep"] = __pyB("sleep") { a ->
+    val s = pyToFloat(pyFloatOf1(a.pos[0]))
+    if (s < 0.0) { throw pyValueError("sleep length must be non-negative") }
+    __thread.sleep(Math.round(s * 1000.0))
+    null
+  }
+  m["gmtime"] = __pyB("gmtime") { a ->
+    val s = __pySecondsArg(a) ?: __pyNowNanos() / 1000000000
+    pyStructTime(pyTmFromSeconds(s, 0, "UTC"))
+  }
+  m["localtime"] = __pyB("localtime") { a ->
+    val s = __pySecondsArg(a) ?: __pyNowNanos() / 1000000000
+    val o = __pyOffsetAt(s)
+    pyStructTime(pyTmFromSeconds(s, o, __pyZoneName(o)))
+  }
+  m["mktime"] = __pyB("mktime") { a ->
+    val t = pyTmOf(a.pos[0])
+    val days = pyYmdToOrd(t.year, 1, 1) + t.yday - 1 - 719163
+    val local = days * 86400 + t.hour * 3600 + t.min * 60 + t.sec
+    var s = local - __pyOffsetAt(local)
+    s = local - __pyOffsetAt(s)
+    s.toFloat()
+  }
+  m["asctime"] = __pyB("asctime") { a ->
+    val t = a.pos.isEmpty() ? pyTmFromSeconds(__pyNowNanos() / 1000000000, __pyOffsetAt(__pyNowNanos() / 1000000000), null) : pyTmOf(a.pos[0])
+    pyStrftime("%a %b %e %H:%M:%S %Y", t)
+  }
+  m["ctime"] = __pyB("ctime") { a ->
+    val s = __pySecondsArg(a) ?: __pyNowNanos() / 1000000000
+    pyStrftime("%a %b %e %H:%M:%S %Y", pyTmFromSeconds(s, __pyOffsetAt(s), null))
+  }
+  m["strftime"] = __pyB("strftime") { a ->
+    val fmt = a.pos[0] as string
+    val t = a.pos.size > 1 ? pyTmOf(a.pos[1]) : {
+      val s = __pyNowNanos() / 1000000000
+      val o = __pyOffsetAt(s)
+      pyTmFromSeconds(s, o, __pyZoneName(o))
+    }()
+    pyStrftime(fmt, t)
+  }
+  m["strptime"] = __pyB("strptime") { a ->
+    val p = pyStrptime(a.pos[0] as string, a.pos.size > 1 ? a.pos[1] as string : "%a %b %d %H:%M:%S %Y")
+    val yday = pyDaysBeforeMonth(p.year, p.month) + p.day
+    pyCall1(__pyStructTimeType, PyTuple([p.year, p.month, p.day, p.hour, p.minute, p.second, pyWeekday(p.year, p.month, p.day), yday, -1,
+      p.zone, p.offset]))
+  }
+  m["struct_time"] = __pyStructTimeType
+  return pyNativeModule("time", m)
+}

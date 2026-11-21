@@ -132,6 +132,17 @@ internal lazy val __pyCounterType : PyType = pyLibClass("Counter", "collections"
       x.keyList().all { pyEqB(x.get(it, 0), y.get(it, 0)) } and y.keyList().all { pyEqB(x.get(it, 0), y.get(it, 0)) }
     }
   },
+  // Multiset inclusion, missing counts as zero (3.10).
+  "__le__": pyLibMethod("Counter", "__le__") { self, a -> __pyCounterAll(self, a.pos[0], { x, y -> pyTruth(pyLe(x, y)) }) },
+  "__ge__": pyLibMethod("Counter", "__ge__") { self, a -> __pyCounterAll(self, a.pos[0], { x, y -> pyTruth(pyGe(x, y)) }) },
+  "__lt__": pyLibMethod("Counter", "__lt__") { self, a ->
+    val le = __pyCounterAll(self, a.pos[0], { x, y -> pyTruth(pyLe(x, y)) })
+    le === pyNotImplemented ? le : pyTruth(le) and !pyTruth(__pyCounterAll(self, a.pos[0], { x, y -> pyEqB(x, y) }))
+  },
+  "__gt__": pyLibMethod("Counter", "__gt__") { self, a ->
+    val ge = __pyCounterAll(self, a.pos[0], { x, y -> pyTruth(pyGe(x, y)) })
+    ge === pyNotImplemented ? ge : pyTruth(ge) and !pyTruth(__pyCounterAll(self, a.pos[0], { x, y -> pyEqB(x, y) }))
+  },
   "fromkeys": pyLibClassMethod("Counter", "fromkeys") { cls, a ->
     throw pyError(pyNotImplementedErrorType, "Counter.fromkeys() is undefined.  Use Counter(iterable) instead.")
   }
@@ -155,7 +166,7 @@ internal fun __pyOrderedMove(self : any?, key : any?, last : bool) {
   }
 }
 
-internal lazy val __pyOrderedDictType : PyType = pyLibClass("OrderedDict", "collections", [pyDictType], {
+internal lazy val __pyOrderedDictType : PyType = __pyCType("OrderedDict", [pyDictType], {
   "move_to_end": pyLibMethod("OrderedDict", "move_to_end") { self, a ->
     __pyOrderedMove(self, a.pos[0], pyTruth(a.pos.size > 1 ? a.pos[1] : a.get("last", true)))
     null
@@ -192,7 +203,7 @@ internal lazy val __pyOrderedDictType : PyType = pyLibClass("OrderedDict", "coll
 
 // ---- defaultdict ----
 
-internal lazy val __pyDefaultDictType : PyType = pyLibClass("defaultdict", "collections", [pyDictType], {
+internal lazy val __pyDefaultDictType : PyType = __pyCType("defaultdict", [pyDictType], {
   "__init__": pyLibMethod("defaultdict", "__init__") { self, a ->
     val factory = a.pos.isNotEmpty() ? a.pos[0] : null
     if (factory != null and !pyTruth(pyCallable(factory))) { throw pyTypeError("first argument must be callable or None") }
@@ -751,4 +762,19 @@ fun pyCopyModule() : PyModule {
   m["Error"] = error
   m["error"] = error
   return pyNativeModule("copy", m)
+}
+
+// A collections class CPython makes in C: its messages name it collections.X.
+internal fun __pyCType(name : string, bases : List<PyType>, members : Map<string, any?>) : PyType {
+  val t = pyLibClass(name, "collections", bases, members)
+  t.cName = "collections." + name
+  return t
+}
+
+// Whether `test` holds for the counts of every key of either Counter, the missing ones 0.
+internal fun __pyCounterAll(self : any?, other : any?, test : (any?, any?) -> bool) : any? {
+  if (!pyIsInstance(other, __pyCounterType)) { return pyNotImplemented }
+  val x = __pyDictOf(self)
+  val y = __pyDictOf(other)
+  return x.keyList().all { test(x.get(it, 0), y.get(it, 0)) } and y.keyList().all { test(x.get(it, 0), y.get(it, 0)) }
 }

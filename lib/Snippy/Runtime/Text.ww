@@ -111,7 +111,7 @@ fun pyRepr(x : any?) : string {
       val name = v.kind == 0 ? "dict_keys" : v.kind == 1 ? "dict_values" : "dict_items"
       "$name(" + pyRepr(v.items()) + ")"
     }
-    is PyIterator -> (x as PyIterator).reprText() ?: "<${(x as PyIterator).pyType().name} object at ${pyHexId(x)}>"
+    is PyIterator -> (x as PyIterator).reprText() ?: "<${pyTypeName(x)} object at ${pyHexId(x)}>"
     is PyProperty -> "<property object at ${pyHexId(x)}>"
     is PyClassMethod -> "<classmethod(${pyRepr((x as PyClassMethod).function)})>"
     is PyStaticMethod -> "<staticmethod(${pyRepr((x as PyStaticMethod).function)})>"

@@ -1,0 +1,89 @@
+float True int True True True
+time.struct_time(tm_year=1970, tm_mon=1, tm_mday=1, tm_hour=0, tm_min=0, tm_sec=0, tm_wday=3, tm_yday=1, tm_isdst=0) 1970 1970 3 1 (1970, 1, 1, 0, 0, 0, 3, 1, 0) time.struct_time(tm_year=2023, tm_mon=11, tm_mday=14, tm_hour=22, tm_min=13, tm_sec=20, tm_wday=1, tm_yday=318, tm_isdst=0)
+2023-11-14 22:13:20 Tue Tuesday Nov November 318 2 23 PM 10 % Fri Jan  1 00:00:00 1971
+2 29 29/02/2024 13:05 0 (2024, 3, 1, 10, 20, 0)
+True True
+8 days, 2:03:04.006005 datetime.timedelta(days=8, seconds=7384, microseconds=6005) 8 7384 6005 698584.006005 -1 day, 23:00:00 datetime.timedelta(days=-1, seconds=86399) 0:00:00 -1 day, 0:00:01
+16 days, 4:06:08.012010 4 days, 1:01:32.003002 2 days, 16:41:01.335335 2:03:04.006005 -9 days, 21:56:55.993995 8 days, 2:03:04.006005 16 days, 4:06:08.012010 2:03:04.006005 194.05111277916666 194 1 day, 12:00:00 0:00:00.500000
+999999999 days, 23:59:59.999999 -999999999 days, 0:00:00 0:00:00.000001 True True False
+2024-02-29 datetime.date(2024, 2, 29) 2024 2 29 3 4 datetime.IsoCalendarDate(year=2024, week=9, weekday=4) 2024-02-29 738945 (2024, 2, 29) Thu Feb 29 00:00:00 2024
+2024-03-01 2023-02-28 307 days, 0:00:00 2028-02-29 2024-02-29 2023-12-25 2024-01-01 Thursday 29 February 2024, week 08 09, 2024-W09-4 2024/02/29 0001-01-01 9999-12-31 True
+datetime.IsoCalendarDate(year=2025, week=1, weekday=1) 53 2024-02-29 2024-02-29
+2024-02-29 13:05:09.123456 datetime.datetime(2024, 2, 29, 13, 5, 9, 123456) 2024-02-29 13:05:09.123456 13 5 9 123456 2024-02-29T13:05:09.123456 2024-02-29 13:05 3
+2024-03-01 00:05:09.123456 59 days, 13:05:09.123456 2024-02-29 13:05:09 20240229T130509.123456 01:05 PM 2024-02-29 13:05:09.500000 2024-02-29 08:30:00 True (2024, 2, 29, 13, 5, 9) 738945
+2024-02-29 13:05:00+00:00 datetime.datetime(2024, 2, 29, 13, 5, tzinfo=datetime.timezone.utc) 1709211900.0 2024-02-29 08:05:00-05:00 0:00:00 UTC EST datetime.timezone(datetime.timedelta(days=-1, seconds=68400), 'EST') UTC+05:30 2024-02-29T13:05:00+00:00
+2023-11-14 22:13:20+00:00 1970-01-01T00:00:00+00:00 5:00:00 2024-02-29 13:05:09+02:00 True 2024-02-29 13:05:00
+23:59:59.999999 07:05:00 10:20:30.250000 05:02:03 True 14:03 PM 0001-01-01 00:00:00 9999-12-31 23:59:59.999999 1 9999 1
+ValueError day 29 must be in range 1..28 for month 2 in year 2023
+ValueError month must be in 1..12, not 13
+ValueError Invalid isoformat string: '2024-1-1'
+OverflowError Python int too large to convert to C int
+TypeError can't subtract offset-naive and offset-aware datetimes
+ValueError time data 'x' does not match format '%Y'
+TypeError unsupported operand type(s) for +: 'datetime.date' and 'int'
+['The quick brown fox jumps over', 'the lazy dog. The quick brown', 'fox jumps over the lazy dog.', 'The quick brown fox jumps over', 'the lazy dog.']
+* The quick brown fox jumps over the
+  lazy dog. The quick brown fox jumps
+  over the lazy dog. The quick brown fox
+  jumps over the lazy dog.
+Hello world! [...] Hi there a b c..
+'one\n  two\nthree\n' '> a\n\n> b\n' '+a\n+b'
+['supercalifra', 'gilisticexpi', '[..]'] ['a-', 'hyphenated', '-compound', 'word here']
+['tab here', 'and', 'there'] ['  lead ', 'and ', 'trail  '] ['one.', 'Two.', 'three'] [] ['x', 'x', 'x']
+-1 day, 23:59:59.999999 -3 days, 5:00:00 datetime.timedelta(days=-3, seconds=18000) 0:00:01.000001 0:00:00.000002 0:00:00.000004 0:00:06
+8:00:00 2:24:00 2:30:00 (2, datetime.timedelta(seconds=3600)) -1 day, 22:30:00 3:25:42.857143
+-2 days, 23:59:55 -1 day, 23:59:59.999999 -4 days, 12:00:00 3600.0 1e-06
+2024-03-10 02:30:00+05:30:15.000007 +053015.000007 +05:30:15.000007 UTC+05:30:15.000007|000000|% UTC+05:30:15.000007 datetime.timezone(datetime.timedelta(seconds=19815, microseconds=7)) UTC datetime.timezone.utc datetime.timezone.utc UTC-03:00
+2024-02-29 00:00:00 2024-02-29 13:00:00 2024-02-29 13:05:00 2024-02-29 13:05:09 2024-02-29 13:05:09.123456 2024-02-29 13:05:00+00:00 2024-02-29 13:05:09-03:30 2024-02-29 10:00:00 2024-03-01 00:00:00
+10:20:00 10:20:30+00:00 01:00:00+05:30:15.000007 datetime.time(1, 2, tzinfo=datetime.timezone.utc) datetime.time(0, 0) datetime.time(1, 2, 3, 4) 05:00:00.000
+False True True True
+-1 day, 23:00:00 366 days, 0:00:00 3652058 days, 0:00:00 False
+2024-03-09 20:59:44.999993+00:00 2024-03-09 12:59:44.999993-08:00 (2024, 3, 9, 20, 59, 44) -1 1710017984.999993 1970-01-01 00:00:01.500000+00:00 1969-12-31 23:59:58.999999+00:00 1970-01-01 00:00:00+00:00 1970-01-01 00:00:00.000002+00:00
+Thu Feb 29 00:00:00 2024 Fri Feb  9 03:04:05 2024 02.01 2024-01-02 01 0001-01-01 00:00:00+00:00
+D(2024, 1, 2, 0, 0) 2024-01-03 00:00:00 D D datetime.IsoCalendarDate(year=2024, week=1, weekday=2)
+2024-06-01 12:00:00+01:00 FX 2024-06-01 11:00:00+00:00 FX +0100 0 0:00:00
+OverflowError days=1000000000; must have magnitude <= 999999999
+ValueError offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), not datetime.timedelta(days=1)
+ValueError hour must be in 0..23, not 24
+ValueError minute must be in 0..59, not 60
+ValueError year must be in 1..9999, not 0
+TypeError can't compare offset-naive and offset-aware datetimes
+TypeError '<' not supported between instances of 'datetime.date' and 'datetime.datetime'
+OverflowError date value out of range
+ZeroDivisionError division by zero
+ValueError day 30 must be in range 1..29 for month 2 in year 2024
+TypeError 'float' object cannot be interpreted as an integer
+TypeError unsupported type for timedelta days component: str
+ValueError unconverted data remains:  junk
+TypeError timezone() argument 1 must be datetime.timedelta, not int
+1 ['H', 'e', 'l', 'l', 'o', '-', '-', 'w', 'o', 'r', 'l', 'd', 'a', 'n', 'd', 's', 'o', '-', '-', 'o', 'n', '-', '-', 'h', 'e', 'r', 'e'] ['H', 'e', 'l', 'l', 'o', '-', '-', 'w', 'o', 'r', 'l', 'd', 'a', 'n', 'd', 's', 'o', '-', '-', 'o', 'n', '-', '-', 'h', 'e', 'r', 'e'] ['Hello', '--', 'world', 'and', 'so', '--', 'on', '--', 'here']
+3 ['Hel', 'lo', '--w', 'orl', 'd', 'and', 'so', '--', 'on', '--', 'her', 'e'] ['Hel', 'lo-', '-wo', 'rld', 'and', 'so-', '-on', '--', 'her', 'e'] ['Hello', '--', 'world', 'and', 'so', '--', 'on', '--', 'here']
+5 ['Hello', '--', 'world', 'and', 'so--', 'on --', 'here'] ['Hello', '--wor', 'ld', 'and s', 'o--on', '--', 'here'] ['Hello', '--', 'world', 'and', 'so--', 'on --', 'here']
+8 ['Hello--', 'world', 'and so--', 'on --', 'here'] ['Hello--w', 'orld and', 'so--on', '-- here'] ['Hello--', 'world', 'and so--', 'on --', 'here']
+12 ['Hello--world', 'and so--on', '-- here'] ['Hello--world', 'and so--on', '-- here'] ['Hello--world', 'and so--on', '-- here']
+1 ['w', 'e', 'l', 'l', '-', 'k', 'n', 'o', 'w', 'n', 'a', '-', 'b', '-', 'c', 'x', '-', '-', 'y', '1', '2', '-', '3', '4', 'a', 'b', '-', 'c', 'd', '-', 'e', 'f'] ['w', 'e', 'l', 'l', '-', 'k', 'n', 'o', 'w', 'n', 'a', '-', 'b', '-', 'c', 'x', '-', '-', 'y', '1', '2', '-', '3', '4', 'a', 'b', '-', 'c', 'd', '-', 'e', 'f'] ['well-', 'known', 'a-b-c', 'x', '--', 'y', '12-34', 'ab-', 'cd-', 'ef']
+3 ['wel', 'l-k', 'now', 'n a', '-b-', 'c x', '--y', '12-', '34', 'ab-', 'cd-', 'ef'] ['wel', 'l-k', 'now', 'n a', '-b-', 'c x', '--y', '12-', '34', 'ab-', 'cd-', 'ef'] ['well-', 'known', 'a-b-c', 'x--', 'y', '12-34', 'ab-', 'cd-', 'ef']
+5 ['well-', 'known', 'a-b-c', 'x--y', '12-34', 'ab-', 'cd-ef'] ['well-', 'known', 'a-b-c', 'x--y', '12-34', 'ab-cd', '-ef'] ['well-', 'known', 'a-b-c', 'x--y', '12-34', 'ab-', 'cd-ef']
+8 ['well-', 'known', 'a-b-c x', '--y', '12-34', 'ab-cd-ef'] ['well-kno', 'wn a-b-c', 'x--y', '12-34', 'ab-cd-ef'] ['well-', 'known', 'a-b-c x', '--y', '12-34', 'ab-cd-ef']
+12 ['well-known', 'a-b-c x--y', '12-34 ab-cd-', 'ef'] ['well-known', 'a-b-c x--y', '12-34', 'ab-cd-ef'] ['well-known', 'a-b-c x--y', '12-34 ab-cd-', 'ef']
+1 ['e', '-', 'm', 'a', 'i', 'l', 'r', 'e', '-', 'u', 's', 'e', 's', 'e', 'l', 'f', '-', 'c', 'o', 'n', 't', 'a', 'i', 'n', 'e', 'd', 'f', 'o', 'o', '_', 'b', 'a', 'r', '-', 'b', 'a', 'z'] ['e', '-', 'm', 'a', 'i', 'l', 'r', 'e', '-', 'u', 's', 'e', 's', 'e', 'l', 'f', '-', 'c', 'o', 'n', 't', 'a', 'i', 'n', 'e', 'd', 'f', 'o', 'o', '_', 'b', 'a', 'r', '-', 'b', 'a', 'z'] ['e-mail', 're-', 'use', 'self-', 'contained', 'foo_bar-', 'baz']
+3 ['e-', 'mai', 'l', 're-', 'use', 'sel', 'f-c', 'ont', 'ain', 'ed', 'foo', '_ba', 'r-', 'baz'] ['e-m', 'ail', 're-', 'use', 'sel', 'f-c', 'ont', 'ain', 'ed', 'foo', '_ba', 'r-b', 'az'] ['e-mail', 're-', 'use', 'self-', 'contained', 'foo_bar-', 'baz']
+5 ['e-', 'mail', 're-', 'use', 'self-', 'conta', 'ined', 'foo_b', 'ar-', 'baz'] ['e-mai', 'l re-', 'use s', 'elf-c', 'ontai', 'ned f', 'oo_ba', 'r-baz'] ['e-mail', 're-', 'use', 'self-', 'contained', 'foo_bar-', 'baz']
+8 ['e-mail', 're-use', 'self-con', 'tained', 'foo_bar-', 'baz'] ['e-mail', 're-use s', 'elf-cont', 'ained fo', 'o_bar-ba', 'z'] ['e-mail', 're-use', 'self-', 'contained', 'foo_bar-', 'baz']
+12 ['e-mail re-', 'use self-', 'contained', 'foo_bar-baz'] ['e-mail', 're-use self-', 'contained', 'foo_bar-baz'] ['e-mail re-', 'use self-', 'contained', 'foo_bar-baz']
+1 ['-', '-', 'l', 'e', 'a', 'd', 'i', 'n', 'g', 'd', 'a', 's', 'h', 'e', 's', '-', '-'] ['-', '-', 'l', 'e', 'a', 'd', 'i', 'n', 'g', 'd', 'a', 's', 'h', 'e', 's', '-', '-'] ['--leading', 'dashes--']
+3 ['--l', 'ead', 'ing', 'das', 'hes', '--'] ['--l', 'ead', 'ing', 'das', 'hes', '--'] ['--leading', 'dashes--']
+5 ['--lea', 'ding', 'dashe', 's--'] ['--lea', 'ding', 'dashe', 's--'] ['--leading', 'dashes--']
+8 ['--leadin', 'g', 'dashes--'] ['--leadin', 'g', 'dashes--'] ['--leading', 'dashes--']
+12 ['--leading', 'dashes--'] ['--leading', 'dashes--'] ['--leading', 'dashes--']
+1 ['w', 'o', 'r', 'd', ',', '-', '-', 'a', 'n', 'd', ';', 't', 'h', 'i', 's', '?', '-', '-', 't', 'h', 'a', 't', "'", 'q', 'u', 'o', 't', 'e', 'd', "'", '-', '-', 'x'] ['w', 'o', 'r', 'd', ',', '-', '-', 'a', 'n', 'd', ';', 't', 'h', 'i', 's', '?', '-', '-', 't', 'h', 'a', 't', "'", 'q', 'u', 'o', 't', 'e', 'd', "'", '-', '-', 'x'] ['word,', '--and;', 'this?', '--', 'that', "'quoted'", '--', 'x']
+3 ['wor', 'd,', '--a', 'nd;', 'thi', 's?', '--t', 'hat', "'qu", 'ote', "d'", '--x'] ['wor', 'd,', '--a', 'nd;', 'thi', 's?-', '-th', 'at', "'qu", 'ote', "d'-", '-x'] ['word,', '--and;', 'this?', '--', 'that', "'quoted'", '--x']
+5 ['word,', '--and', ';', 'this?', '--', 'that', "'quot", "ed'--", 'x'] ['word,', '--and', '; thi', 's?--t', "hat '", 'quote', "d'--x"] ['word,', '--and;', 'this?', '--', 'that', "'quoted'", '--x']
+8 ['word,', '--and;', 'this?--', 'that', "'quoted'", '--x'] ['word,', '--and; t', 'his?--th', "at 'quot", "ed'--x"] ['word,', '--and;', 'this?--', 'that', "'quoted'", '--x']
+12 ['word, --and;', 'this?--that', "'quoted'--x"] ['word, --and;', 'this?--that', "'quoted'--x"] ['word, --and;', 'this?--that', "'quoted'--x"]
+a b c
+[...] ['aaa bbb', 'ccc ddd']
+' x\n y\n\n\nz' '\n' 'x\n  y'
+invalid width 0 (must be > 0)
+placeholder too large for max width
+['abc', 'def', 'ghi'] 6  [...]

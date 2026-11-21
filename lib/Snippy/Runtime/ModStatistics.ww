@@ -1,0 +1,576 @@
+import Snippy.Text.*
+// statistics (the Snippy plan, part 5.3, step 3), in WinterWolf, after CPython's statistics.py:
+// sums worked out exactly as fractions, their type the data's (ints stay ints where exact, then
+// floats; Fractions stay Fractions), square roots of fractions correctly rounded, fsum and
+// sumprod where CPython uses them, and NormalDist with its AS241 inverse.
+
+internal lazy val __pyStatisticsErrorType : PyType = __pyMakeStatisticsError()
+internal fun __pyMakeStatisticsError() : PyType {
+  val t = __pyExc("StatisticsError", pyValueErrorType)
+  t.module = "statistics"
+  return t
+}
+internal fun __pyStatError(message : string) : PyError => pyError(__pyStatisticsErrorType, message)
+
+// The kind of a number for the sums' type: 0 int (and bool), 1 Fraction, 2 float.
+internal fun __pyNumKind(x : any?) : int {
+  if (pyIsInt(x)) { return 0 }
+  if (x is float) { return 2 }
+  if (pyIsInstance(x, __pyFractionType)) { return 1 }
+  throw pyTypeError("can't convert type '${pyTypeName(x)}' to numerator/denominator")
+}
+
+// CPython's _sum: (the kind, the exact total, how many), or with a NaN or infinity among them a float total.
+class PyStatSum(val kind : int, val n : BigInt, val d : BigInt, val count : int, val special : float?)
+
+internal fun __pySum(data : List<any?>) : PyStatSum {
+  var kind = 0
+  var n = BigInt.of(0)
+  var d = BigInt.of(1)
+  var special : float? = null
+  for x in data {
+    val k = __pyNumKind(x)
+    if (k > kind) { kind = k }
+    if (x is float and ((x as float).isNaN() or (x as float).isInfinite())) {
+      special = special == null ? x as float : special!! + (x as float)
+      continue
+    }
+    val r = x is float ? pyFloatRatio(x as float) : Pair(__pyNumOf(x), __pyDenOf(x))
+    n = n * r.second + r.first * d
+    d = d * r.second
+    val g = n.gcd(d).abs()
+    if (!g.isZero) { n = n / g; d = d / g }
+  }
+  return PyStatSum(kind, n, d, data.size, special)
+}
+
+// A value made the sums' type, as CPython's _convert: an int where it is whole, else a float.
+internal fun __pyConvert(n : BigInt, d : BigInt, kind : int) : any? {
+  if (kind == 1) { return __pyFrac(n, d) }
+  if (kind == 0 and (n % d).isZero) { return pyNorm(n / d) }
+  return pyRatioToFloat(n, d)
+}
+
+// The square root of n/m, correctly rounded, as CPython's _float_sqrt_of_frac.
+fun pySqrtOfRatio(n : BigInt, m : BigInt) : float {
+  if (n.isZero) { return 0.0 }
+  var k = (120 - n.bitLength + m.bitLength) / 2
+  if (k < 0) { k = 0 }
+  val scaled = n << (2 * k)
+  val q = scaled / m
+  val exactDiv = q * m == scaled
+  val r = q.sqrt()
+  val exact = exactDiv and r * r == q
+  return pyExactToFloat((r << 1) + (exact ? 0 : 1), -k - 1)
+}
+
+// CPython's _ss: the sum of squares of the deviations from the mean (or from c), exactly.
+class PyStatSS(val kind : int, val ssN : BigInt, val ssD : BigInt, val cN : BigInt, val cD : BigInt, val count : int, val special : float?)
+
+internal fun __pySS(data : List<any?>, c : any?) : PyStatSS {
+  if (c != null) {
+    val devs : open List<any?> = []
+    for x in data {
+      val dx = pySub(x, c)
+      devs.add(pyMul(dx, dx))
+    }
+    val s = __pySum(devs)
+    return PyStatSS(s.kind, s.n, s.d, BigInt.of(0), BigInt.of(1), s.count, s.special)
+  }
+  var kind = 0
+  var sxN = BigInt.of(0)
+  var sxD = BigInt.of(1)
+  var sxxN = BigInt.of(0)
+  var sxxD = BigInt.of(1)
+  var special : float? = null
+  for x in data {
+    val k = __pyNumKind(x)
+    if (k > kind) { kind = k }
+    if (x is float and ((x as float).isNaN() or (x as float).isInfinite())) {
+      special = special == null ? x as float : special!! + (x as float)
+      continue
+    }
+    val r = x is float ? pyFloatRatio(x as float) : Pair(__pyNumOf(x), __pyDenOf(x))
+    sxN = sxN * r.second + r.first * sxD
+    sxD = sxD * r.second
+    sxxN = sxxN * r.second * r.second + r.first * r.first * sxxD
+    sxxD = sxxD * r.second * r.second
+  }
+  val count = data.size
+  if (count == 0 or special != null) {
+    return PyStatSS(kind, BigInt.of(0), BigInt.of(1), BigInt.of(0), BigInt.of(1), count, special)
+  }
+  // ssd = (count * sxx - sx * sx) / count, c = sx / count.
+  val cnt = BigInt.of(count)
+  val num = (cnt * sxxN * sxD * sxD - sxN * sxN * sxxD)
+  val den = sxxD * sxD * sxD * cnt
+  val g = num.gcd(den).abs()
+  return PyStatSS(kind, g.isZero ? num : num / g, g.isZero ? den : den / g, sxN, sxD * cnt, count, null)
+}
+
+fun pyFsum(values : List<float>) : float {
+  var plus = false
+  var minus = false
+  for v in values {
+    if (v.isNaN()) { return v }
+    if (v == pyInf) { plus = true }
+    if (v == -pyInf) { minus = true }
+  }
+  if (plus and minus) { throw pyValueError("-inf + inf in fsum") }
+  if (plus) { return pyInf }
+  if (minus) { return -pyInf }
+  val s = __pyExactSum(values.map { pyFloatExact(it) })
+  return pyExactToFloat(s.first, s.second)
+}
+
+internal fun __pyFloats2(x : any?) : List<float> => pyIterable(x).map { pyRealArg(it) }
+
+// sumprod of floats, exactly and rounded once (math.sumprod's float case).
+internal fun __pySumprodF(p : List<float>, q : List<float>) : float {
+  val parts : open List<Pair<BigInt, int>> = []
+  for i in p.indices {
+    val x = pyFloatExact(p[i])
+    val y = pyFloatExact(q[i])
+    parts.add(Pair(x.first * y.first, x.second + y.second))
+  }
+  val s = __pyExactSum(parts)
+  return pyExactToFloat(s.first, s.second)
+}
+
+internal fun __pySorted(data : any?) : open List<any?> => pySortedBy(pyIterable(data).toOpenList(), { x -> x }, false)
+
+// sqrt(x * y) with care, as CPython's _sqrtprod.
+internal fun __pySqrtProd(x : float, y : float) : float {
+  val h = Math.sqrt(x * y)
+  if (h.isNaN() or h.isInfinite()) {
+    if (h.isInfinite() and !x.isInfinite() and !y.isInfinite()) {
+      val scale = 2.0.pow(-512)
+      return __pySqrtProd(scale * x, scale * y) / scale
+    }
+    return h
+  }
+  if (h == 0.0) {
+    if (x != 0.0 and y != 0.0) {
+      val scale = 2.0.pow(537)
+      return __pySqrtProd(scale * x, scale * y) / scale
+    }
+    return h
+  }
+  val d = __pySumprodF([x, h], [y, -h])
+  return h + d / (2.0 * h)
+}
+
+// _rank: ranks from `start`, ties given the mean of theirs.
+internal fun __pyRank(data : List<any?>, start : float) : List<float> {
+  val idx = pySortedBy(data.indices.map { PyTuple([data[it], it]) as any? }.toOpenList(), { x -> x }, false)
+  val result : open List<float> = data.map { 0.0 }.toOpenList()
+  var i = start - 1.0
+  var at = 0
+  while (at < idx.size) {
+    var end = at
+    val v = (idx[at] as PyTuple).items[0]
+    while (end < idx.size and pyEqB((idx[end] as PyTuple).items[0], v)) { end += 1 }
+    val size = (end - at).toFloat()
+    val rank = i + (size + 1.0) / 2.0
+    for k in at..<end { result[(idx[k] as PyTuple).items[1] as int] = rank }
+    i += size
+    at = end
+  }
+  return result
+}
+
+// AS241, as CPython's _normal_dist_inv_cdf.
+fun pyNormalInvCdf(p : float, mu : float, sigma : float) : float {
+  val q = p - 0.5
+  if (Math.abs(q) <= 0.425) {
+    val r = 0.180625 - q * q
+    val num = (((((((2.5090809287301226727e+3 * r + 3.3430575583588128105e+4) * r + 6.7265770927008700853e+4) * r +
+                4.5921953931549871457e+4) * r + 1.3731693765509461125e+4) * r + 1.9715909503065514427e+3) * r +
+                1.3314166789178437745e+2) * r + 3.3871328727963666080e+0) * q
+    val den = (((((((5.2264952788528545610e+3 * r + 2.8729085735721942674e+4) * r + 3.9307895800092710610e+4) * r +
+                2.1213794301586595867e+4) * r + 5.3941960214247511077e+3) * r + 6.8718700749205790830e+2) * r +
+                4.2313330701600911252e+1) * r + 1.0)
+    return mu + (num / den) * sigma
+  }
+  var r = q <= 0.0 ? p : 1.0 - p
+  r = Math.sqrt(-Math.ln(r))
+  var num = 0.0
+  var den = 0.0
+  if (r <= 5.0) {
+    r = r - 1.6
+    num = (((((((7.74545014278341407640e-4 * r + 2.27238449892691845833e-2) * r + 2.41780725177450611770e-1) * r +
+            1.27045825245236838258e+0) * r + 3.64784832476320460504e+0) * r + 5.76949722146069140550e+0) * r +
+            4.63033784615654529590e+0) * r + 1.42343711074968357734e+0)
+    den = (((((((1.05075007164441684324e-9 * r + 5.47593808499534494600e-4) * r + 1.51986665636164571966e-2) * r +
+            1.48103976427480074590e-1) * r + 6.89767334985100004550e-1) * r + 1.67638483018380384940e+0) * r +
+            2.05319162663775882187e+0) * r + 1.0)
+  } else {
+    r = r - 5.0
+    num = (((((((2.01033439929228813265e-7 * r + 2.71155556874348757815e-5) * r + 1.24266094738807843860e-3) * r +
+            2.65321895265761230930e-2) * r + 2.96560571828504891230e-1) * r + 1.78482653991729133580e+0) * r +
+            5.46378491116411436990e+0) * r + 6.65790464350110377720e+0)
+    den = (((((((2.04426310338993978564e-15 * r + 1.42151175831644588870e-7) * r + 1.84631831751005468180e-5) * r +
+            7.86869131145613259100e-4) * r + 1.48753612908506148525e-2) * r + 1.36929880922735805310e-1) * r +
+            5.99832206555887937690e-1) * r + 1.0)
+  }
+  var x = num / den
+  if (q < 0.0) { x = -x }
+  return mu + x * sigma
+}
+
+internal val __pySqrt2 = Math.sqrt(2.0)
+
+internal fun __pyND(self : any?) : Pair<float, float> => Pair(pyToFloat(pyGetAttr(self, "_mu")), pyToFloat(pyGetAttr(self, "_sigma")))
+internal fun __pyMakeND(cls : any?, mu : float, sigma : float) : any? => pyCallV(cls, [mu, sigma], null)
+internal fun __pyNDCdf(mu : float, sigma : float, x : float) : float {
+  if (sigma == 0.0) { throw __pyStatError("cdf() not defined when sigma is zero") }
+  return 0.5 * __pyErfExact((mu - x) / (sigma * __pySqrt2), true)
+}
+
+internal lazy val __pyNormalDistType : PyType = __pyMakeNormalDist()
+internal fun __pyMakeNormalDist() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["__slots__"] = PyTuple(["_mu", "_sigma"])
+  m["__init__"] = pyLibMethod("NormalDist", "__init__") { self, a ->
+    val mu = pyToFloat(pyFloatOf1(a.pos.isNotEmpty() ? a.pos[0] : a.get("mu", 0.0)))
+    val sigma = pyToFloat(pyFloatOf1(a.pos.size > 1 ? a.pos[1] : a.get("sigma", 1.0)))
+    if (sigma < 0.0) { throw __pyStatError("sigma must be non-negative") }
+    pySetAttr(self, "_mu", mu)
+    pySetAttr(self, "_sigma", sigma)
+    null
+  }
+  m["from_samples"] = pyLibClassMethod("NormalDist", "from_samples") { cls, a ->
+    val data = pyIterable(a.pos[0])
+    val ss = __pySS(data, null)
+    if (ss.count < 2) { throw __pyStatError("stdev requires at least two data points") }
+    val mean = pyRatioToFloat(ss.cN, ss.cD)
+    val sd = pySqrtOfRatio(ss.ssN, ss.ssD * BigInt.of(ss.count - 1))
+    __pyMakeND(cls, mean, sd)
+  }
+  fun prop(name : string, f : (float, float) -> any?) {
+    m[name] = PyProperty(PyBuiltin(name, { args, kw -> val p = __pyND(args[0]); f(p.first, p.second) }), null, null, null)
+  }
+  prop("mean", { mu, sigma -> mu })
+  prop("median", { mu, sigma -> mu })
+  prop("mode", { mu, sigma -> mu })
+  prop("stdev", { mu, sigma -> sigma })
+  prop("variance", { mu, sigma -> sigma * sigma })
+  m["pdf"] = pyLibMethod("NormalDist", "pdf") { self, a ->
+    val p = __pyND(self)
+    val variance = p.second * p.second
+    if (variance == 0.0) { throw __pyStatError("pdf() not defined when sigma is zero") }
+    val diff = pyToFloat(a.pos[0]) - p.first
+    Math.exp(diff * diff / (-2.0 * variance)) / Math.sqrt(2.0 * Math.pi * variance)
+  }
+  m["cdf"] = pyLibMethod("NormalDist", "cdf") { self, a -> val p = __pyND(self); __pyNDCdf(p.first, p.second, pyToFloat(a.pos[0])) }
+  m["inv_cdf"] = pyLibMethod("NormalDist", "inv_cdf") { self, a ->
+    val p = __pyND(self)
+    val x = pyToFloat(a.pos[0])
+    if (x <= 0.0 or x >= 1.0) { throw __pyStatError("p must be in the range 0.0 < p < 1.0") }
+    pyNormalInvCdf(x, p.first, p.second)
+  }
+  m["quantiles"] = pyLibMethod("NormalDist", "quantiles") { self, a ->
+    val p = __pyND(self)
+    val n = pyIndex(a.pos.isNotEmpty() ? a.pos[0] : a.get("n", 4))
+    pyNewList((1..<n).map { pyNormalInvCdf(it.toFloat() / n.toFloat(), p.first, p.second) as any? }.toOpenList())
+  }
+  m["zscore"] = pyLibMethod("NormalDist", "zscore") { self, a ->
+    val p = __pyND(self)
+    if (p.second == 0.0) { throw __pyStatError("zscore() not defined when sigma is zero") }
+    (pyToFloat(a.pos[0]) - p.first) / p.second
+  }
+  m["overlap"] = pyLibMethod("NormalDist", "overlap") { self, a ->
+    var x = __pyND(self)
+    var y = __pyND(a.pos[0])
+    if (y.second < x.second or (y.second == x.second and y.first < x.first)) { val t = x; x = y; y = t }
+    val xv = x.second * x.second
+    val yv = y.second * y.second
+    if (xv == 0.0 or yv == 0.0) { throw __pyStatError("overlap() not defined when sigma is zero") }
+    val dv = yv - xv
+    val dm = Math.abs(y.first - x.first)
+    if (dv == 0.0) { 2.0 * __pyNDCdf(dm, 2.0 * x.second, 0.0) } else {
+      val aa = x.first * yv - y.first * xv
+      val b = x.second * y.second * Math.sqrt(dm * dm + dv * Math.ln(yv / xv))
+      val x1 = (aa + b) / dv
+      val x2 = (aa - b) / dv
+      1.0 - (Math.abs(__pyNDCdf(y.first, y.second, x1) - __pyNDCdf(x.first, x.second, x1)) +
+             Math.abs(__pyNDCdf(y.first, y.second, x2) - __pyNDCdf(x.first, x.second, x2)))
+    }
+  }
+  m["samples"] = pyLibMethod("NormalDist", "samples") { self, a ->
+    val p = __pyND(self)
+    val seed = a.get("seed", null)
+    val rng = pyCall1(__pyRandomType, seed)
+    val out : open List<any?> = []
+    for i in 0..<pyIndex(a.pos[0]) { out.add(pyNormalInvCdf(__pyRand(rng), p.first, p.second)) }
+    pyNewList(out)
+  }
+  m["__add__"] = pyLibMethod("NormalDist", "__add__") { self, a ->
+    val p = __pyND(self)
+    val o = a.pos[0]
+    if (pyIsInstance(o, __pyNormalDistType)) { val q = __pyND(o); __pyMakeND(pyTypeOf(self), p.first + q.first, Math.hypot(p.second, q.second)) }
+    else { __pyMakeND(pyTypeOf(self), p.first + pyToFloat(o), p.second) }
+  }
+  m["__radd__"] = m["__add__"]
+  m["__sub__"] = pyLibMethod("NormalDist", "__sub__") { self, a ->
+    val p = __pyND(self)
+    val o = a.pos[0]
+    if (pyIsInstance(o, __pyNormalDistType)) { val q = __pyND(o); __pyMakeND(pyTypeOf(self), p.first - q.first, Math.hypot(p.second, q.second)) }
+    else { __pyMakeND(pyTypeOf(self), p.first - pyToFloat(o), p.second) }
+  }
+  m["__rsub__"] = pyLibMethod("NormalDist", "__rsub__") { self, a -> val p = __pyND(self); __pyMakeND(pyTypeOf(self), pyToFloat(a.pos[0]) - p.first, p.second) }
+  m["__mul__"] = pyLibMethod("NormalDist", "__mul__") { self, a -> val p = __pyND(self); val k = pyToFloat(a.pos[0]); __pyMakeND(pyTypeOf(self), p.first * k, p.second * Math.abs(k)) }
+  m["__rmul__"] = m["__mul__"]
+  m["__truediv__"] = pyLibMethod("NormalDist", "__truediv__") { self, a -> val p = __pyND(self); val k = pyToFloat(a.pos[0]); __pyMakeND(pyTypeOf(self), p.first / k, p.second / Math.abs(k)) }
+  m["__pos__"] = pyLibMethod("NormalDist", "__pos__") { self, a -> val p = __pyND(self); __pyMakeND(pyTypeOf(self), p.first, p.second) }
+  m["__neg__"] = pyLibMethod("NormalDist", "__neg__") { self, a -> val p = __pyND(self); __pyMakeND(pyTypeOf(self), -p.first, p.second) }
+  m["__eq__"] = pyLibMethod("NormalDist", "__eq__") { self, a ->
+    if (!pyIsInstance(a.pos[0], __pyNormalDistType)) { pyNotImplemented } else {
+      val p = __pyND(self)
+      val q = __pyND(a.pos[0])
+      p.first == q.first and p.second == q.second
+    }
+  }
+  m["__hash__"] = pyLibMethod("NormalDist", "__hash__") { self, a -> val p = __pyND(self); pyHash(PyTuple([p.first, p.second])) }
+  m["__repr__"] = pyLibMethod("NormalDist", "__repr__") { self, a ->
+    val p = __pyND(self)
+    "${pyTypeOf(self).name}(mu=${pyRepr(p.first)}, sigma=${pyRepr(p.second)})"
+  }
+  return pyLibClass("NormalDist", "statistics", [pyObjectType], m)
+}
+
+internal lazy val __pyLinearRegressionType : PyType =
+  pyNamedTuple(PyArgs(["LinearRegression", PyTuple(["slope", "intercept"]), "statistics"], ["module"], "namedtuple()"))
+
+fun pyStatisticsModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["StatisticsError"] = __pyStatisticsErrorType
+  m["mean"] = __pyB("mean") { a ->
+    val data = pyIterable(a.pos[0])
+    if (data.isEmpty()) { throw __pyStatError("mean requires at least one data point") }
+    val s = __pySum(data)
+    if (s.special != null) { s.special!! } else { __pyConvert(s.n, s.d * BigInt.of(s.count), s.kind) }
+  }
+  m["fmean"] = __pyB("fmean") { a ->
+    val data = __pyFloats2(a.pos[0])
+    val weights = a.pos.size > 1 ? a.pos[1] : a.get("weights", null)
+    if (weights == null) {
+      if (data.isEmpty()) { throw __pyStatError("fmean requires at least one data point") }
+      pyFsum(data) / data.size.toFloat()
+    } else {
+      val w = __pyFloats2(weights)
+      if (w.size != data.size) { throw __pyStatError("data and weights must be the same length") }
+      val den = pyFsum(w)
+      if (den == 0.0) { throw __pyStatError("sum of weights must be non-zero") }
+      __pySumprodF(data, w) / den
+    }
+  }
+  m["geometric_mean"] = __pyB("geometric_mean") { a ->
+    var n = 0
+    var foundZero = false
+    val logs : open List<float> = []
+    for x in pyIterable(a.pos[0]) {
+      n += 1
+      val v = pyRealArg(x)
+      if (v > 0.0 or v.isNaN()) { logs.add(Math.ln(v)) }
+      else if (v == 0.0) { foundZero = true }
+      else { throw __pyStatError("No negative inputs allowed") }
+    }
+    if (n == 0) { throw __pyStatError("Must have a non-empty dataset") }
+    val total = pyFsum(logs)
+    if (total.isNaN()) { total } else if (foundZero) { total == pyInf ? pyNaN : 0.0 } else { Math.exp(total / n.toFloat()) }
+  }
+  m["harmonic_mean"] = __pyB("harmonic_mean") { a ->
+    val data = pyIterable(a.pos[0])
+    val errmsg = "harmonic mean does not support negative values"
+    val n = data.size
+    if (n < 1) { throw __pyStatError("harmonic_mean requires at least one data point") }
+    val weights = a.pos.size > 1 ? a.pos[1] : a.get("weights", null)
+    if (n == 1 and weights == null) {
+      val x = data[0]
+      if (pyTruth(pyLt(x, 0))) { throw __pyStatError(errmsg) }
+      x
+    } else {
+      val ws : List<any?> = weights == null ? data.map { 1 as any? } : pyIterable(weights)
+      if (ws.size != n) { throw __pyStatError("Number of weights does not match data size") }
+      for w in ws { if (pyTruth(pyLt(w, 0))) { throw __pyStatError(errmsg) } }
+      val sw = weights == null ? null : __pySum(ws)
+      var zero = false
+      val terms : open List<any?> = []
+      for i in 0..<n {
+        val x = data[i]
+        if (pyTruth(pyLt(x, 0))) { throw __pyStatError(errmsg) }
+        if (!pyTruth(ws[i])) { terms.add(0); continue }
+        if (pyEqB(x, 0)) { zero = true; break }
+        terms.add(pyDiv(ws[i], x))
+      }
+      if (zero) { 0 } else {
+        val t = __pySum(terms)
+        if (t.special == null and !(t.n > 0)) { throw __pyStatError("Weighted sum must be positive") }
+        val swN = sw == null ? BigInt.of(n) : sw!!.n
+        val swD = sw == null ? BigInt.of(1) : sw!!.d
+        __pyConvert(swN * t.d, swD * t.n, t.kind)
+      }
+    }
+  }
+  m["median"] = __pyB("median") { a ->
+    val data = __pySorted(a.pos[0])
+    val n = data.size
+    if (n == 0) { throw __pyStatError("no median for empty data") }
+    if (n % 2 == 1) { data[n / 2] } else { pyDiv(pyAdd(data[n / 2 - 1], data[n / 2]), 2) }
+  }
+  m["median_low"] = __pyB("median_low") { a ->
+    val data = __pySorted(a.pos[0])
+    val n = data.size
+    if (n == 0) { throw __pyStatError("no median for empty data") }
+    n % 2 == 1 ? data[n / 2] : data[n / 2 - 1]
+  }
+  m["median_high"] = __pyB("median_high") { a ->
+    val data = __pySorted(a.pos[0])
+    if (data.isEmpty()) { throw __pyStatError("no median for empty data") }
+    data[data.size / 2]
+  }
+  m["median_grouped"] = __pyB("median_grouped") { a ->
+    val data = __pySorted(a.pos[0])
+    val n = data.size
+    if (n == 0) { throw __pyStatError("no median for empty data") }
+    val x = data[n / 2]
+    val i = data.indexOfFirst { !pyTruth(pyLt(it, x)) }
+    var j = i
+    while (j < n and !pyTruth(pyLt(x, data[j]))) { j += 1 }
+    val interval = pyToFloat(pyFloatOf1(a.pos.size > 1 ? a.pos[1] : a.get("interval", 1.0)))
+    val xf = pyToFloat(pyFloatOf1(x))
+    val low = xf - interval / 2.0
+    low + interval * (n.toFloat() / 2.0 - i.toFloat()) / (j - i).toFloat()
+  }
+  m["mode"] = __pyB("mode") { a ->
+    val data = pyIterable(a.pos[0])
+    if (data.isEmpty()) { throw __pyStatError("no mode for empty data") }
+    val counts = PyDict()
+    for x in data { counts.set(x, pyAdd(counts.get(x, 0), 1)) }
+    var best : any? = null
+    var bestCount = -1
+    for k in counts.keyList() {
+      val c = pyIndex(counts.get(k, 0))
+      if (c > bestCount) { best = k; bestCount = c }
+    }
+    best
+  }
+  m["multimode"] = __pyB("multimode") { a ->
+    val counts = PyDict()
+    for x in pyIterable(a.pos[0]) { counts.set(x, pyAdd(counts.get(x, 0), 1)) }
+    var most = 0
+    for k in counts.keyList() { most = Math.max(most, pyIndex(counts.get(k, 0))) }
+    pyNewList(counts.keyList().filter { pyIndex(counts.get(it, 0)) == most }.toOpenList())
+  }
+  fun variance(name : string, population : bool, root : bool) {
+    m[name] = __pyB(name) { a ->
+      val data = pyIterable(a.pos[0])
+      val c = a.pos.size > 1 ? a.pos[1] : a.get(population ? "mu" : "xbar", null)
+      val ss = __pySS(data, c)
+      val least = population ? 1 : 2
+      if (ss.count < least) {
+        val what = root ? (population ? "pstdev" : "stdev") : (population ? "pvariance" : "variance")
+        throw __pyStatError("$what requires at least ${population ? "one data point" : "two data points"}")
+      }
+      if (ss.special != null) { ss.special!! } else {
+        val div = BigInt.of(population ? ss.count : ss.count - 1)
+        if (root) { pySqrtOfRatio(ss.ssN, ss.ssD * div) } else { __pyConvert(ss.ssN, ss.ssD * div, ss.kind) }
+      }
+    }
+  }
+  variance("variance", false, false)
+  variance("pvariance", true, false)
+  variance("stdev", false, true)
+  variance("pstdev", true, true)
+  m["quantiles"] = __pyB("quantiles") { a ->
+    a.only(["n", "method"])
+    val n = pyIndex(a.get("n", 4))
+    val method = a.get("method", "exclusive")
+    if (n < 1) { throw __pyStatError("n must be at least 1") }
+    val data = __pySorted(a.pos[0])
+    val ld = data.size
+    val out : open List<any?> = []
+    if (ld < 2) {
+      if (ld == 1) { for i in 0..<(n - 1) { out.add(data[0]) } } else { throw __pyStatError("must have at least one data point") }
+    } else if (method == "inclusive") {
+      val mm = ld - 1
+      for i in 1..<n {
+        val j = (i * mm) / n
+        val delta = (i * mm) % n
+        out.add(pyDiv(pyAdd(pyMul(data[j], n - delta), pyMul(data[j + 1], delta)), n))
+      }
+    } else if (method == "exclusive") {
+      val mm = ld + 1
+      for i in 1..<n {
+        var j = i * mm / n
+        j = j < 1 ? 1 : j > ld - 1 ? ld - 1 : j
+        val delta = i * mm - j * n
+        out.add(pyDiv(pyAdd(pyMul(data[j - 1], n - delta), pyMul(data[j], delta)), n))
+      }
+    } else { throw pyValueError("Unknown method: ${pyRepr(method)}") }
+    pyNewList(out)
+  }
+  m["covariance"] = __pyB("covariance") { a ->
+    val x = __pyFloats2(a.pos[0])
+    val y = __pyFloats2(a.pos[1])
+    val n = x.size
+    if (y.size != n) { throw __pyStatError("covariance requires that both inputs have same number of data points") }
+    if (n < 2) { throw __pyStatError("covariance requires at least two data points") }
+    val xbar = pyFsum(x) / n.toFloat()
+    val ybar = pyFsum(y) / n.toFloat()
+    __pySumprodF(x.map { it - xbar }, y.map { it - ybar }) / (n - 1).toFloat()
+  }
+  m["correlation"] = __pyB("correlation") { a ->
+    a.only(["method"])
+    var x = __pyFloats2(a.pos[0])
+    var y = __pyFloats2(a.pos[1])
+    val n = x.size
+    if (y.size != n) { throw __pyStatError("correlation requires that both inputs have same number of data points") }
+    if (n < 2) { throw __pyStatError("correlation requires at least two data points") }
+    val method = a.get("method", "linear")
+    if (method != "linear" and method != "ranked") { throw pyValueError("Unknown method: ${pyRepr(method)}") }
+    if (method == "ranked") {
+      val start = (n - 1).toFloat() / -2.0
+      x = __pyRank(pyIterable(a.pos[0]), start)
+      y = __pyRank(pyIterable(a.pos[1]), start)
+    } else {
+      val xbar = pyFsum(x) / n.toFloat()
+      val ybar = pyFsum(y) / n.toFloat()
+      x = x.map { it - xbar }
+      y = y.map { it - ybar }
+    }
+    val sxy = __pySumprodF(x, y)
+    val sxx = __pySumprodF(x, x)
+    val syy = __pySumprodF(y, y)
+    val den = __pySqrtProd(sxx, syy)
+    if (den == 0.0) { throw __pyStatError("at least one of the inputs is constant") }
+    sxy / den
+  }
+  m["linear_regression"] = __pyB("linear_regression") { a ->
+    a.only(["proportional"])
+    var x = __pyFloats2(a.pos[0])
+    var y = __pyFloats2(a.pos[1])
+    val n = x.size
+    if (y.size != n) { throw __pyStatError("linear regression requires that both inputs have same number of data points") }
+    if (n < 2) { throw __pyStatError("linear regression requires at least two data points") }
+    val proportional = pyTruth(a.get("proportional", false))
+    var xbar = 0.0
+    var ybar = 0.0
+    if (!proportional) {
+      xbar = pyFsum(x) / n.toFloat()
+      ybar = pyFsum(y) / n.toFloat()
+      x = x.map { it - xbar }
+      y = y.map { it - ybar }
+    }
+    val sxy = __pySumprodF(x, y) + 0.0
+    val sxx = __pySumprodF(x, x)
+    if (sxx == 0.0) { throw __pyStatError("x is constant") }
+    val slope = sxy / sxx
+    val intercept = proportional ? 0.0 : ybar - slope * xbar
+    pyCallV(__pyLinearRegressionType, [slope, intercept], null)
+  }
+  m["LinearRegression"] = __pyLinearRegressionType
+  m["NormalDist"] = __pyNormalDistType
+  return pyNativeModule("statistics", m)
+}

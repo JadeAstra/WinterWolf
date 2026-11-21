@@ -17,7 +17,8 @@ abstract class PyNative : PyIdentified() {
 // A special method of such an object (__getitem__, __len__...) where its type lists it, as the
 // operators and builtins ask for one (part 5.3); pyUnbound where it lists none.
 fun pyNativeSpecial(o : PyNative, name : string, args : List<any?>) : any? {
-  if (o.pyType().lookup(name) === pyUnbound) { return pyUnbound }
+  val found = o.pyType().lookup(name)
+  if (found === pyUnbound or (found is PyMethodDescriptor and (found as PyMethodDescriptor).owner === pyObjectType)) { return pyUnbound }
   return o.call(name, PyArgs(args, null, name + "()"))
 }
 
@@ -25,6 +26,8 @@ fun pyNativeSpecial(o : PyNative, name : string, args : List<any?>) : any? {
 fun pyNativeType(name : string, module : string, methods : List<string>, construct : ((PyType, List<any?>, List<string>?) -> any?)?) : PyType {
   val t = PyType(name, name, module)
   t.builtin = true
+  // CPython's own C types of these modules name themselves with their module in messages.
+  if ((module == "collections" or module == "functools" or module == "operator") and name != "function") { t.cName = module + "." + name }
   t.bases = [pyObjectType]
   t.mro = [t, pyObjectType]
   for m in methods { t.dict[m] = PyMethodDescriptor(t, m) }

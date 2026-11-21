@@ -1,0 +1,272 @@
+import Snippy.Text.*
+// textwrap (the Snippy plan, part 5.3, step 3), in WinterWolf, after CPython's textwrap.py: the
+// words split as its wordsep_re splits them (by hand, the regular expression read as it runs),
+// then wrapped, cut short and given a placeholder by its own steps, in its order.
+
+internal fun __pyTwSpace(c : char) : bool => c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\u{B}' or c == '\u{C}'
+internal fun __pyTwWord(c : char) : bool {
+  if (c == '_') { return true }
+  val cat = pyCategory(pyOrd(c))
+  return cat.startsWith("L") or cat == "Nd" or cat == "Nl" or cat == "No"
+}
+// [^\d\W]: a word character that is not a decimal digit.
+internal fun __pyTwLetter(c : char) : bool => __pyTwWord(c) and pyCategory(pyOrd(c)) != "Nd"
+// [\w!"'&.,?]
+internal fun __pyTwPunct(c : char) : bool => __pyTwWord(c) or c == '!' or c == '"' or c == '\'' or c == '&' or c == '.' or c == ',' or c == '?'
+internal fun __pyTwBlank(s : string) : bool => s.all { pyIsSpace(it) }
+
+// At `at`: two or more '-' and then a word character (?=-{2,}\w).
+internal fun __pyTwDashes(s : string, at : int) : int {
+  var e = at
+  while (e < s.size and s[e] == '-') { e += 1 }
+  return e - at >= 2 and e < s.size and __pyTwWord(s[e]) ? e : -1
+}
+
+// The chunks wordsep_re (break_on_hyphens) or wordsep_simple_re gives, the empty ones left out.
+internal fun __pyTwSplit(s : string, hyphens : bool) : open List<string> {
+  val out : open List<string> = []
+  var p = 0
+  val n = s.size
+  while (p < n) {
+    if (__pyTwSpace(s[p])) {
+      var e = p
+      while (e < n and __pyTwSpace(s[e])) { e += 1 }
+      out.add(s[p..<e])
+      p = e
+      continue
+    }
+    if (!hyphens) {
+      var e = p
+      while (e < n and !__pyTwSpace(s[e])) { e += 1 }
+      out.add(s[p..<e])
+      p = e
+      continue
+    }
+    // An em-dash between words: (?<=wp) -{2,} (?=\w).
+    if (p > 0 and s[p] == '-' and __pyTwPunct(s[p - 1])) {
+      val e = __pyTwDashes(s, p)
+      if (e > 0) { out.add(s[p..<e]); p = e; continue }
+    }
+    // A word, the shortest that ends at a hyphen inside it, at whitespace or the end, or before an em-dash.
+    var e = p + 1
+    while (true) {
+      if (e < n and s[e] == '-') {
+        val behind = (e >= 2 and __pyTwLetter(s[e - 2]) and __pyTwLetter(s[e - 1])) or
+          (e >= 3 and __pyTwLetter(s[e - 3]) and s[e - 2] == '-' and __pyTwLetter(s[e - 1]))
+        val ahead = e + 1 < n and __pyTwLetter(s[e + 1]) and
+          ((e + 2 < n and __pyTwLetter(s[e + 2])) or (e + 3 < n and s[e + 2] == '-' and __pyTwLetter(s[e + 3])))
+        if (behind and ahead) { e += 1; break }
+      }
+      if (e >= n or __pyTwSpace(s[e])) { break }
+      if (__pyTwPunct(s[e - 1]) and __pyTwDashes(s, e) > 0) { break }
+      e += 1
+    }
+    out.add(s[p..<e])
+    p = e
+  }
+  return out
+}
+
+// [a-z][.!?]["']?\Z
+internal fun __pyTwSentenceEnd(s : string) : bool {
+  var k = s.size - 1
+  if (k >= 0 and (s[k] == '"' or s[k] == '\'')) { k -= 1 }
+  return k >= 1 and (s[k] == '.' or s[k] == '!' or s[k] == '?') and s[k - 1] >= 'a' and s[k - 1] <= 'z'
+}
+
+internal fun __pyTwOpt(w : any?, name : string) : any? => pyGetAttr(w, name)
+internal fun __pyTwStr(w : any?, name : string) : string => pyGetAttr(w, name) as string
+
+internal fun __pyTwChunks(w : any?, text0 : string) : open List<string> {
+  var text = text0
+  if (pyTruth(__pyTwOpt(w, "expand_tabs"))) { text = pyCall1(pyGetAttr(text, "expandtabs"), __pyTwOpt(w, "tabsize")) as string }
+  if (pyTruth(__pyTwOpt(w, "replace_whitespace"))) {
+    val sb = StringBuilder()
+    for c in text { sb.append(__pyTwSpace(c) ? ' ' : c) }
+    text = sb.toString()
+  }
+  val chunks = __pyTwSplit(text, pyTruth(__pyTwOpt(w, "break_on_hyphens")))
+  if (pyTruth(__pyTwOpt(w, "fix_sentence_endings"))) {
+    var i = 0
+    while (i < chunks.size - 1) {
+      if (chunks[i + 1] == " " and __pyTwSentenceEnd(chunks[i])) { chunks[i + 1] = "  "; i += 2 } else { i += 1 }
+    }
+  }
+  return chunks
+}
+
+internal fun __pyTwLongWord(w : any?, rev : open List<string>, line : open List<string>, curLen : int, width : int) {
+  val spaceLeft = width < 1 ? 1 : width - curLen
+  if (pyTruth(__pyTwOpt(w, "break_long_words")) and spaceLeft > 0) {
+    var end = spaceLeft
+    val chunk = rev[rev.size - 1]
+    if (pyTruth(__pyTwOpt(w, "break_on_hyphens")) and chunk.size > spaceLeft) {
+      var hyphen = -1
+      for k in 0..<Math.min(spaceLeft, chunk.size) { if (chunk[k] == '-') { hyphen = k } }
+      if (hyphen > 0 and chunk[..<hyphen].any { it != '-' }) { end = hyphen + 1 }
+    }
+    val cut = Math.min(end, chunk.size)
+    line.add(chunk[..<cut])
+    rev[rev.size - 1] = chunk[cut..]
+  } else if (line.isEmpty()) {
+    line.add(rev.removeAt(rev.size - 1))
+  }
+}
+
+internal fun __pyTwWrap(w : any?, text : string) : open List<string> {
+  val chunks = __pyTwChunks(w, text)
+  val lines : open List<string> = []
+  val fullWidth = pyIndex(__pyTwOpt(w, "width"))
+  if (fullWidth <= 0) { throw pyValueError("invalid width ${pyRepr(__pyTwOpt(w, "width"))} (must be > 0)") }
+  val initial = __pyTwStr(w, "initial_indent")
+  val subsequent = __pyTwStr(w, "subsequent_indent")
+  val maxLinesObj = __pyTwOpt(w, "max_lines")
+  val maxLines = maxLinesObj == null ? -1 : pyIndex(maxLinesObj)
+  val placeholder = __pyTwStr(w, "placeholder")
+  val drop = pyTruth(__pyTwOpt(w, "drop_whitespace"))
+  if (maxLinesObj != null) {
+    val indent = maxLines > 1 ? subsequent : initial
+    if (indent.size + pyCall0(pyGetAttr(placeholder, "lstrip")).toString().size > fullWidth) {
+      throw pyValueError("placeholder too large for max width")
+    }
+  }
+  chunks.reverse()
+  while (chunks.isNotEmpty()) {
+    val line : open List<string> = []
+    var curLen = 0
+    val indent = lines.isNotEmpty() ? subsequent : initial
+    val width = fullWidth - indent.size
+    if (drop and __pyTwBlank(chunks[chunks.size - 1]) and lines.isNotEmpty()) { chunks.removeAt(chunks.size - 1) }
+    while (chunks.isNotEmpty()) {
+      val l = chunks[chunks.size - 1].size
+      if (curLen + l <= width) {
+        line.add(chunks.removeAt(chunks.size - 1))
+        curLen += l
+      } else { break }
+    }
+    if (chunks.isNotEmpty() and chunks[chunks.size - 1].size > width) {
+      __pyTwLongWord(w, chunks, line, curLen, width)
+      curLen = 0
+      for c in line { curLen += c.size }
+    }
+    if (drop and line.isNotEmpty() and __pyTwBlank(line[line.size - 1])) {
+      curLen -= line[line.size - 1].size
+      line.removeAt(line.size - 1)
+    }
+    if (line.isNotEmpty()) {
+      val restBlank = chunks.isEmpty() or (drop and chunks.size == 1 and __pyTwBlank(chunks[0]))
+      if (maxLinesObj == null or lines.size + 1 < maxLines or (restBlank and curLen <= width)) {
+        lines.add(indent + line.join(""))
+      } else {
+        var placed = false
+        while (line.isNotEmpty()) {
+          if (!__pyTwBlank(line[line.size - 1]) and curLen + placeholder.size <= width) {
+            line.add(placeholder)
+            lines.add(indent + line.join(""))
+            placed = true
+            break
+          }
+          curLen -= line[line.size - 1].size
+          line.removeAt(line.size - 1)
+        }
+        if (!placed) {
+          var done = false
+          if (lines.isNotEmpty()) {
+            val prev = pyCall0(pyGetAttr(lines[lines.size - 1], "rstrip")) as string
+            if (prev.size + placeholder.size <= fullWidth) {
+              lines[lines.size - 1] = prev + placeholder
+              done = true
+            }
+          }
+          if (!done) { lines.add(indent + (pyCall0(pyGetAttr(placeholder, "lstrip")) as string)) }
+        }
+        break
+      }
+    }
+  }
+  return lines
+}
+
+internal val __pyTwNames = ["width", "initial_indent", "subsequent_indent", "expand_tabs", "replace_whitespace",
+  "fix_sentence_endings", "break_long_words", "drop_whitespace", "break_on_hyphens", "tabsize"]
+internal val __pyTwDefaults : List<any?> = [70, "", "", true, true, false, true, true, true, 8]
+
+internal lazy val __pyTextWrapperType : PyType = pyLibClass("TextWrapper", "textwrap", [pyObjectType], {
+  "__init__": pyLibMethod("TextWrapper", "__init__") { self, a ->
+    a.only(__pyTwNames + ["max_lines", "placeholder"])
+    if (a.pos.size > __pyTwNames.size) {
+      throw pyTypeError("TextWrapper.__init__() takes from 1 to 11 positional arguments but ${a.pos.size + 1} were given")
+    }
+    for (i, name) in __pyTwNames.withIndex() {
+      pySetAttr(self, name, i < a.pos.size ? a.pos[i] : a.has(name) ? a.get(name, null) : __pyTwDefaults[i])
+    }
+    pySetAttr(self, "max_lines", a.get("max_lines", null))
+    pySetAttr(self, "placeholder", a.get("placeholder", " [...]"))
+    null
+  },
+  "wrap": pyLibMethod("TextWrapper", "wrap") { self, a -> pyNewList(__pyTwWrap(self, a.pos[0] as string).map { it as any? }.toOpenList()) },
+  "fill": pyLibMethod("TextWrapper", "fill") { self, a -> __pyTwWrap(self, a.pos[0] as string).join("\n") }
+})
+
+// A TextWrapper of a module function's width and keywords.
+internal fun __pyTwOf(a : PyArgs, widthAt : int, extra : Map<string, any?>) : any? {
+  val names : open List<string> = []
+  val values : open List<any?> = []
+  val width = a.pos.size > widthAt ? a.pos[widthAt] : a.get("width", 70)
+  names.add("width")
+  values.add(width)
+  for (k, v) in a.kw { if (k != "width") { names.add(k); values.add(v) } }
+  for (k, v) in extra { names.add(k); values.add(v) }
+  return pyCallV(__pyTextWrapperType, values, names)
+}
+
+internal fun __pyDedent(text : string) : string {
+  if (text.isEmpty()) { return text }
+  if (__pyTwBlank(text)) { return "\n".repeat(text.count { it == '\n' }) }
+  val lines = text.split("\n")
+  val solid = lines.filter { it.isNotEmpty() and !__pyTwBlank(it) }
+  var l1 = solid[0]
+  var l2 = solid[0]
+  for l in solid {
+    if (pyLess(l, l1)) { l1 = l }
+    if (pyLess(l2, l)) { l2 = l }
+  }
+  var margin = 0
+  for k in 0..<l1.size {
+    margin = k
+    if (l1[k] != l2[k] or !(l1[k] == ' ' or l1[k] == '\t')) { break }
+  }
+  return lines.map { it.isNotEmpty() and __pyTwBlank(it) ? "" : (margin <= it.size ? it[margin..] : "") }.join("\n")
+}
+internal fun pyLess(a : string, b : string) : bool => a.compareTo(b) < 0
+
+fun pyTextwrapModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["TextWrapper"] = __pyTextWrapperType
+  m["wrap"] = __pyB("wrap") { a -> pyCall1(pyGetAttr(__pyTwOf(a, 1, {:}), "wrap"), a.pos[0]) }
+  m["fill"] = __pyB("fill") { a -> pyCall1(pyGetAttr(__pyTwOf(a, 1, {:}), "fill"), a.pos[0]) }
+  m["shorten"] = __pyB("shorten") { a ->
+    val text = a.pos[0] as string
+    val words = pyCall0(pyGetAttr(pyCall0(pyGetAttr(text, "strip")), "split")) as List<any?>
+    pyCall1(pyGetAttr(__pyTwOf(a, 1, {"max_lines": 1}), "fill"), words.map { it as string }.join(" "))
+  }
+  m["dedent"] = __pyB("dedent") { a ->
+    val t = a.pos[0]
+    if (!(t is string)) { throw pyTypeError("expected str object, not ${pyTypeName(t)}") }
+    __pyDedent(t as string)
+  }
+  m["indent"] = __pyB("indent") { a ->
+    val text = a.pos[0] as string
+    val prefix = a.pos.size > 1 ? a.pos[1] as string : a.get("prefix", "") as string
+    val predicate = a.pos.size > 2 ? a.pos[2] : a.get("predicate", null)
+    val lines = pyCall1(pyGetAttr(text, "splitlines"), true) as List<any?>
+    val sb = StringBuilder()
+    for x in lines {
+      val line = x as string
+      if (predicate == null ? !(line.isNotEmpty() and __pyTwBlank(line)) : pyTruth(pyCall1(predicate, line))) { sb.append(prefix) }
+      sb.append(line)
+    }
+    sb.toString()
+  }
+  return pyNativeModule("textwrap", m)
+}

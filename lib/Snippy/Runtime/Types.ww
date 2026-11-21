@@ -211,7 +211,10 @@ fun pyForeignType(x : any?) : PyType {
   return t
 }
 
-fun pyTypeName(x : any?) : string => pyTypeOf(x).name
+fun pyTypeName(x : any?) : string {
+  val t = pyTypeOf(x)
+  return t.cName ?: t.name
+}
 
 fun pyTypeOfB(x : any?) : any? => pyTypeOf(x)
 

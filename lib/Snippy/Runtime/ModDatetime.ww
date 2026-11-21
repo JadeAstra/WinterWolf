@@ -1,0 +1,996 @@
+import Snippy.Text.*
+// datetime (the Snippy plan, part 5.3, step 3), in WinterWolf, after CPython's _pydatetime:
+// timedelta, date, time, datetime, tzinfo and timezone as Python classes (datetime a date), their
+// fields kept as ints, their arithmetic on ordinals and microseconds exactly, their text as
+// CPython's, and their messages naming them as CPython's C types are named (datetime.date...).
+
+internal fun __pyI(o : any?, name : string) : int => pyIndex(pyGetAttr(o, name))
+internal fun __pyQual(o : any?) : string {
+  return pyTypeName(o)
+}
+internal fun __pyDtClass(name : string, bases : List<PyType>, members : Map<string, any?>) : PyType {
+  val t = pyLibClass(name, "datetime", bases, members)
+  t.cName = "datetime." + name
+  return t
+}
+internal fun __pyMake(cls : any?, fields : List<Pair<string, any?>>) : any? {
+  val o = PyObject(cls as PyType)
+  o.dict = PyDict()
+  for f in fields { o.dict!!.set(f.first, f.second) }
+  return o
+}
+
+// ---- timedelta ----
+
+internal val __pyUsPerDay = 86400000000
+
+// A timedelta of `us` microseconds in all, as days, seconds and microseconds.
+internal fun __pyTd(cls : any?, us : BigInt) : any? {
+  val perDay = BigInt.of(__pyUsPerDay)
+  val days = us.floorDiv(perDay)
+  val rest = us - days * perDay
+  if (days.abs() > BigInt.of(2147483647)) { throw pyOverflowError("Python int too large to convert to C int") }
+  val d = days.toInt()
+  if (d > 999999999 or d < -999999999) { throw pyOverflowError("days=$d; must have magnitude <= 999999999") }
+  val r = rest.toInt()
+  return __pyMake(cls, [Pair("_days", d), Pair("_seconds", r / 1000000), Pair("_microseconds", r % 1000000)])
+}
+internal fun __pyTdUs(td : any?) : BigInt =>
+  BigInt.of(__pyI(td, "_days")) * BigInt.of(__pyUsPerDay) + BigInt.of(__pyI(td, "_seconds") * 1000000 + __pyI(td, "_microseconds"))
+internal fun __pyIsTd(x : any?) : bool => pyIsInstance(x, __pyTimedeltaType)
+
+// A number of a unit (microseconds per one) as microseconds, exactly: an int or a float.
+internal fun __pyUnitUs(x : any?, perUnit : int) : Pair<BigInt, BigInt> {
+  if (pyIsInt(x)) { return Pair(pyBig(pyIndexValue(x)) * BigInt.of(perUnit), BigInt.of(1)) }
+  if (x is float) {
+    val r = pyFloatRatio(x as float)
+    return Pair(r.first * BigInt.of(perUnit), r.second)
+  }
+  throw pyTypeError("unsupported type for timedelta ${"component"} component: ${pyTypeName(x)}")
+}
+
+internal lazy val __pyTimedeltaType : PyType = __pyMakeTimedelta()
+internal fun __pyMakeTimedelta() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val cls = args[0]
+    val a = PyArgs(args[1..], kw, "timedelta()")
+    a.only(["days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks"])
+    val names = ["days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks"]
+    val per = [__pyUsPerDay, 1000000, 1, 1000, 60000000, 3600000000, 7 * __pyUsPerDay]
+    var n = BigInt.of(0)
+    var d = BigInt.of(1)
+    for (i, name) in names.withIndex() {
+      val v = i < a.pos.size ? a.pos[i] : a.get(name, null)
+      if (v == null) { continue }
+      if (!pyIsInt(v) and !(v is float)) { throw pyTypeError("unsupported type for timedelta $name component: ${pyTypeName(v)}") }
+      val u = __pyUnitUs(v, per[i])
+      n = n * u.second + u.first * d
+      d = d * u.second
+    }
+    __pyTd(cls, pyRoundHalfEven(n, d))
+  }))
+  m["days"] = PyProperty(PyBuiltin("days", { args, kw -> pyGetAttr(args[0], "_days") }), null, null, null)
+  m["seconds"] = PyProperty(PyBuiltin("seconds", { args, kw -> pyGetAttr(args[0], "_seconds") }), null, null, null)
+  m["microseconds"] = PyProperty(PyBuiltin("microseconds", { args, kw -> pyGetAttr(args[0], "_microseconds") }), null, null, null)
+  m["total_seconds"] = pyLibMethod("timedelta", "total_seconds") { self, a -> pyRatioToFloat(__pyTdUs(self), BigInt.of(1000000)) }
+  m["__str__"] = pyLibMethod("timedelta", "__str__") { self, a ->
+    val days = __pyI(self, "_days")
+    val s = __pyI(self, "_seconds")
+    val us = __pyI(self, "_microseconds")
+    val hms = "${s / 3600}:${__pyPadNum(s / 60 % 60, 2, '0')}:${__pyPadNum(s % 60, 2, '0')}" + (us != 0 ? "." + __pyPadNum(us, 6, '0') : "")
+    days != 0 ? "$days day${Math.abs(days) != 1 ? "s" : ""}, $hms" : hms
+  }
+  m["__repr__"] = pyLibMethod("timedelta", "__repr__") { self, a ->
+    val parts : open List<string> = []
+    val days = __pyI(self, "_days")
+    val s = __pyI(self, "_seconds")
+    val us = __pyI(self, "_microseconds")
+    if (days != 0) { parts.add("days=$days") }
+    if (s != 0) { parts.add("seconds=$s") }
+    if (us != 0) { parts.add("microseconds=$us") }
+    "${__pyQual(self)}(${parts.isEmpty() ? "0" : parts.join(", ")})"
+  }
+  fun same(a : any?) : bool => __pyIsTd(a)
+  m["__add__"] = pyLibMethod("timedelta", "__add__") { self, a -> same(a.pos[0]) ? __pyTd(__pyTimedeltaType, __pyTdUs(self) + __pyTdUs(a.pos[0])) : pyNotImplemented }
+  m["__radd__"] = m["__add__"]
+  m["__sub__"] = pyLibMethod("timedelta", "__sub__") { self, a -> same(a.pos[0]) ? __pyTd(__pyTimedeltaType, __pyTdUs(self) - __pyTdUs(a.pos[0])) : pyNotImplemented }
+  m["__rsub__"] = pyLibMethod("timedelta", "__rsub__") { self, a -> same(a.pos[0]) ? __pyTd(__pyTimedeltaType, __pyTdUs(a.pos[0]) - __pyTdUs(self)) : pyNotImplemented }
+  m["__neg__"] = pyLibMethod("timedelta", "__neg__") { self, a -> __pyTd(__pyTimedeltaType, -__pyTdUs(self)) }
+  m["__pos__"] = pyLibMethod("timedelta", "__pos__") { self, a -> __pyTd(__pyTimedeltaType, __pyTdUs(self)) }
+  m["__abs__"] = pyLibMethod("timedelta", "__abs__") { self, a -> __pyTd(__pyTimedeltaType, __pyTdUs(self).abs()) }
+  m["__mul__"] = pyLibMethod("timedelta", "__mul__") { self, a ->
+    val o = a.pos[0]
+    if (pyIsInt(o)) { __pyTd(__pyTimedeltaType, __pyTdUs(self) * pyBig(pyIndexValue(o))) }
+    else if (o is float) { val r = pyFloatRatio(o as float); __pyTd(__pyTimedeltaType, pyRoundHalfEven(__pyTdUs(self) * r.first, r.second)) }
+    else { pyNotImplemented }
+  }
+  m["__rmul__"] = m["__mul__"]
+  m["__truediv__"] = pyLibMethod("timedelta", "__truediv__") { self, a ->
+    val o = a.pos[0]
+    if (same(o)) {
+      val den = __pyTdUs(o)
+      if (den.isZero) { throw pyZeroDivisionError("division by zero") }
+      pyRatioToFloat(__pyTdUs(self), den)
+    } else if (pyIsInt(o)) {
+      val k = pyBig(pyIndexValue(o))
+      if (k.isZero) { throw pyZeroDivisionError("division by zero") }
+      __pyTd(__pyTimedeltaType, pyRoundHalfEven(__pyTdUs(self), k))
+    } else if (o is float) {
+      val r = pyFloatRatio(o as float)
+      if (r.first.isZero) { throw pyZeroDivisionError("division by zero") }
+      __pyTd(__pyTimedeltaType, pyRoundHalfEven(__pyTdUs(self) * r.second, r.first))
+    } else { pyNotImplemented }
+  }
+  m["__floordiv__"] = pyLibMethod("timedelta", "__floordiv__") { self, a ->
+    val o = a.pos[0]
+    if (same(o)) {
+      val den = __pyTdUs(o)
+      if (den.isZero) { throw pyZeroDivisionError("division by zero") }
+      pyNorm(__pyTdUs(self).floorDiv(den))
+    } else if (pyIsInt(o)) {
+      val k = pyBig(pyIndexValue(o))
+      if (k.isZero) { throw pyZeroDivisionError("division by zero") }
+      __pyTd(__pyTimedeltaType, __pyTdUs(self).floorDiv(k))
+    } else { pyNotImplemented }
+  }
+  m["__mod__"] = pyLibMethod("timedelta", "__mod__") { self, a ->
+    val o = a.pos[0]
+    if (!same(o)) { pyNotImplemented } else {
+      val den = __pyTdUs(o)
+      if (den.isZero) { throw pyZeroDivisionError("division by zero") }
+      __pyTd(__pyTimedeltaType, __pyTdUs(self).floorMod(den))
+    }
+  }
+  m["__divmod__"] = pyLibMethod("timedelta", "__divmod__") { self, a ->
+    val o = a.pos[0]
+    if (!same(o)) { pyNotImplemented } else {
+      val den = __pyTdUs(o)
+      if (den.isZero) { throw pyZeroDivisionError("division by zero") }
+      PyTuple([pyNorm(__pyTdUs(self).floorDiv(den)), __pyTd(__pyTimedeltaType, __pyTdUs(self).floorMod(den))])
+    }
+  }
+  fun cmp(name : string, test : (int) -> bool) {
+    m[name] = pyLibMethod("timedelta", name) { self, a -> same(a.pos[0]) ? test(__pyTdUs(self).compareTo(__pyTdUs(a.pos[0]))) : pyNotImplemented }
+  }
+  cmp("__eq__", { c -> c == 0 })
+  cmp("__lt__", { c -> c < 0 })
+  cmp("__le__", { c -> c <= 0 })
+  cmp("__gt__", { c -> c > 0 })
+  cmp("__ge__", { c -> c >= 0 })
+  m["__hash__"] = pyLibMethod("timedelta", "__hash__") { self, a ->
+    pyHash(PyTuple([pyGetAttr(self, "_days"), pyGetAttr(self, "_seconds"), pyGetAttr(self, "_microseconds")]))
+  }
+  m["__bool__"] = pyLibMethod("timedelta", "__bool__") { self, a -> !__pyTdUs(self).isZero }
+  val t = __pyDtClass("timedelta", [pyObjectType], m)
+  t.dict["min"] = __pyTd(t, BigInt.of(-999999999) * BigInt.of(__pyUsPerDay))
+  t.dict["max"] = __pyTd(t, BigInt.of(1000000000) * BigInt.of(__pyUsPerDay) - BigInt.of(1))
+  t.dict["resolution"] = __pyTd(t, BigInt.of(1))
+  return t
+}
+internal fun __pyTdOf(days : int, seconds : int, us : int) : any? =>
+  __pyTd(__pyTimedeltaType, BigInt.of(days) * BigInt.of(__pyUsPerDay) + BigInt.of(seconds) * BigInt.of(1000000) + BigInt.of(us))
+
+// ---- Checks ----
+
+internal fun __pyCheckDate(y : int, m : int, d : int) {
+  if (y < 1 or y > 9999) { throw pyValueError("year must be in 1..9999, not $y") }
+  if (m < 1 or m > 12) { throw pyValueError("month must be in 1..12, not $m") }
+  val dim = pyDaysInMonth(y, m)
+  if (d < 1 or d > dim) { throw pyValueError("day $d must be in range 1..$dim for month $m in year $y") }
+}
+internal fun __pyCheckTime(h : int, mi : int, s : int, us : int, fold : int) {
+  if (h < 0 or h > 23) { throw pyValueError("hour must be in 0..23, not $h") }
+  if (mi < 0 or mi > 59) { throw pyValueError("minute must be in 0..59, not $mi") }
+  if (s < 0 or s > 59) { throw pyValueError("second must be in 0..59, not $s") }
+  if (us < 0 or us > 999999) { throw pyValueError("microsecond must be in 0..999999, not $us") }
+  if (fold != 0 and fold != 1) { throw pyValueError("fold must be either 0 or 1") }
+}
+internal fun __pyCheckTz(tz : any?) {
+  if (tz != null and !pyIsInstance(tz, __pyTzinfoType)) {
+    throw pyTypeError("tzinfo argument must be None or of a tzinfo subclass, not type '${pyTypeName(tz)}'")
+  }
+}
+internal fun __pyIntArgOf(x : any?, name : string) : int {
+  if (x is float) { throw pyTypeError("'float' object cannot be interpreted as an integer") }
+  return pyIndex(x)
+}
+
+internal fun __pyNewDate(cls : any?, y : int, m : int, d : int) : any? {
+  __pyCheckDate(y, m, d)
+  return __pyMake(cls, [Pair("_year", y), Pair("_month", m), Pair("_day", d)])
+}
+internal fun __pyNewDatetime(cls : any?, y : int, mo : int, d : int, h : int, mi : int, s : int, us : int, tz : any?, fold : int) : any? {
+  __pyCheckDate(y, mo, d)
+  __pyCheckTime(h, mi, s, us, fold)
+  __pyCheckTz(tz)
+  return __pyMake(cls, [Pair("_year", y), Pair("_month", mo), Pair("_day", d), Pair("_hour", h), Pair("_minute", mi),
+    Pair("_second", s), Pair("_microsecond", us), Pair("_tzinfo", tz), Pair("_fold", fold)])
+}
+internal fun __pyNewTime(cls : any?, h : int, mi : int, s : int, us : int, tz : any?, fold : int) : any? {
+  __pyCheckTime(h, mi, s, us, fold)
+  __pyCheckTz(tz)
+  return __pyMake(cls, [Pair("_hour", h), Pair("_minute", mi), Pair("_second", s), Pair("_microsecond", us), Pair("_tzinfo", tz), Pair("_fold", fold)])
+}
+
+internal fun __pyIsDatetime(x : any?) : bool => pyIsInstance(x, __pyDatetimeType)
+internal fun __pyIsDate(x : any?) : bool => pyIsInstance(x, __pyDateType)
+
+// ---- Offsets and their text ----
+
+// tzinfo.utcoffset(dt) as microseconds, or null.
+internal fun __pyOffsetUs(tz : any?, dt : any?) : BigInt? {
+  if (tz == null) { return null }
+  val off = pyCall1(pyGetAttr(tz, "utcoffset"), dt)
+  if (off == null) { return null }
+  if (!__pyIsTd(off)) { throw pyTypeError("tzinfo.utcoffset() must return None or timedelta, not '${pyTypeName(off)}'") }
+  return __pyTdUs(off)
+}
+
+// "+HH:MM" (":SS" and ".ffffff" where they are not 0), with `sep` between them.
+internal fun __pyOffsetText(us0 : BigInt, sep : string) : string {
+  val negative = us0 < 0
+  var us = us0.abs().toInt()
+  val hh = us / 3600000000
+  us = us % 3600000000
+  val mm = us / 60000000
+  us = us % 60000000
+  val ss = us / 1000000
+  val rest = us % 1000000
+  var text = (negative ? "-" : "+") + __pyPadNum(hh, 2, '0') + sep + __pyPadNum(mm, 2, '0')
+  if (ss != 0 or rest != 0) { text += sep + __pyPadNum(ss, 2, '0') }
+  if (rest != 0) { text += "." + __pyPadNum(rest, 6, '0') }
+  return text
+}
+
+internal fun __pyTimeText(h : int, mi : int, s : int, us : int, timespec : string) : string {
+  return when (timespec) {
+    "auto" -> __pyPadNum(h, 2, '0') + ":" + __pyPadNum(mi, 2, '0') + ":" + __pyPadNum(s, 2, '0') + (us != 0 ? "." + __pyPadNum(us, 6, '0') : "")
+    "hours" -> __pyPadNum(h, 2, '0')
+    "minutes" -> __pyPadNum(h, 2, '0') + ":" + __pyPadNum(mi, 2, '0')
+    "seconds" -> __pyPadNum(h, 2, '0') + ":" + __pyPadNum(mi, 2, '0') + ":" + __pyPadNum(s, 2, '0')
+    "milliseconds" -> __pyPadNum(h, 2, '0') + ":" + __pyPadNum(mi, 2, '0') + ":" + __pyPadNum(s, 2, '0') + "." + __pyPadNum(us / 1000, 3, '0')
+    "microseconds" -> __pyPadNum(h, 2, '0') + ":" + __pyPadNum(mi, 2, '0') + ":" + __pyPadNum(s, 2, '0') + "." + __pyPadNum(us, 6, '0')
+    else -> throw pyValueError("Unknown timespec value")
+  }
+}
+
+// strftime for a date, time or datetime: %f, %z, %:z and %Z of its own, the rest as time.strftime.
+internal fun __pyDtStrftime(fmt : string, y : int, mo : int, d : int, h : int, mi : int, s : int, us : int, tz : any?, dt : any?) : string {
+  val sb = StringBuilder()
+  var i = 0
+  while (i < fmt.size) {
+    val c = fmt[i]
+    if (c == '%' and i + 1 < fmt.size) {
+      val n = fmt[i + 1]
+      if (n == 'f') { sb.append(__pyPadNum(us, 6, '0')); i += 2; continue }
+      if (n == 'z') {
+        val off = __pyOffsetUs(tz, dt)
+        if (off != null) { sb.append(__pyOffsetText(off!!, "")) }
+        i += 2
+        continue
+      }
+      if (n == ':' and i + 2 < fmt.size and fmt[i + 2] == 'z') {
+        val off = __pyOffsetUs(tz, dt)
+        if (off != null) { sb.append(__pyOffsetText(off!!, ":")) }
+        i += 3
+        continue
+      }
+      if (n == 'Z') {
+        if (tz != null) {
+          val name = pyCall1(pyGetAttr(tz, "tzname"), dt)
+          if (name != null) { sb.append((name as string).replace("%", "%%")) }
+        }
+        i += 2
+        continue
+      }
+      sb.append(c)
+      sb.append(n)
+      i += 2
+      continue
+    }
+    sb.append(c)
+    i += 1
+  }
+  val yday = pyDaysBeforeMonth(y, mo) + d
+  return pyStrftime(sb.toString(), PyTm(y, mo, d, h, mi, s, pyWeekday(y, mo, d), yday, -1, null, null))
+}
+
+// ---- ISO text ----
+
+internal fun __pyIsoBad(s : string) : PyError => pyValueError("Invalid isoformat string: ${pyRepr(s)}")
+internal fun __pyDigitsAt(s : string, at : int, n : int) : int {
+  if (at + n > s.size) { return -1 }
+  for k in at..<(at + n) { if (!(s[k] >= '0' and s[k] <= '9')) { return -1 } }
+  return s[at..<(at + n)].toInt()
+}
+
+// The date of an ISO text (YYYY-MM-DD, YYYYMMDD, YYYY-Www[-D], YYYYWww[D]): [y, m, d], or null.
+internal fun __pyIsoDate(s : string) : List<int>? {
+  val y = __pyDigitsAt(s, 0, 4)
+  if (y < 0) { return null }
+  var at = 4
+  val extended = at < s.size and s[at] == '-'
+  if (extended) { at += 1 }
+  if (at < s.size and s[at] == 'W') {
+    at += 1
+    val w = __pyDigitsAt(s, at, 2)
+    if (w < 0) { return null }
+    at += 2
+    var wd = 1
+    if (at < s.size) {
+      if (extended) { if (s[at] != '-') { return null }; at += 1 }
+      wd = __pyDigitsAt(s, at, 1)
+      if (wd < 1 or wd > 7) { return null }
+      at += 1
+    }
+    if (at != s.size) { return null }
+    val jan4 = pyYmdToOrd(y, 1, 4)
+    val monday = jan4 - (jan4 + 6) % 7
+    if (w < 1 or w > 53) { return null }
+    return pyOrdToYmd(monday + (w - 1) * 7 + wd - 1)
+  }
+  val mo = __pyDigitsAt(s, at, 2)
+  if (mo < 0) { return null }
+  at += 2
+  if (extended) { if (at >= s.size or s[at] != '-') { return null }; at += 1 }
+  val d = __pyDigitsAt(s, at, 2)
+  if (d < 0) { return null }
+  at += 2
+  if (at != s.size) { return null }
+  return [y, mo, d]
+}
+
+// The time of an ISO text (HH[:MM[:SS[.f]]] or HHMM[SS[.f]], then Z or ±HH[:MM[:SS[.f]]]): [h, m, s, us] and the offset.
+internal fun __pyIsoTime(s : string) : Pair<List<int>, BigInt?>? {
+  var body = s
+  var offset : BigInt? = null
+  var tzAt = -1
+  for k in 0..<s.size { if (s[k] == '+' or s[k] == '-' or s[k] == 'Z' or s[k] == 'z') { tzAt = k; break } }
+  if (tzAt >= 0) {
+    body = s[..<tzAt]
+    val tzText = s[tzAt..]
+    if (tzText == "Z" or tzText == "z") { offset = BigInt.of(0) } else {
+      val sign = tzText[0] == '-' ? -1 : 1
+      val t = __pyIsoTime(tzText[1..])
+      if (t == null or t!!.second != null) { return null }
+      val p = t!!.first
+      offset = BigInt.of(sign) * (BigInt.of(p[0]) * BigInt.of(3600000000) + BigInt.of(p[1] * 60000000 + p[2] * 1000000 + p[3]))
+    }
+  }
+  var at = 0
+  val h = __pyDigitsAt(body, at, 2)
+  if (h < 0) { return null }
+  at += 2
+  var mi = 0
+  var sec = 0
+  var us = 0
+  val extended = at < body.size and body[at] == ':'
+  if (at < body.size) {
+    if (extended) { at += 1 }
+    mi = __pyDigitsAt(body, at, 2)
+    if (mi < 0) { return null }
+    at += 2
+    if (at < body.size) {
+      if (extended) { if (body[at] != ':') { return null }; at += 1 }
+      sec = __pyDigitsAt(body, at, 2)
+      if (sec < 0) { return null }
+      at += 2
+      if (at < body.size) {
+        if (body[at] != '.' and body[at] != ',') { return null }
+        at += 1
+        var n = 0
+        while (at + n < body.size and body[at + n] >= '0' and body[at + n] <= '9') { n += 1 }
+        if (n == 0 or at + n != body.size) { return null }
+        val digits = n > 6 ? body[at..<(at + 6)] : body[at..<(at + n)] + "000000"[..<(6 - n)]
+        us = digits.toInt()
+        at += n
+      }
+    }
+  }
+  if (at != body.size) { return null }
+  return Pair([h, mi, sec, us], offset)
+}
+
+// A timezone of `us` microseconds.
+internal fun __pyTzOf(us : BigInt) : any? => us.isZero ? __pyUtc : pyCall1(__pyTimezoneType, __pyTd(__pyTimedeltaType, us))
+
+// ---- date ----
+
+internal lazy val __pyIsoCalType : PyType = __pyMakeIsoCal()
+internal fun __pyMakeIsoCal() : PyType {
+  val t = pyNamedTuple(PyArgs(["IsoCalendarDate", PyTuple(["year", "week", "weekday"]), "datetime"], ["module"], "namedtuple()"))
+  t.dict["__repr__"] = pyLibMethod("IsoCalendarDate", "__repr__") { self, a ->
+    val v = ((self as PyObject).value as PyTuple).items
+    "datetime.IsoCalendarDate(year=${v[0]}, week=${v[1]}, weekday=${v[2]})"
+  }
+  return t
+}
+
+internal fun __pyYmd(o : any?) : List<int> => [__pyI(o, "_year"), __pyI(o, "_month"), __pyI(o, "_day")]
+
+internal fun __pyDateMembers(owner : string) : open Map<string, any?> {
+  val m : open Map<string, any?> = {:}
+  m["year"] = PyProperty(PyBuiltin("year", { args, kw -> pyGetAttr(args[0], "_year") }), null, null, null)
+  m["month"] = PyProperty(PyBuiltin("month", { args, kw -> pyGetAttr(args[0], "_month") }), null, null, null)
+  m["day"] = PyProperty(PyBuiltin("day", { args, kw -> pyGetAttr(args[0], "_day") }), null, null, null)
+  m["toordinal"] = pyLibMethod(owner, "toordinal") { self, a -> val v = __pyYmd(self); pyYmdToOrd(v[0], v[1], v[2]) }
+  m["weekday"] = pyLibMethod(owner, "weekday") { self, a -> val v = __pyYmd(self); pyWeekday(v[0], v[1], v[2]) }
+  m["isoweekday"] = pyLibMethod(owner, "isoweekday") { self, a -> val v = __pyYmd(self); pyWeekday(v[0], v[1], v[2]) + 1 }
+  m["isocalendar"] = pyLibMethod(owner, "isocalendar") { self, a ->
+    val v = __pyYmd(self)
+    val c = pyIsoCalendar(v[0], v[1], v[2])
+    pyCallV(__pyIsoCalType, [c[0], c[1], c[2]], null)
+  }
+  return m
+}
+
+internal lazy val __pyDateType : PyType = __pyMakeDate()
+internal fun __pyMakeDate() : PyType {
+  val m = __pyDateMembers("date")
+  m["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val a = PyArgs(args[1..], kw, "date()")
+    a.only(["year", "month", "day"])
+    fun arg(i : int, name : string) : int {
+      val v = i < a.pos.size ? a.pos[i] : a.get(name, null)
+      if (v == null) { throw pyTypeError("function missing required argument '$name' (pos ${i + 1})") }
+      return __pyIntArgOf(v, name)
+    }
+    __pyNewDate(args[0], arg(0, "year"), arg(1, "month"), arg(2, "day"))
+  }))
+  m["today"] = pyLibClassMethod("date", "today") { cls, a ->
+    val s = __pyNowNanos() / 1000000000
+    val t = pyTmFromSeconds(s, __pyOffsetAt(s), null)
+    __pyNewDate(cls, t.year, t.mon, t.mday)
+  }
+  m["fromtimestamp"] = pyLibClassMethod("date", "fromtimestamp") { cls, a ->
+    val s = __pyFloorF(pyToFloat(pyFloatOf1(a.pos[0]))).toInt()
+    val t = pyTmFromSeconds(s, __pyOffsetAt(s), null)
+    __pyNewDate(cls, t.year, t.mon, t.mday)
+  }
+  m["fromordinal"] = pyLibClassMethod("date", "fromordinal") { cls, a ->
+    val n = pyIndex(a.pos[0])
+    if (n < 1) { throw pyValueError("ordinal must be >= 1") }
+    val v = pyOrdToYmd(n)
+    __pyNewDate(cls, v[0], v[1], v[2])
+  }
+  m["fromisoformat"] = pyLibClassMethod("date", "fromisoformat") { cls, a ->
+    val s = a.pos[0]
+    if (!(s is string)) { throw pyTypeError("Argument must be str, not ${pyTypeName(s)}") }
+    val v = __pyIsoDate(s as string)
+    if (v == null) { throw __pyIsoBad(s as string) }
+    __pyNewDate(cls, v!![0], v!![1], v!![2])
+  }
+  m["fromisocalendar"] = pyLibClassMethod("date", "fromisocalendar") { cls, a ->
+    val y = pyIndex(a.pos[0])
+    val w = pyIndex(a.pos[1])
+    val wd = pyIndex(a.pos[2])
+    if (wd < 1 or wd > 7) { throw pyValueError("Invalid weekday: $wd (range is [1, 7])") }
+    if (w < 1 or w > 53) { throw pyValueError("Invalid week: $w") }
+    val jan4 = pyYmdToOrd(y, 1, 4)
+    val monday = jan4 - (jan4 + 6) % 7
+    val v = pyOrdToYmd(monday + (w - 1) * 7 + wd - 1)
+    __pyNewDate(cls, v[0], v[1], v[2])
+  }
+  m["strptime"] = pyLibClassMethod("date", "strptime") { cls, a ->
+    val p = pyStrptime(a.pos[0] as string, a.pos[1] as string)
+    __pyNewDate(cls, p.year, p.month, p.day)
+  }
+  m["replace"] = pyLibMethod("date", "replace") { self, a ->
+    val v = __pyYmd(self)
+    val names = ["year", "month", "day"]
+    val out : open List<int> = v.toOpenList()
+    for (i, nm) in names.withIndex() {
+      val x = i < a.pos.size ? a.pos[i] : a.get(nm, null)
+      if (x != null) { out[i] = __pyIntArgOf(x, nm) }
+    }
+    __pyNewDate(pyTypeOf(self), out[0], out[1], out[2])
+  }
+  m["__replace__"] = m["replace"]
+  m["timetuple"] = pyLibMethod("date", "timetuple") { self, a ->
+    val v = __pyYmd(self)
+    pyStructTime(PyTm(v[0], v[1], v[2], 0, 0, 0, pyWeekday(v[0], v[1], v[2]), pyDaysBeforeMonth(v[0], v[1]) + v[2], -1, null, null))
+  }
+  m["isoformat"] = pyLibMethod("date", "isoformat") { self, a -> val v = __pyYmd(self); __pyPadNum(v[0], 4, '0') + "-" + __pyPadNum(v[1], 2, '0') + "-" + __pyPadNum(v[2], 2, '0') }
+  m["__str__"] = m["isoformat"]
+  m["ctime"] = pyLibMethod("date", "ctime") { self, a -> val v = __pyYmd(self); __pyDtStrftime("%a %b %e %H:%M:%S %Y", v[0], v[1], v[2], 0, 0, 0, 0, null, self) }
+  m["strftime"] = pyLibMethod("date", "strftime") { self, a -> val v = __pyYmd(self); __pyDtStrftime(a.pos[0] as string, v[0], v[1], v[2], 0, 0, 0, 0, null, self) }
+  m["__format__"] = pyLibMethod("date", "__format__") { self, a ->
+    val spec = a.pos[0] as string
+    spec.isEmpty() ? pyStr(self) : pyCallMethodOf(self, "strftime", spec)
+  }
+  m["__repr__"] = pyLibMethod("date", "__repr__") { self, a -> val v = __pyYmd(self); "${__pyQual(self)}(${v[0]}, ${v[1]}, ${v[2]})" }
+  m["__add__"] = pyLibMethod("date", "__add__") { self, a ->
+    val o = a.pos[0]
+    if (!__pyIsTd(o)) { pyNotImplemented } else {
+      val v = __pyYmd(self)
+      val n = pyYmdToOrd(v[0], v[1], v[2]) + __pyI(o, "_days")
+      if (n < 1 or n > 3652059) { throw pyOverflowError("date value out of range") }
+      val r = pyOrdToYmd(n)
+      __pyNewDate(pyTypeOf(self), r[0], r[1], r[2])
+    }
+  }
+  m["__radd__"] = m["__add__"]
+  m["__sub__"] = pyLibMethod("date", "__sub__") { self, a ->
+    val o = a.pos[0]
+    val v = __pyYmd(self)
+    if (__pyIsTd(o)) {
+      val n = pyYmdToOrd(v[0], v[1], v[2]) - __pyI(o, "_days")
+      if (n < 1 or n > 3652059) { throw pyOverflowError("date value out of range") }
+      val r = pyOrdToYmd(n)
+      __pyNewDate(pyTypeOf(self), r[0], r[1], r[2])
+    } else if (__pyIsDate(o) and !__pyIsDatetime(o)) {
+      val w = __pyYmd(o)
+      __pyTdOf(pyYmdToOrd(v[0], v[1], v[2]) - pyYmdToOrd(w[0], w[1], w[2]), 0, 0)
+    } else { pyNotImplemented }
+  }
+  fun cmp(name : string, test : (int) -> bool) {
+    m[name] = pyLibMethod("date", name) { self, a ->
+      val o = a.pos[0]
+      if (!__pyIsDate(o) or __pyIsDatetime(o) != __pyIsDatetime(self)) {
+        if (name == "__eq__") { pyNotImplemented } else { pyNotImplemented }
+      } else {
+        val v = __pyYmd(self)
+        val w = __pyYmd(o)
+        test(pyYmdToOrd(v[0], v[1], v[2]) - pyYmdToOrd(w[0], w[1], w[2]))
+      }
+    }
+  }
+  cmp("__eq__", { c -> c == 0 })
+  cmp("__lt__", { c -> c < 0 })
+  cmp("__le__", { c -> c <= 0 })
+  cmp("__gt__", { c -> c > 0 })
+  cmp("__ge__", { c -> c >= 0 })
+  m["__hash__"] = pyLibMethod("date", "__hash__") { self, a -> val v = __pyYmd(self); pyHash(PyTuple([v[0], v[1], v[2]])) }
+  val t = __pyDtClass("date", [pyObjectType], m)
+  t.dict["min"] = __pyNewDate(t, 1, 1, 1)
+  t.dict["max"] = __pyNewDate(t, 9999, 12, 31)
+  t.dict["resolution"] = __pyTdOf(1, 0, 0)
+  return t
+}
+
+internal fun pyCallMethodOf(o : any?, name : string, arg : any?) : any? => pyCall1(pyGetAttr(o, name), arg)
+
+// ---- tzinfo and timezone ----
+
+internal lazy val __pyTzinfoType : PyType = __pyDtClass("tzinfo", [pyObjectType], {
+  "utcoffset": pyLibMethod("tzinfo", "utcoffset") { self, a -> throw pyError(pyNotImplementedErrorType, "a tzinfo subclass must implement utcoffset()") },
+  "dst": pyLibMethod("tzinfo", "dst") { self, a -> throw pyError(pyNotImplementedErrorType, "a tzinfo subclass must implement dst()") },
+  "tzname": pyLibMethod("tzinfo", "tzname") { self, a -> throw pyError(pyNotImplementedErrorType, "a tzinfo subclass must implement tzname()") },
+  "fromutc": pyLibMethod("tzinfo", "fromutc") { self, a ->
+    val dt = a.pos[0]
+    val off = __pyOffsetUs(self, dt)
+    if (off == null) { throw pyValueError("fromutc: non-None utcoffset() result required") }
+    pyAdd(dt, __pyTd(__pyTimedeltaType, off!!))
+  }
+})
+
+internal fun __pyTzName(self : any?) : string {
+  val name = pyGetAttrOr(self, "_name", null)
+  if (name != null) { return name as string }
+  val off = __pyTdUs(pyGetAttr(self, "_offset"))
+  return off.isZero ? "UTC" : "UTC" + __pyOffsetText(off, ":")
+}
+
+internal lazy val __pyTimezoneType : PyType = __pyMakeTimezone()
+internal fun __pyMakeTimezone() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val a = PyArgs(args[1..], kw, "timezone()")
+    a.only(["offset", "name"])
+    val off = a.pos.isNotEmpty() ? a.pos[0] : a.get("offset", null)
+    if (!__pyIsTd(off)) { throw pyTypeError("timezone() argument 1 must be datetime.timedelta, not ${pyTypeName(off)}") }
+    val name = a.pos.size > 1 ? a.pos[1] : a.get("name", null)
+    if (name != null and !(name is string)) { throw pyTypeError("timezone() argument 2 must be str, not ${pyTypeName(name)}") }
+    val us = __pyTdUs(off)
+    if (us.abs() >= BigInt.of(__pyUsPerDay)) {
+      throw pyValueError("offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), not ${pyRepr(off)}")
+    }
+    us.isZero and name == null and args[0] === __pyTimezoneType ? __pyUtc : __pyMake(args[0], [Pair("_offset", off), Pair("_name", name)])
+  }))
+  m["utcoffset"] = pyLibMethod("timezone", "utcoffset") { self, a -> pyGetAttr(self, "_offset") }
+  m["dst"] = pyLibMethod("timezone", "dst") { self, a -> null }
+  m["tzname"] = pyLibMethod("timezone", "tzname") { self, a -> __pyTzName(self) }
+  m["fromutc"] = pyLibMethod("timezone", "fromutc") { self, a -> pyAdd(a.pos[0], pyGetAttr(self, "_offset")) }
+  m["__str__"] = pyLibMethod("timezone", "__str__") { self, a -> __pyTzName(self) }
+  m["__repr__"] = pyLibMethod("timezone", "__repr__") { self, a ->
+    if (self === __pyUtc) { "datetime.timezone.utc" } else {
+      val name = pyGetAttrOr(self, "_name", null)
+      "${__pyQual(self)}(${pyRepr(pyGetAttr(self, "_offset"))}${name == null ? "" : ", " + pyRepr(name)})"
+    }
+  }
+  m["__eq__"] = pyLibMethod("timezone", "__eq__") { self, a ->
+    if (!pyIsInstance(a.pos[0], __pyTimezoneType)) { pyNotImplemented } else { pyEqB(pyGetAttr(self, "_offset"), pyGetAttr(a.pos[0], "_offset")) }
+  }
+  m["__hash__"] = pyLibMethod("timezone", "__hash__") { self, a -> pyHash(pyGetAttr(self, "_offset")) }
+  return __pyDtClass("timezone", [__pyTzinfoType], m)
+}
+internal lazy val __pyUtc : any? = __pyMakeUtc()
+internal fun __pyMakeUtc() : any? {
+  val u = __pyMake(__pyTimezoneType, [Pair("_offset", __pyTdOf(0, 0, 0)), Pair("_name", null)])
+  __pyTimezoneType.dict["utc"] = u
+  return u
+}
+
+// ---- time ----
+
+internal fun __pyHms(o : any?) : List<int> => [__pyI(o, "_hour"), __pyI(o, "_minute"), __pyI(o, "_second"), __pyI(o, "_microsecond")]
+
+internal lazy val __pyTimeType : PyType = __pyMakeTime()
+internal fun __pyMakeTime() : PyType {
+  val m : open Map<string, any?> = {:}
+  m["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val a = PyArgs(args[1..], kw, "time()")
+    a.only(["hour", "minute", "second", "microsecond", "tzinfo", "fold"])
+    val names = ["hour", "minute", "second", "microsecond"]
+    val v : open List<int> = [0, 0, 0, 0]
+    for (i, nm) in names.withIndex() {
+      val x = i < a.pos.size ? a.pos[i] : a.get(nm, null)
+      if (x != null) { v[i] = __pyIntArgOf(x, nm) }
+    }
+    val tz = a.pos.size > 4 ? a.pos[4] : a.get("tzinfo", null)
+    __pyNewTime(args[0], v[0], v[1], v[2], v[3], tz, pyIndex(a.get("fold", 0)))
+  }))
+  for nm in ["hour", "minute", "second", "microsecond", "tzinfo", "fold"] {
+    m[nm] = PyProperty(PyBuiltin(nm, { args, kw -> pyGetAttr(args[0], "_" + nm) }), null, null, null)
+  }
+  m["isoformat"] = pyLibMethod("time", "isoformat") { self, a ->
+    val v = __pyHms(self)
+    val spec = a.pos.isNotEmpty() ? a.pos[0] as string : a.get("timespec", "auto") as string
+    val off = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), null)
+    __pyTimeText(v[0], v[1], v[2], v[3], spec) + (off == null ? "" : __pyOffsetText(off!!, ":"))
+  }
+  m["__str__"] = m["isoformat"]
+  m["fromisoformat"] = pyLibClassMethod("time", "fromisoformat") { cls, a ->
+    val s = a.pos[0] as string
+    val t = __pyIsoTime(s.startsWith("T") ? s[1..] : s)
+    if (t == null) { throw __pyIsoBad(s) }
+    val p = t!!.first
+    __pyNewTime(cls, p[0], p[1], p[2], p[3], t!!.second == null ? null : __pyTzOf(t!!.second!!), 0)
+  }
+  m["replace"] = pyLibMethod("time", "replace") { self, a ->
+    val v = __pyHms(self).toOpenList()
+    val names = ["hour", "minute", "second", "microsecond"]
+    for (i, nm) in names.withIndex() {
+      val x = i < a.pos.size ? a.pos[i] : a.get(nm, null)
+      if (x != null) { v[i] = __pyIntArgOf(x, nm) }
+    }
+    val tz = a.pos.size > 4 ? a.pos[4] : a.has("tzinfo") ? a.get("tzinfo", null) : pyGetAttr(self, "_tzinfo")
+    __pyNewTime(pyTypeOf(self), v[0], v[1], v[2], v[3], tz, pyIndex(a.get("fold", pyGetAttr(self, "_fold"))))
+  }
+  m["__replace__"] = m["replace"]
+  m["strftime"] = pyLibMethod("time", "strftime") { self, a ->
+    val v = __pyHms(self)
+    __pyDtStrftime(a.pos[0] as string, 1900, 1, 1, v[0], v[1], v[2], v[3], pyGetAttr(self, "_tzinfo"), null)
+  }
+  m["__format__"] = pyLibMethod("time", "__format__") { self, a ->
+    val spec = a.pos[0] as string
+    spec.isEmpty() ? pyStr(self) : pyCallMethodOf(self, "strftime", spec)
+  }
+  m["utcoffset"] = pyLibMethod("time", "utcoffset") { self, a ->
+    val tz = pyGetAttr(self, "_tzinfo")
+    tz == null ? null : pyCall1(pyGetAttr(tz, "utcoffset"), null)
+  }
+  m["dst"] = pyLibMethod("time", "dst") { self, a -> val tz = pyGetAttr(self, "_tzinfo"); tz == null ? null : pyCall1(pyGetAttr(tz, "dst"), null) }
+  m["tzname"] = pyLibMethod("time", "tzname") { self, a -> val tz = pyGetAttr(self, "_tzinfo"); tz == null ? null : pyCall1(pyGetAttr(tz, "tzname"), null) }
+  m["__repr__"] = pyLibMethod("time", "__repr__") { self, a ->
+    val v = __pyHms(self)
+    var s = "${__pyQual(self)}(${v[0]}, ${v[1]}"
+    if (v[2] != 0 or v[3] != 0) { s += ", ${v[2]}" }
+    if (v[3] != 0) { s += ", ${v[3]}" }
+    val tz = pyGetAttr(self, "_tzinfo")
+    if (tz != null) { s += ", tzinfo=${pyRepr(tz)}" }
+    if (__pyI(self, "_fold") != 0) { s += ", fold=1" }
+    s + ")"
+  }
+  fun key(o : any?) : BigInt {
+    val v = __pyHms(o)
+    var us = BigInt.of(((v[0] * 60 + v[1]) * 60 + v[2]) * 1000000 + v[3])
+    val off = __pyOffsetUs(pyGetAttr(o, "_tzinfo"), null)
+    if (off != null) { us = us - off!! }
+    return us
+  }
+  fun cmp(name : string, test : (int) -> bool) {
+    m[name] = pyLibMethod("time", name) { self, a ->
+      val o = a.pos[0]
+      if (!pyIsInstance(o, __pyTimeType)) { pyNotImplemented } else {
+        val aware1 = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), null) != null
+        val aware2 = __pyOffsetUs(pyGetAttr(o, "_tzinfo"), null) != null
+        if (aware1 != aware2) {
+          if (name == "__eq__") { false } else { throw pyTypeError("can't compare offset-naive and offset-aware times") }
+        } else { test(key(self).compareTo(key(o))) }
+      }
+    }
+  }
+  cmp("__eq__", { c -> c == 0 })
+  cmp("__lt__", { c -> c < 0 })
+  cmp("__le__", { c -> c <= 0 })
+  cmp("__gt__", { c -> c > 0 })
+  cmp("__ge__", { c -> c >= 0 })
+  m["__hash__"] = pyLibMethod("time", "__hash__") { self, a -> pyHash(pyNorm(key(self))) }
+  val t = __pyDtClass("time", [pyObjectType], m)
+  t.dict["min"] = __pyNewTime(t, 0, 0, 0, 0, null, 0)
+  t.dict["max"] = __pyNewTime(t, 23, 59, 59, 999999, null, 0)
+  t.dict["resolution"] = __pyTdOf(0, 0, 1)
+  return t
+}
+
+// ---- datetime ----
+
+internal fun __pyDtAll(o : any?) : List<int> => [__pyI(o, "_year"), __pyI(o, "_month"), __pyI(o, "_day"), __pyI(o, "_hour"),
+  __pyI(o, "_minute"), __pyI(o, "_second"), __pyI(o, "_microsecond")]
+
+// Microseconds from 0001-01-01 00:00, as the datetime reads (its own clock, no offset).
+internal fun __pyDtUs(v : List<int>) : BigInt =>
+  BigInt.of(pyYmdToOrd(v[0], v[1], v[2]) - 1) * BigInt.of(__pyUsPerDay) + BigInt.of(((v[3] * 60 + v[4]) * 60 + v[5]) * 1000000 + v[6])
+
+internal fun __pyDtFromUs(cls : any?, us : BigInt, tz : any?, fold : int = 0) : any? {
+  val perDay = BigInt.of(__pyUsPerDay)
+  val days = us.floorDiv(perDay)
+  val rest = (us - days * perDay).toInt()
+  val ord = days.toInt() + 1
+  if (ord < 1 or ord > 3652059) { throw pyOverflowError("date value out of range") }
+  val v = pyOrdToYmd(ord)
+  val secs = rest / 1000000
+  return __pyNewDatetime(cls, v[0], v[1], v[2], secs / 3600, secs / 60 % 60, secs % 60, rest % 1000000, tz, fold)
+}
+
+internal fun __pyLocalDatetime(cls : any?, nanos : int, tz : any?) : any? {
+  val secs = __pyFdivI(nanos, 1000000000)
+  val us = (nanos - secs * 1000000000) / 1000
+  if (tz == null) {
+    val off = __pyOffsetAt(secs)
+    return __pyDtFromUs(cls, BigInt.of(secs + off) * BigInt.of(1000000) + BigInt.of(us) + BigInt.of(719162) * BigInt.of(__pyUsPerDay), null)
+  }
+  val utcDt = __pyDtFromUs(cls, BigInt.of(secs) * BigInt.of(1000000) + BigInt.of(us) + BigInt.of(719162) * BigInt.of(__pyUsPerDay), tz)
+  return pyCall1(pyGetAttr(tz, "fromutc"), utcDt)
+}
+
+internal fun __pyTimestampNanos(x : any?) : int {
+  if (pyIsInt(x)) { return pyIndex(x) * 1000000000 }
+  val f = pyToFloat(pyFloatOf1(x))
+  if (f.isNaN()) { throw pyValueError("Invalid value NaN (not a number)") }
+  // Rounded half to even at the microsecond, as CPython's.
+  val r = pyFloatRatio(f)
+  return pyRoundHalfEven(r.first * BigInt.of(1000000), r.second).toInt() * 1000
+}
+
+internal lazy val __pyDatetimeType : PyType = __pyMakeDatetime()
+internal fun __pyMakeDatetime() : PyType {
+  val m = __pyDateMembers("datetime")
+  m["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val a = PyArgs(args[1..], kw, "datetime()")
+    a.only(["year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo", "fold"])
+    val names = ["year", "month", "day", "hour", "minute", "second", "microsecond"]
+    val v : open List<int> = [0, 0, 0, 0, 0, 0, 0]
+    for (i, nm) in names.withIndex() {
+      val x = i < a.pos.size ? a.pos[i] : a.get(nm, null)
+      if (x == null) {
+        if (i < 3) { throw pyTypeError("function missing required argument '$nm' (pos ${i + 1})") }
+      } else { v[i] = __pyIntArgOf(x, nm) }
+    }
+    val tz = a.pos.size > 7 ? a.pos[7] : a.get("tzinfo", null)
+    __pyNewDatetime(args[0], v[0], v[1], v[2], v[3], v[4], v[5], v[6], tz, pyIndex(a.get("fold", 0)))
+  }))
+  for nm in ["hour", "minute", "second", "microsecond", "tzinfo", "fold"] {
+    m[nm] = PyProperty(PyBuiltin(nm, { args, kw -> pyGetAttr(args[0], "_" + nm) }), null, null, null)
+  }
+  m["now"] = pyLibClassMethod("datetime", "now") { cls, a -> __pyLocalDatetime(cls, __pyNowNanos(), a.pos.isNotEmpty() ? a.pos[0] : a.get("tz", null)) }
+  m["today"] = pyLibClassMethod("datetime", "today") { cls, a -> __pyLocalDatetime(cls, __pyNowNanos(), null) }
+  m["utcnow"] = pyLibClassMethod("datetime", "utcnow") { cls, a ->
+    val n = __pyNowNanos()
+    pyCall1(pyGetAttr(__pyLocalDatetime(cls, n, __pyUtc), "replace"), null)
+  }
+  m["fromtimestamp"] = pyLibClassMethod("datetime", "fromtimestamp") { cls, a ->
+    __pyLocalDatetime(cls, __pyTimestampNanos(a.pos[0]), a.pos.size > 1 ? a.pos[1] : a.get("tz", null))
+  }
+  m["utcfromtimestamp"] = pyLibClassMethod("datetime", "utcfromtimestamp") { cls, a ->
+    val d = __pyLocalDatetime(cls, __pyTimestampNanos(a.pos[0]), __pyUtc)
+    val v = __pyDtAll(d)
+    __pyNewDatetime(cls, v[0], v[1], v[2], v[3], v[4], v[5], v[6], null, 0)
+  }
+  m["fromordinal"] = pyLibClassMethod("datetime", "fromordinal") { cls, a ->
+    val n = pyIndex(a.pos[0])
+    if (n < 1) { throw pyValueError("ordinal must be >= 1") }
+    val v = pyOrdToYmd(n)
+    __pyNewDatetime(cls, v[0], v[1], v[2], 0, 0, 0, 0, null, 0)
+  }
+  m["combine"] = pyLibClassMethod("datetime", "combine") { cls, a ->
+    val d = a.pos[0]
+    val t = a.pos[1]
+    if (!__pyIsDate(d)) { throw pyTypeError("combine() argument 1 must be datetime.date, not ${pyTypeName(d)}") }
+    if (!pyIsInstance(t, __pyTimeType)) { throw pyTypeError("combine() argument 2 must be datetime.time, not ${pyTypeName(t)}") }
+    val dv = __pyYmd(d)
+    val tv = __pyHms(t)
+    val tz = a.pos.size > 2 ? a.pos[2] : a.has("tzinfo") ? a.get("tzinfo", null) : pyGetAttr(t, "_tzinfo")
+    __pyNewDatetime(cls, dv[0], dv[1], dv[2], tv[0], tv[1], tv[2], tv[3], tz, __pyI(t, "_fold"))
+  }
+  m["fromisoformat"] = pyLibClassMethod("datetime", "fromisoformat") { cls, a ->
+    val s = a.pos[0]
+    if (!(s is string)) { throw pyTypeError("fromisoformat: argument must be str") }
+    val text = s as string
+    // The date part: 10 characters extended (YYYY-MM-DD, YYYY-Www-D), else up to the separator.
+    var dateLen = text.size
+    if (text.size >= 5 and text[4] == '-') {
+      dateLen = text.size >= 6 and text[5] == 'W' ? (text.size >= 9 and text[8] == '-' ? 10 : 8) : 10
+    } else if (text.size >= 5 and text[4] == 'W') {
+      dateLen = text.size >= 8 and text[7] >= '0' and text[7] <= '9' ? 8 : 7
+    } else { dateLen = Math.min(8, text.size) }
+    if (dateLen > text.size) { throw __pyIsoBad(text) }
+    val d = __pyIsoDate(text[..<dateLen])
+    if (d == null) { throw __pyIsoBad(text) }
+    var tv : List<int> = [0, 0, 0, 0]
+    var tz : any? = null
+    if (dateLen < text.size) {
+      val t = __pyIsoTime(text[(dateLen + 1)..])
+      if (t == null) { throw __pyIsoBad(text) }
+      tv = t!!.first
+      if (t!!.second != null) { tz = __pyTzOf(t!!.second!!) }
+    }
+    if (tv[0] == 24) {
+      if (tv[1] != 0 or tv[2] != 0 or tv[3] != 0) { throw pyValueError("minute, second, and microsecond must be 0 when hour is 24") }
+      __pyDtFromUs(cls, __pyDtUs([d!![0], d!![1], d!![2], 0, 0, 0, 0]) + BigInt.of(__pyUsPerDay), tz)
+    } else {
+      __pyNewDatetime(cls, d!![0], d!![1], d!![2], tv[0], tv[1], tv[2], tv[3], tz, 0)
+    }
+  }
+  m["strptime"] = pyLibClassMethod("datetime", "strptime") { cls, a ->
+    val p = pyStrptime(a.pos[0] as string, a.pos[1] as string)
+    val tz = p.offset == null ? null : __pyTzOf(BigInt.of(p.offset!!) * BigInt.of(1000000))
+    __pyNewDatetime(cls, p.year, p.month, p.day, p.hour, p.minute, p.second, p.micro, tz, 0)
+  }
+  m["date"] = pyLibMethod("datetime", "date") { self, a -> val v = __pyDtAll(self); __pyNewDate(__pyDateType, v[0], v[1], v[2]) }
+  m["time"] = pyLibMethod("datetime", "time") { self, a -> val v = __pyDtAll(self); __pyNewTime(__pyTimeType, v[3], v[4], v[5], v[6], null, __pyI(self, "_fold")) }
+  m["timetz"] = pyLibMethod("datetime", "timetz") { self, a ->
+    val v = __pyDtAll(self)
+    __pyNewTime(__pyTimeType, v[3], v[4], v[5], v[6], pyGetAttr(self, "_tzinfo"), __pyI(self, "_fold"))
+  }
+  m["replace"] = pyLibMethod("datetime", "replace") { self, a ->
+    val v = __pyDtAll(self).toOpenList()
+    val names = ["year", "month", "day", "hour", "minute", "second", "microsecond"]
+    for (i, nm) in names.withIndex() {
+      val x = i < a.pos.size ? a.pos[i] : a.get(nm, null)
+      if (x != null) { v[i] = __pyIntArgOf(x, nm) }
+    }
+    val tz = a.pos.size > 7 ? a.pos[7] : a.has("tzinfo") ? a.get("tzinfo", null) : pyGetAttr(self, "_tzinfo")
+    __pyNewDatetime(pyTypeOf(self), v[0], v[1], v[2], v[3], v[4], v[5], v[6], tz, pyIndex(a.get("fold", pyGetAttr(self, "_fold"))))
+  }
+  m["__replace__"] = m["replace"]
+  m["utcoffset"] = pyLibMethod("datetime", "utcoffset") { self, a -> val tz = pyGetAttr(self, "_tzinfo"); tz == null ? null : pyCall1(pyGetAttr(tz, "utcoffset"), self) }
+  m["dst"] = pyLibMethod("datetime", "dst") { self, a -> val tz = pyGetAttr(self, "_tzinfo"); tz == null ? null : pyCall1(pyGetAttr(tz, "dst"), self) }
+  m["tzname"] = pyLibMethod("datetime", "tzname") { self, a -> val tz = pyGetAttr(self, "_tzinfo"); tz == null ? null : pyCall1(pyGetAttr(tz, "tzname"), self) }
+  m["astimezone"] = pyLibMethod("datetime", "astimezone") { self, a ->
+    var tz = a.pos.isNotEmpty() ? a.pos[0] : a.get("tz", null)
+    val v = __pyDtAll(self)
+    var off = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), self)
+    if (off == null) {
+      // A naive datetime is in the system's time zone.
+      val local = __pyDtUs(v) - BigInt.of(719162) * BigInt.of(__pyUsPerDay)
+      val secs = local.floorDiv(BigInt.of(1000000)).toInt()
+      off = BigInt.of(__pyOffsetAt(secs - __pyOffsetAt(secs))) * BigInt.of(1000000)
+    }
+    val utc = __pyDtUs(v) - off!!
+    if (tz == null) {
+      val secs = (utc - BigInt.of(719162) * BigInt.of(__pyUsPerDay)).floorDiv(BigInt.of(1000000)).toInt()
+      val o = __pyOffsetAt(secs)
+      tz = pyCallV(__pyTimezoneType, [__pyTdOf(0, o, 0), __pyZoneName(o)], null)
+    }
+    if (!pyIsInstance(tz, __pyTzinfoType)) { throw pyTypeError("tzinfo argument must be None or of a tzinfo subclass, not type '${pyTypeName(tz)}'") }
+    pyCall1(pyGetAttr(tz, "fromutc"), __pyDtFromUs(pyTypeOf(self), utc, tz))
+  }
+  m["timetuple"] = pyLibMethod("datetime", "timetuple") { self, a ->
+    val v = __pyDtAll(self)
+    val dst = pyCall0(pyGetAttr(self, "dst"))
+    val isdst = dst == null ? -1 : (__pyTdUs(dst).isZero ? 0 : 1)
+    pyStructTime(PyTm(v[0], v[1], v[2], v[3], v[4], v[5], pyWeekday(v[0], v[1], v[2]), pyDaysBeforeMonth(v[0], v[1]) + v[2], isdst, null, null))
+  }
+  m["utctimetuple"] = pyLibMethod("datetime", "utctimetuple") { self, a ->
+    var v = __pyDtAll(self)
+    val off = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), self)
+    if (off != null) { v = __pyDtAll(__pyDtFromUs(__pyDatetimeType, __pyDtUs(v) - off!!, null)) }
+    pyStructTime(PyTm(v[0], v[1], v[2], v[3], v[4], v[5], pyWeekday(v[0], v[1], v[2]), pyDaysBeforeMonth(v[0], v[1]) + v[2], 0, null, null))
+  }
+  m["timestamp"] = pyLibMethod("datetime", "timestamp") { self, a ->
+    val v = __pyDtAll(self)
+    val off = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), self)
+    val epoch = BigInt.of(719162) * BigInt.of(__pyUsPerDay)
+    var us = __pyDtUs(v) - epoch
+    if (off != null) { us = us - off!! } else {
+      val secs = us.floorDiv(BigInt.of(1000000)).toInt()
+      us = us - BigInt.of(__pyOffsetAt(secs - __pyOffsetAt(secs))) * BigInt.of(1000000)
+    }
+    pyRatioToFloat(us, BigInt.of(1000000))
+  }
+  m["isoformat"] = pyLibMethod("datetime", "isoformat") { self, a ->
+    val v = __pyDtAll(self)
+    val sep = a.pos.isNotEmpty() ? a.pos[0] as string : a.get("sep", "T") as string
+    val spec = a.pos.size > 1 ? a.pos[1] as string : a.get("timespec", "auto") as string
+    val off = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), self)
+    __pyPadNum(v[0], 4, '0') + "-" + __pyPadNum(v[1], 2, '0') + "-" + __pyPadNum(v[2], 2, '0') + sep +
+      __pyTimeText(v[3], v[4], v[5], v[6], spec) + (off == null ? "" : __pyOffsetText(off!!, ":"))
+  }
+  m["__str__"] = pyLibMethod("datetime", "__str__") { self, a -> pyCallV(pyGetAttr(self, "isoformat"), [" "], null) }
+  m["ctime"] = pyLibMethod("datetime", "ctime") { self, a ->
+    val v = __pyDtAll(self)
+    __pyDtStrftime("%a %b %e %H:%M:%S %Y", v[0], v[1], v[2], v[3], v[4], v[5], v[6], null, self)
+  }
+  m["strftime"] = pyLibMethod("datetime", "strftime") { self, a ->
+    val v = __pyDtAll(self)
+    __pyDtStrftime(a.pos[0] as string, v[0], v[1], v[2], v[3], v[4], v[5], v[6], pyGetAttr(self, "_tzinfo"), self)
+  }
+  m["__format__"] = pyLibMethod("datetime", "__format__") { self, a ->
+    val spec = a.pos[0] as string
+    spec.isEmpty() ? pyStr(self) : pyCallMethodOf(self, "strftime", spec)
+  }
+  m["__repr__"] = pyLibMethod("datetime", "__repr__") { self, a ->
+    val v = __pyDtAll(self)
+    var s = "${__pyQual(self)}(${v[0]}, ${v[1]}, ${v[2]}, ${v[3]}, ${v[4]}"
+    if (v[5] != 0 or v[6] != 0) { s += ", ${v[5]}" }
+    if (v[6] != 0) { s += ", ${v[6]}" }
+    val tz = pyGetAttr(self, "_tzinfo")
+    if (tz != null) { s += ", tzinfo=${pyRepr(tz)}" }
+    if (__pyI(self, "_fold") != 0) { s += ", fold=1" }
+    s + ")"
+  }
+  m["__add__"] = pyLibMethod("datetime", "__add__") { self, a ->
+    val o = a.pos[0]
+    if (!__pyIsTd(o)) { pyNotImplemented } else { __pyDtFromUs(pyTypeOf(self), __pyDtUs(__pyDtAll(self)) + __pyTdUs(o), pyGetAttr(self, "_tzinfo")) }
+  }
+  m["__radd__"] = m["__add__"]
+  m["__sub__"] = pyLibMethod("datetime", "__sub__") { self, a ->
+    val o = a.pos[0]
+    if (__pyIsTd(o)) { __pyDtFromUs(pyTypeOf(self), __pyDtUs(__pyDtAll(self)) - __pyTdUs(o), pyGetAttr(self, "_tzinfo")) }
+    else if (__pyIsDatetime(o)) {
+      val off1 = __pyOffsetUs(pyGetAttr(self, "_tzinfo"), self)
+      val off2 = __pyOffsetUs(pyGetAttr(o, "_tzinfo"), o)
+      if ((off1 == null) != (off2 == null)) { throw pyTypeError("can't subtract offset-naive and offset-aware datetimes") }
+      var diff = __pyDtUs(__pyDtAll(self)) - __pyDtUs(__pyDtAll(o))
+      if (off1 != null and pyGetAttr(self, "_tzinfo") !== pyGetAttr(o, "_tzinfo")) { diff = diff - off1!! + off2!! }
+      __pyTd(__pyTimedeltaType, diff)
+    } else { pyNotImplemented }
+  }
+  fun key(o : any?) : Pair<BigInt, bool> {
+    val off = __pyOffsetUs(pyGetAttr(o, "_tzinfo"), o)
+    val us = __pyDtUs(__pyDtAll(o))
+    return off == null ? Pair(us, false) : Pair(us - off!!, true)
+  }
+  fun cmp(name : string, test : (int) -> bool) {
+    m[name] = pyLibMethod("datetime", name) { self, a ->
+      val o = a.pos[0]
+      if (!__pyIsDatetime(o)) {
+        pyNotImplemented
+      } else {
+        val x = key(self)
+        val y = key(o)
+        if (x.second != y.second) {
+          if (name == "__eq__") { false } else { throw pyTypeError("can't compare offset-naive and offset-aware datetimes") }
+        } else { test(x.first.compareTo(y.first)) }
+      }
+    }
+  }
+  cmp("__eq__", { c -> c == 0 })
+  cmp("__lt__", { c -> c < 0 })
+  cmp("__le__", { c -> c <= 0 })
+  cmp("__gt__", { c -> c > 0 })
+  cmp("__ge__", { c -> c >= 0 })
+  m["__hash__"] = pyLibMethod("datetime", "__hash__") { self, a -> pyHash(pyNorm(key(self).first)) }
+  val t = __pyDtClass("datetime", [__pyDateType], m)
+  t.dict["min"] = __pyNewDatetime(t, 1, 1, 1, 0, 0, 0, 0, null, 0)
+  t.dict["max"] = __pyNewDatetime(t, 9999, 12, 31, 23, 59, 59, 999999, null, 0)
+  t.dict["resolution"] = __pyTdOf(0, 0, 1)
+  return t
+}
+
+fun pyDatetimeModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["MINYEAR"] = 1
+  m["MAXYEAR"] = 9999
+  m["timedelta"] = __pyTimedeltaType
+  m["date"] = __pyDateType
+  m["time"] = __pyTimeType
+  m["datetime"] = __pyDatetimeType
+  m["tzinfo"] = __pyTzinfoType
+  m["timezone"] = __pyTimezoneType
+  m["UTC"] = __pyUtc
+  return pyNativeModule("datetime", m)
+}

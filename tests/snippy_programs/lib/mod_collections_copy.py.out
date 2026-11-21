@@ -26,3 +26,42 @@ ValueError Type names and field names must be valid identifiers: '1a'
 [1, [2, 3, 4]] [1, [2, 3]] False False
 5 True False
 1 10 (1, 2) [1, (2, [3])] Point(x=1, y=5)
+can only concatenate deque (not "int") to deque
+False
+bad operand type for unary -: 'collections.deque'
+deque([1]) deque
+unsupported operand type(s) for +: 'functools.partial' and 'int'
+'<' not supported between instances of 'functools.partial' and 'functools.partial'
+bad operand type for unary -: 'functools.partial'
+functools.partial(<built-in function print>) partial
+unsupported operand type(s) for +: 'itertools.count' and 'int'
+'<' not supported between instances of 'itertools.count' and 'itertools.count'
+bad operand type for unary -: 'itertools.count'
+count(0) count
+unsupported operand type(s) for +: 'operator.itemgetter' and 'int'
+'<' not supported between instances of 'operator.itemgetter' and 'operator.itemgetter'
+bad operand type for unary -: 'operator.itemgetter'
+operator.itemgetter(1) itemgetter
+unsupported operand type(s) for +: 'collections.OrderedDict' and 'int'
+'<' not supported between instances of 'collections.OrderedDict' and 'collections.OrderedDict'
+bad operand type for unary -: 'collections.OrderedDict'
+OrderedDict() OrderedDict
+unsupported operand type(s) for +: 'collections.defaultdict' and 'int'
+'<' not supported between instances of 'collections.defaultdict' and 'collections.defaultdict'
+bad operand type for unary -: 'collections.defaultdict'
+defaultdict(<class 'int'>, {}) defaultdict
+unsupported operand type(s) for +: 'itertools.chain' and 'int'
+'<' not supported between instances of 'itertools.chain' and 'itertools.chain'
+bad operand type for unary -: 'itertools.chain'
+<itertools.chain object chain
+unsupported operand type(s) for +: 'operator.attrgetter' and 'int'
+'<' not supported between instances of 'operator.attrgetter' and 'operator.attrgetter'
+bad operand type for unary -: 'operator.attrgetter'
+operator.attrgetter('a') attrgetter
+unsupported operand type(s) for +: 'Counter' and 'int'
+False
+Counter()
+Counter() Counter
+True True False True False True True 0
+'<' not supported between instances of 'Counter' and 'dict'
+<list_iterator object <range_iterator object <itertools.islice object

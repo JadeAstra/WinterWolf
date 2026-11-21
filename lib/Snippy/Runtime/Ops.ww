@@ -949,7 +949,7 @@ fun pyRichCompare(a : any?, b : any?, op : int) : any? {
   }
   if (op == 0) { return a === b }
   if (op == 1) { return a !== b }
-  throw pyTypeError("'${__pyCmpSymbols[op]}' not supported between instances of '${ta.name}' and '${tb.name}'")
+  throw pyTypeError("'${__pyCmpSymbols[op]}' not supported between instances of '${pyTypeName(a)}' and '${pyTypeName(b)}'")
 }
 
 // A comparison of builtin values; NotImplemented where they are not ordered together.

@@ -11,6 +11,7 @@ internal fun __pyItType(name : string, make : ((PyArgs) -> any?)?) : PyType {
   if (had != null) { return had!! }
   val t = PyType(name, name, "itertools")
   t.builtin = true
+  t.cName = "itertools." + name
   t.bases = [pyObjectType]
   t.mro = [t, pyObjectType]
   t.dict["__next__"] = PyMethodDescriptor(t, "__next__")
