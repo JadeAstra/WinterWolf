@@ -1,0 +1,403 @@
+// ---- A formula's tree (formula plan, part 1) ----
+//
+// A formula is parsed once into a tree and worked out by walking it, as often as its cell needs.
+// The grammar is Snips' (Evaluator.Parser), loosest first:
+//
+//   or            a or b                      (a word, any case; b only where a is false)
+//   and           a and b                     (b only where a is true)
+//   not           not a
+//   a comparison  a = b, a <> b, a < b, a > b, a <= b, a >= b (also ≠ ≤ ≥); one only
+//   &             a & b                       (the two as text, joined)
+//   + -           a + b
+//   * / %         a * b, and a b written side by side (2x, 2(x + 1), A1 B1); % is modulo
+//   signs         -a, +a
+//   ^             a ^ b, right to left, so -2^2 is -4 and 2^3^2 is 512
+//   the rest      12, "text", TRUE, FALSE, (a), [a, b] and [[a, b], [c, d]], references
+//                 (A1, $A$1, A, r5, c1r1, A1:B5, A:A, T1.A1, M1.x), and calls (SUM(A1:A5),
+//                 M1.f(5), S1.fn())
+
+// The deepest a formula may nest (brackets, calls, operators on operators): past it the
+// formula is #DEEP!.
+val __fxDeepest = 400
+
+class __FxParser(val tokens : List<__FxToken>) {
+  var at = 0
+  var depth = 0
+
+  fun peek() : __FxToken => tokens[at]
+
+  fun next() : __FxToken {
+    val t = tokens[at]
+    if (at < tokens.size - 1) { at += 1 }
+    return t
+  }
+
+  fun fail() : FormulaException => FormulaException(ErrorValue("#ERR!"))
+
+  fun expect(c : string) {
+    if (!next().isSymbol(c)) { throw fail() }
+  }
+
+  fun isSymbol(c : string) : bool => peek().isSymbol(c)
+
+  fun isKeyword(word : string) : bool => peek().kind == __fxNameToken and peek().text.lower() == word
+
+  fun parse() : __FxNode {
+    val node = logicalOr()
+    if (peek().kind != __fxEndToken) { throw fail() }
+    return node
+  }
+
+  fun logicalOr() : __FxNode {
+    depth += 1
+    if (depth > __fxDeepest) { throw FormulaException(ErrorValue("#DEEP!", "expression nested too deeply")) }
+    var node = logicalAnd()
+    while (isKeyword("or")) {
+      next()
+      node = __FxOr(node, logicalAnd())
+    }
+    depth -= 1
+    return node
+  }
+
+  fun logicalAnd() : __FxNode {
+    var node = logicalNot()
+    while (isKeyword("and")) {
+      next()
+      node = __FxAnd(node, logicalNot())
+    }
+    return node
+  }
+
+  fun logicalNot() : __FxNode {
+    if (isKeyword("not")) {
+      next()
+      depth += 1
+      if (depth > __fxDeepest) { throw FormulaException(ErrorValue("#DEEP!", "expression nested too deeply")) }
+      val inner = logicalNot()
+      depth -= 1
+      return __FxNot(inner)
+    }
+    return comparison()
+  }
+
+  fun comparison() : __FxNode {
+    var node = concat()
+    val t = peek()
+    if (t.kind == __fxSymbolToken and (t.text == "=" or t.text == "<" or t.text == ">" or t.text == "≤" or t.text == "≥" or t.text == "≠")) {
+      next()
+      node = __FxCompare(t.text, node, concat())
+    }
+    return node
+  }
+
+  fun concat() : __FxNode {
+    var node = additive()
+    while (isSymbol("&")) {
+      next()
+      node = __FxConcat(node, additive())
+    }
+    return node
+  }
+
+  fun additive() : __FxNode {
+    var node = multiplicative()
+    while (isSymbol("+") or isSymbol("-")) {
+      val op = next().text
+      node = __FxArith(op, node, multiplicative())
+    }
+    return node
+  }
+
+  fun multiplicative() : __FxNode {
+    var node = unary()
+    while (true) {
+      val t = peek()
+      if (t.kind == __fxSymbolToken and (t.text == "*" or t.text == "/" or t.text == "%")) {
+        next()
+        node = __FxArith(t.text, node, unary())
+      } else if (startsFactor(t)) {
+        // Side by side: a factor followed by another (2x, 2(x + 4), (a)(b)) is their product.
+        node = __FxArith("*", node, unary())
+      } else {
+        break
+      }
+    }
+    return node
+  }
+
+  // A factor that can follow another with nothing between them: a number, a name that is not
+  // and, or or not, or a bracket.
+  fun startsFactor(t : __FxToken) : bool {
+    if (t.kind == __fxNumberToken) { return true }
+    if (t.kind == __fxNameToken) {
+      val w = t.text.lower()
+      return w != "and" and w != "or" and w != "not"
+    }
+    return t.isSymbol("(")
+  }
+
+  fun unary() : __FxNode {
+    val t = peek()
+    if (t.isSymbol("-") or t.isSymbol("+")) {
+      next()
+      depth += 1
+      if (depth > __fxDeepest) { throw FormulaException(ErrorValue("#DEEP!", "expression nested too deeply")) }
+      val inner = unary()
+      depth -= 1
+      return t.text == "-" ? __FxArith("*", __FxConstant(NumberValue(-1.0)), inner) : inner
+    }
+    return power()
+  }
+
+  fun power() : __FxNode {
+    val base = primary()
+    if (isSymbol("^")) {
+      next()
+      return __FxArith("^", base, unary())
+    }
+    return base
+  }
+
+  fun primary() : __FxNode {
+    val t = next()
+    if (t.kind == __fxNumberToken) { return __FxConstant(NumberValue(t.number)) }
+    if (t.kind == __fxStringToken) { return __FxConstant(TextValue(t.text)) }
+    if (t.kind == __fxNameToken) { return reference(t.text) }
+    if (t.isSymbol("(")) {
+      val inner = logicalOr()
+      expect(")")
+      return inner
+    }
+    if (t.isSymbol("[")) {
+      val items : open List<__FxNode> = []
+      if (!isSymbol("]")) {
+        items.add(logicalOr())
+        while (isSymbol(",")) {
+          next()
+          items.add(logicalOr())
+        }
+      }
+      expect("]")
+      return __FxArray(items)
+    }
+    throw fail()
+  }
+
+  fun arguments() : List<__FxNode> {
+    expect("(")
+    val out : open List<__FxNode> = []
+    if (!isSymbol(")")) {
+      out.add(logicalOr())
+      while (isSymbol(",")) {
+        next()
+        out.add(logicalOr())
+      }
+    }
+    expect(")")
+    return out
+  }
+
+  // A reference: a path of names (A1, T1.A1, D2.T5a.A1, M1.f), then a call's arguments, or a
+  // range's : and its end, or nothing. TRUE and FALSE alone are the bools.
+  fun reference(first : string) : __FxNode {
+    if (!isSymbol(".") and !isSymbol("(")) {
+      if (first.lower() == "true") { return __FxConstant(BoolValue(true)) }
+      if (first.lower() == "false") { return __FxConstant(BoolValue(false)) }
+    }
+    val path : open List<string> = [first]
+    while (isSymbol(".")) {
+      next()
+      val t = next()
+      if (t.kind != __fxNameToken) { throw fail() }
+      path.add(t.text)
+    }
+    if (isSymbol("(")) { return __FxCall(path, arguments()) }
+    if (isSymbol(":")) {
+      next()
+      val end = next()
+      if (end.kind != __fxNameToken) { throw fail() }
+      return __FxRange(path, end.text)
+    }
+    return __FxReference(path)
+  }
+}
+
+// ---- The nodes ----
+
+abstract class __FxNode {
+  abstract fun evaluate(ev : __FxEvaluator) : FormulaValue
+}
+
+class __FxConstant(val value : FormulaValue) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => value
+}
+
+class __FxArith(val op : string, val left : __FxNode, val right : __FxNode) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => __fxArith(op, left.evaluate(ev), right.evaluate(ev))
+}
+
+class __FxConcat(val left : __FxNode, val right : __FxNode) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => __fxConcat(left.evaluate(ev), right.evaluate(ev))
+}
+
+class __FxCompare(val op : string, val left : __FxNode, val right : __FxNode) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => __fxCompare(op, left.evaluate(ev), right.evaluate(ev))
+}
+
+// a or b: b worked out only where a is false (the plan's question 4).
+class __FxOr(val left : __FxNode, val right : __FxNode) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue =>
+    BoolValue(__fxTruth(left.evaluate(ev)) or __fxTruth(right.evaluate(ev)))
+}
+
+// a and b: b worked out only where a is true.
+class __FxAnd(val left : __FxNode, val right : __FxNode) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue =>
+    BoolValue(__fxTruth(left.evaluate(ev)) and __fxTruth(right.evaluate(ev)))
+}
+
+class __FxNot(val inner : __FxNode) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => BoolValue(!__fxTruth(inner.evaluate(ev)))
+}
+
+// [a, b] is one row; [[a, b], [c, d]], rows each a matrix, is their rows.
+class __FxArray(val items : List<__FxNode>) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue {
+    val values = items.map { it.evaluate(ev) }
+    if (!values.isEmpty() and values.all { it is MatrixValue }) {
+      val rows : open List<List<FormulaValue>> = []
+      for (v in values) { rows.addAll((v as MatrixValue).rows) }
+      return MatrixValue(rows)
+    }
+    return MatrixValue([values])
+  }
+}
+
+class __FxReference(val path : List<string>) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => ev.plain(path)
+}
+
+class __FxRange(val path : List<string>, val end : string) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => ev.range(path, end)
+}
+
+class __FxCall(val path : List<string>, val arguments : List<__FxNode>) : __FxNode() {
+  override fun evaluate(ev : __FxEvaluator) : FormulaValue => ev.call(path, arguments)
+}
+
+// ---- Working a tree out ----
+
+class __FxEvaluator(val context : FormulaContext) {
+  // A value worked out from `node` for a function's argument: an error met on the way is the
+  // argument's value, so IFERROR and ISERROR see it.
+  fun argument(node : __FxNode) : FormulaValue {
+    try {
+      return node.evaluate(this)
+    } catch (e : FormulaException) {
+      return e.error
+    }
+  }
+
+  // A reference with no call or range after it: a cell, a whole column or row, a name, or one
+  // of the program's own (context.reference).
+  fun plain(path : List<string>) : FormulaValue {
+    if (path.size == 1 and path[0].startsWith("#")) { return context.reference(path) ?: ErrorValue.name() }
+    val last = path[path.size - 1]
+    val atom = CellRef.parse(last)
+    if (atom != null) {
+      val sheet = context.sheet(path[0..<path.size - 1])
+      if (sheet != null) {
+        if (atom!!.column != null and atom!!.row != null) { return context.cell(sheet!!, atom!!.column!!, atom!!.row!!) }
+        return whole(sheet!!, atom!!)
+      }
+    }
+    if (path.size >= 2) { return context.reference(path) ?: ErrorValue.ref() }
+    val name = path[0]
+    val named = context.name(name)
+    if (named != null) { return named!! }
+    val own = context.reference(path)
+    if (own != null) { return own!! }
+    // A sheet named alone is all of it.
+    val sheet = context.sheet(path)
+    if (sheet != null) { return whole(sheet!!, CellRef(null, null)) }
+    // Single letters side by side, each a name: ax is a times x (as in maths), where ax itself
+    // is not one.
+    if (name.size >= 2 and name.all { it.isLetter() }) {
+      val parts : open List<FormulaValue> = []
+      var all = true
+      for (c in name) {
+        val v = context.name("$c")
+        if (v == null) {
+          all = false
+          break
+        }
+        parts.add(v!!)
+      }
+      if (all) {
+        var product = parts[0]
+        for (i in 1 ..< parts.size) { product = __fxArith("*", product, parts[i]) }
+        return product
+      }
+    }
+    return __fxBadReference(name)
+  }
+
+  // A range: A1:B3, and the open forms A:A5, A3:A, A:C, r1:r2, whose open ends come from the
+  // sheet's size.
+  fun range(path : List<string>, end : string) : FormulaValue {
+    val a = CellRef.parse(path[path.size - 1])
+    if (a == null) { return __fxBadReference(path[path.size - 1]) }
+    val b = CellRef.parse(end)
+    if (b == null) { return __fxBadReference(end) }
+    val sheet = context.sheet(path[0..<path.size - 1])
+    if (sheet == null) { return ErrorValue.ref() }
+    val c1 = a!!.column ?: 0
+    val c2 = b!!.column ?: context.columns(sheet!!) - 1
+    val r1 = a!!.row ?: 0
+    val r2 = b!!.row ?: context.rows(sheet!!) - 1
+    return block(sheet!!, c1, r1, c2, r2)
+  }
+
+  fun whole(sheet : any, atom : CellRef) : FormulaValue {
+    val c1 = atom.column ?: 0
+    val c2 = atom.column ?: context.columns(sheet) - 1
+    val r1 = atom.row ?: 0
+    val r2 = atom.row ?: context.rows(sheet) - 1
+    return block(sheet, c1, r1, c2, r2)
+  }
+
+  fun block(sheet : any, c1 : int, r1 : int, c2 : int, r2 : int) : FormulaValue {
+    val rows : open List<List<FormulaValue>> = []
+    for (r in Math.min(r1, r2) .. Math.max(r1, r2)) {
+      val row : open List<FormulaValue> = []
+      for (c in Math.min(c1, c2) .. Math.max(c1, c2)) { row.add(context.cell(sheet, c, r)) }
+      rows.add(row)
+    }
+    return MatrixValue(rows)
+  }
+
+  // A call: of the library's functions (IF and its kind given their arguments unworked, to work
+  // out only what they take), or the program's (context.call, the function table).
+  fun call(path : List<string>, nodes : List<__FxNode>) : FormulaValue {
+    if (path.size == 1) {
+      val f = context.functions.find(path[0])
+      if (f != null and f!!.lazy != null) { return f!!.callLazy(nodes, this) }
+      val arguments = nodes.map { argument(it) }
+      val own = context.call(path, arguments)
+      if (own != null) { return own!! }
+      if (f == null) { return ErrorValue.name() }
+      return f!!.call(arguments)
+    }
+    val arguments = nodes.map { argument(it) }
+    return context.call(path, arguments) ?: ErrorValue.name()
+  }
+}
+
+// An error for a name or reference that is none, naming it, and where it would be a cell in
+// upper case (Snips keeps lower-case c and r for its hint forms, so b4 is no cell), saying so.
+fun __fxBadReference(token : string) : ErrorValue {
+  val upper = token.upper()
+  val suggest = upper != token and CellRef.parse(upper) != null ? " — cell references are upper-case; did you mean $upper?" : ""
+  return ErrorValue("#NAME? '$token'", "'$token' is not a defined name or valid reference$suggest")
+}

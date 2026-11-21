@@ -1,0 +1,174 @@
+// import Formula, part 1 (the formula plan): Snips' FormulaLanguageTest, RefGrammarTest and
+// NumericFidelityTest, ported, give Snips' answers. Left out, as Snips' own: the Snippy
+// fallback (=list(A1:B2), a bad reference inside a Snippy one-liner) and the symbolic engine's
+// overflow (Algebra). The cells come from a small sheet of the test's own (sheets are part 3).
+import Formula.*
+
+// Sheets of cells by name ("A1" holds "7" or "=A2 + 1"), each cell worked out once.
+class Book : FormulaContext {
+  val sheets : open Map<string, open Map<string, string>> = {:}
+  val sizes : open Map<string, Pair<int, int>> = {:}
+  val values : open Map<string, FormulaValue> = {:}
+  val busy : open List<string> = []
+  var current = "T1"
+
+  fun put(sheet : string, ref : string, source : string) : Book {
+    if (sheet !in sheets.keys) { sheets[sheet] = {:} }
+    sheets[sheet]!![ref] = source
+    return this
+  }
+
+  fun at(sheet : string, ref : string) : FormulaValue {
+    val where = CellRef.parseCell(ref)!!
+    return cell(sheet, where.first, where.second)
+  }
+
+  override fun sheet(path : List<string>) : any? {
+    if (path.isEmpty()) { return current }
+    if (path.size == 1 and path[0].upper() in sheets.keys) { return path[0].upper() }
+    return null
+  }
+
+  override fun cell(sheet : any, column : int, row : int) : FormulaValue {
+    val s = sheet as string
+    val ref = CellRef.columnName(column) + (row + 1).toString()
+    val key = s + "!" + ref
+    if (key in values.keys) { return values[key]!! }
+    if (key in busy) { return ErrorValue.circular() }
+    val source = sheets[s]?.get(ref)
+    if (source == null) { return EmptyValue }
+    if (!source!!.startsWith("=")) {
+      val v = Formula.literal(source!!.trim())
+      values[key] = v
+      return v
+    }
+    busy.add(key)
+    val saved = current
+    current = s
+    val v = Formula.evaluate(source!!, this)
+    current = saved
+    busy.remove(key)
+    values[key] = v
+    return v
+  }
+
+  override fun columns(sheet : any) : int {
+    val size = sizes[sheet as string]
+    if (size != null) { return size!!.first }
+    var most = 0
+    for (ref in sheets[sheet as string]!!.keys) { most = Math.max(most, CellRef.parseCell(ref)!!.first + 1) }
+    return most
+  }
+
+  override fun rows(sheet : any) : int {
+    val size = sizes[sheet as string]
+    if (size != null) { return size!!.second }
+    var most = 0
+    for (ref in sheets[sheet as string]!!.keys) { most = Math.max(most, CellRef.parseCell(ref)!!.second + 1) }
+    return most
+  }
+}
+
+// One sheet T1 of these cells, then the value of `target`, as a cell shows it.
+fun ev(cells : List<Pair<string, string>>, target : string) : string {
+  val book = Book()
+  for (c in cells) { book.put("T1", c.first, c.second) }
+  return book.at("T1", target).toString()
+}
+
+// ---- FormulaLanguageTest ----
+
+// A table's id in any case names the same table.
+val ids = Book().put("T2", "A1", "7").put("T1", "A1", "=t2.A1 + T2.A1")
+print(ids.at("T1", "A1"))   // expect: 14
+
+// <= >= <> are one symbol each (and ≤ ≥ ≠ the same).
+print(ev([Pair("A1", "=2 <= 2")], "A1"), ev([Pair("A1", "=2 <> 2")], "A1"), ev([Pair("A1", "=3 >= 2")], "A1"), Formula.evaluate("2 ≤ 2"), Formula.evaluate("2 ≠ 2"))
+// expect: TRUE FALSE TRUE TRUE FALSE
+
+// The aggregates over a range; count counts numbers, not the text.
+val data = [Pair("A1", "4"), Pair("A2", "10"), Pair("A3", "1"), Pair("A4", "x")]
+print(ev(data + [Pair("B1", "=average(A1:A3)")], "B1"), ev(data + [Pair("B1", "=min(A1:A4)")], "B1"), ev(data + [Pair("B1", "=max(A1:A4)")], "B1"), ev(data + [Pair("B1", "=count(A1:A4)")], "B1"))
+// expect: 5 1 10 3
+
+// The maths: round is half away from zero.
+print(["round(2.5)", "round(2.345, 2)", "exp(0)", "ln(exp(2))", "cos(0)", "sin(0)", "sqrt(9)"].map { ev([Pair("A1", "=" + it)], "A1") }.join(" "))
+// expect: 3 2.35 1 2 1 0 3
+
+// transpose and mmul: [[1,2],[3,4]]² is [[7,10],[15,22]], 54 in all.
+val row = [Pair("A1", "1"), Pair("B1", "2"), Pair("C1", "3")]
+val square = [Pair("A1", "1"), Pair("B1", "2"), Pair("A2", "3"), Pair("B2", "4")]
+print(ev(row + [Pair("D1", "=rows(transpose(A1:C1))")], "D1"), ev(row + [Pair("D1", "=cols(transpose(A1:C1))")], "D1"), ev(square + [Pair("D1", "=sum(mmul(A1:B2, A1:B2))")], "D1"))
+// expect: 3 1 54
+
+// & binds tighter than a comparison.
+print(ev([Pair("A1", "=\"a\" & \"b\" = \"ab\"")], "A1"))   // expect: TRUE
+
+// Text compares as text, without regard to case, a number before any word; text that reads as
+// a number is that number; an empty cell is "".
+print(["\"ab\" = \"ab\"", "\"Yes\" = \"yes\"", "\"apple\" < \"Banana\"", "99 < \"a\"", "\"5\" = 5"].map { ev([Pair("A1", "=" + it)], "A1") }.join(" "))
+// expect: TRUE TRUE TRUE TRUE TRUE
+print(ev([Pair("A1", "yes"), Pair("B1", "=IF(A1 = \"yes\", \"yes\", \"no\")")], "B1"), ev([Pair("B1", "=A1 = \"\"")], "B1"))
+// expect: yes TRUE
+
+// not is an operator too.
+print(ev([Pair("A1", "=not 1 > 2")], "A1"), ev([Pair("A1", "=not 2 > 1")], "A1"), ev([Pair("A1", "=not 1 > 2 and 2 > 1")], "A1"))
+// expect: TRUE FALSE TRUE
+
+// A cell is worked out once: forty cells each reading the one before three times.
+val chain = Book().put("T1", "A1", "1")
+for (r in 2 .. 41) { chain.put("T1", "A$r", "=A${r - 1} + A${r - 1} - A${r - 1}") }
+print(chain.at("T1", "A41"))   // expect: 1
+
+// ---- RefGrammarTest ----
+
+print(CellRef.parse("A1") == CellRef(0, 0), CellRef.parse("B4") == CellRef(1, 3), CellRef.parse("\$A\$1") == CellRef(0, 0, true, true),
+      CellRef.parse("\$A1") == CellRef(0, 0, true, false), CellRef.parse("A\$1") == CellRef(0, 0, false, true), CellRef.parse("\$\$A1") == CellRef(0, 0, true, true))
+// expect: true true true true true true
+
+// Partial and hint atoms.
+print(CellRef.parse("A") == CellRef(0, null), CellRef.parse("r5") == CellRef(null, 4), CellRef.parse("c5") == CellRef(4, null),
+      CellRef.parse("c1r1") == CellRef(0, 0), CellRef.parse("ArC") == CellRef(0, 2), CellRef.parse("rC") == CellRef(null, 2))
+// expect: true true true true true true
+
+// Words are not references, nor are lower-case cells.
+print(["apple", "sum", "Total", "", "b4", "a1", "ab12"].map { CellRef.parse(it) == null }.join(" "))
+// expect: true true true true true true true
+
+// A lower-case cell is #NAME? naming it, and the detail suggests the upper-case form.
+val bad = ev([Pair("F8", "=b4")], "F8")
+val badValue = Book().put("T1", "F8", "=b4").at("T1", "F8")
+print(badValue is ErrorValue, (badValue as ErrorValue).code.startsWith("#NAME?"), (badValue as ErrorValue).detail!!.contains("B4"))
+// expect: true true true
+print((badValue as ErrorValue).detail)
+// expect: 'b4' is not a defined name or valid reference — cell references are upper-case; did you mean B4?
+
+// Open ranges end at the sheet's size: A1..Z100 with A1..A5 = 1..5, B1 = 10, B5 = 50.
+fun sized() : Book {
+  val b = Book()
+  b.sizes["T1"] = Pair(26, 100)
+  for (r in 1 .. 5) { b.put("T1", "A$r", "$r") }
+  b.put("T1", "B1", "10").put("T1", "B5", "50")
+  return b
+}
+print(["sum(A:A)", "sum(A:A3)", "sum(A3:A)", "rows(A:B)", "cols(A:B)", "cols(r1:r2)", "\$A\$1 + A2"].map {
+  val b = sized().put("T1", "F1", "=" + it)
+  b.at("T1", "F1").toString()
+}.join(" "))
+// expect: 15 6 12 100 2 26 3
+
+// ---- NumericFidelityTest ----
+
+fun s(f : string) : string => Formula.evaluate(f).toString()
+
+// ROUND is half away from zero, at every scale.
+print(s("ROUND(2.5)"), s("ROUND(0.5)"), s("ROUND(-2.5)"), s("ROUND(-0.5)"), s("ROUND(1.235, 2)"), s("ROUND(-1.235, 2)"), s("ROUND(2.4)"), s("ROUND(-2.4)"), s("ROUND(3.14159, 2)"))
+// expect: 3 1 -3 -1 1.24 -1.24 2 -2 3.14
+
+// MOD takes the divisor's sign, and % agrees.
+print(s("MOD(-1, 3)"), s("MOD(-5, 3)"), s("MOD(1, -3)"), s("MOD(7, 3)"), s("MOD(9, 3)"), Formula.evaluate("MOD(1, 0)") is ErrorValue, s("-1 % 3"), s("7 % 3"))
+// expect: 2 1 -2 1 0 true 2 1
+
+// A result that is not a finite number is an error, which IFERROR and ISERROR see.
+print(Formula.evaluate("SQRT(-1)") is ErrorValue, s("IFERROR(SQRT(-1), 0)"), s("ISERROR(SQRT(-1))"), Formula.evaluate("POWER(10, 400)") is ErrorValue, s("SQRT(4)"), s("POWER(2, 3)"))
+// expect: true 0 TRUE true 2 8

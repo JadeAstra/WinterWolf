@@ -1,0 +1,226 @@
+// ---- Functions (formula plan, parts 1 and 2) ----
+//
+//   val functions = FormulaFunctions()
+//   functions.add("DAMAGE") { args -> args[0].number * (1.0 - args[1].number) }
+//   Formula.evaluate("DAMAGE(100, 0.25)", FormulaContext(functions))   // 75
+//
+// The functions a formula can call, by name in any case (SUM, sum and Sum are one): the
+// library's, and any a program adds or puts in place of one. A function is given its arguments
+// worked out (an error among them as an ErrorValue), and gives a FormulaValue or a plain value
+// (a number, text, a bool, null for empty, a list for a row or a list of lists for rows). A
+// result that is not a finite number is #NUM!; a FormulaException it throws is its error; an
+// argument it asks for that is not there is #ERR!.
+class FormulaFunctions {
+  private val entries : open Map<string, __FxFunction> = {:}
+
+  init {
+    for (f in __fxStandardFunctions) { entries[f.name] = f }
+  }
+
+  // Adds `body` as the function `name`, in place of any of that name.
+  fun add(name : string, body : (List<FormulaValue>) -> any?) {
+    entries[name.lower()] = __FxFunction(name.lower(), body, null)
+  }
+
+  // Takes the function `name` away.
+  fun remove(name : string) { entries.remove(name.lower()) }
+
+  // Whether there is a function `name`.
+  fun contains(name : string) : bool => name.lower() in entries.keys
+
+  // Every function's name, in lower case, in order.
+  val names : List<string>
+    get() => entries.keys.toList().sorted()
+
+  fun find(name : string) : __FxFunction? => entries[name.lower()]
+}
+
+// A function: given its arguments worked out (eager), or given them as they are written, to
+// work out only what it takes (lazy: IF, IFS, IFERROR, IFNA, CHOOSE).
+class __FxFunction(val name : string, val eager : ((List<FormulaValue>) -> any?)?, val lazy : ((List<__FxNode>, __FxEvaluator) -> FormulaValue)?) {
+  fun call(arguments : List<FormulaValue>) : FormulaValue {
+    try {
+      return __fxFinite(Formula.valueOf(eager!!(arguments)))
+    } catch (e : FormulaException) {
+      return e.error
+    } catch (e : IndexOutOfBoundsException) {
+      return ErrorValue("#ERR!", "$name: an argument is missing")
+    } catch (e : RuntimeException) {
+      return ErrorValue("#ERR!", "$name: ${e.message}")
+    }
+  }
+
+  fun callLazy(nodes : List<__FxNode>, ev : __FxEvaluator) : FormulaValue {
+    try {
+      return __fxFinite(lazy!!(nodes, ev))
+    } catch (e : FormulaException) {
+      return e.error
+    } catch (e : IndexOutOfBoundsException) {
+      return ErrorValue("#ERR!", "$name: an argument is missing")
+    } catch (e : RuntimeException) {
+      return ErrorValue("#ERR!", "$name: ${e.message}")
+    }
+  }
+}
+
+fun __fxEager(name : string, body : (List<FormulaValue>) -> any?) : __FxFunction => __FxFunction(name, body, null)
+
+fun __fxLazy(name : string, body : (List<__FxNode>, __FxEvaluator) -> FormulaValue) : __FxFunction => __FxFunction(name, null, body)
+
+// `name` as another name for the function `of` already in `out`.
+fun __fxAlias(out : open List<__FxFunction>, name : string, of : string) {
+  for (f in out) {
+    if (f.name == of) {
+      out.add(__FxFunction(name, f.eager, f.lazy))
+      return
+    }
+  }
+  throw IllegalStateException("no function $of for $name")
+}
+
+// The numbers among the arguments, matrices' items too; an error among them is thrown. Text,
+// bools and empty are passed over, as Snips' aggregates do.
+fun __fxNumbers(arguments : List<FormulaValue>) : List<float> {
+  val out : open List<float> = []
+  for (a in arguments) { __fxAddNumbers(a, out) }
+  return out
+}
+
+fun __fxAddNumbers(v : FormulaValue, out : open List<float>) {
+  if (v is NumberValue) {
+    out.add((v as NumberValue).value)
+  } else if (v is MatrixValue) {
+    for (item in (v as MatrixValue).flatten()) { __fxAddNumbers(item, out) }
+  } else if (v is ErrorValue) {
+    throw FormulaException(v as ErrorValue)
+  }
+}
+
+fun __fxMatrixOf(v : FormulaValue) : MatrixValue {
+  if (v is MatrixValue) { return v as MatrixValue }
+  throw FormulaException(ErrorValue.value())
+}
+
+// The nearest whole number, halves up (Java's Math.round, without its limit at 2^63).
+fun __fxRoundHalfUp(x : float) : float {
+  val r = __fxFloor(x)
+  return x - r >= 0.5 ? r + 1.0 : r
+}
+
+// Half away from zero, as Excel rounds: ROUND(-2.5) is -3.
+fun __fxRoundHalfAway(x : float) : float => x < 0.0 ? -__fxRoundHalfUp(-x) : __fxRoundHalfUp(x)
+
+fun __fxSum(a : List<FormulaValue>) : float {
+  var s = 0.0
+  for (x in __fxNumbers(a)) { s += x }
+  return s
+}
+
+fun __fxAverage(a : List<FormulaValue>) : FormulaValue {
+  val xs = __fxNumbers(a)
+  if (xs.isEmpty()) { return ErrorValue.divideByZero() }
+  var s = 0.0
+  for (x in xs) { s += x }
+  return NumberValue(s / xs.size.toFloat())
+}
+
+fun __fxExtreme(a : List<FormulaValue>, largest : bool) : float {
+  val xs = __fxNumbers(a)
+  if (xs.isEmpty()) { return 0.0 }
+  var m = xs[0]
+  for (x in xs) { if (largest ? x > m : x < m) { m = x } }
+  return m
+}
+
+fun __fxRound(a : List<FormulaValue>) : float {
+  val d = a.size > 1 ? __fxNumber(a[1]).toInt() : 0
+  val f = Math.pow(10.0, d.toFloat()).toFloat()
+  return __fxRoundHalfAway(__fxNumber(a[0]) * f) / f
+}
+
+// MOD takes the divisor's sign, as the % operator does.
+fun __fxMod(a : List<FormulaValue>) : FormulaValue {
+  val b = __fxNumber(a[1])
+  if (b == 0.0) { return ErrorValue.divideByZero() }
+  return NumberValue(((__fxNumber(a[0]) % b) + b) % b)
+}
+
+fun __fxTranspose(m : MatrixValue) : MatrixValue {
+  if (m.rowCount == 0) { return m }
+  val rows : open List<List<FormulaValue>> = []
+  for (j in 0 ..< m.columnCount) { rows.add(m.rows.map { it[j] }) }
+  return MatrixValue(rows)
+}
+
+fun __fxIf(nodes : List<__FxNode>, ev : __FxEvaluator) : FormulaValue {
+  if (nodes.size >= 2 and __fxTruth(ev.argument(nodes[0]))) { return ev.argument(nodes[1]) }
+  if (nodes.size > 2) { return ev.argument(nodes[2]) }
+  return BoolValue(false)
+}
+
+fun __fxIfs(nodes : List<__FxNode>, ev : __FxEvaluator) : FormulaValue {
+  var i = 0
+  while (i + 1 < nodes.size) {
+    if (__fxTruth(ev.argument(nodes[i]))) { return ev.argument(nodes[i + 1]) }
+    i += 2
+  }
+  return ErrorValue.notAvailable()
+}
+
+fun __fxIfError(nodes : List<__FxNode>, ev : __FxEvaluator, onlyNa : bool) : FormulaValue {
+  val v = ev.argument(nodes[0])
+  val caught = onlyNa ? v == ErrorValue.notAvailable() : v is ErrorValue
+  if (!caught) { return v }
+  return nodes.size > 1 ? ev.argument(nodes[1]) : TextValue("")
+}
+
+// CHOOSE(i, a, b, ...): the i-th after the index (CHOOSE(0, ...) gives the index itself, as
+// Snips does).
+fun __fxChoose(nodes : List<__FxNode>, ev : __FxEvaluator) : FormulaValue {
+  val i = __fxNumber(ev.argument(nodes[0])).toInt()
+  if (i < 0 or i >= nodes.size) { return ErrorValue.value() }
+  return ev.argument(nodes[i])
+}
+
+// The library's functions, made once; each FormulaFunctions starts from them.
+val __fxStandardFunctions : List<__FxFunction> = __fxStandard()
+
+// The library's functions. Part 1 has those its tests ask for; part 2 the rest of Snips'.
+fun __fxStandard() : List<__FxFunction> {
+  val out : open List<__FxFunction> = []
+  // ---- Logic (IF and its kind work out only what they take) ----
+  out.add(__fxLazy("if") { nodes, ev -> __fxIf(nodes, ev) })
+  out.add(__fxLazy("ifs") { nodes, ev -> __fxIfs(nodes, ev) })
+  out.add(__fxLazy("iferror") { nodes, ev -> __fxIfError(nodes, ev, false) })
+  out.add(__fxLazy("ifna") { nodes, ev -> __fxIfError(nodes, ev, true) })
+  out.add(__fxLazy("choose") { nodes, ev -> __fxChoose(nodes, ev) })
+  out.add(__fxEager("true") { a -> true })
+  out.add(__fxEager("false") { a -> false })
+  out.add(__fxEager("not") { a -> !__fxTruth(a[0]) })
+  out.add(__fxEager("iserror") { a -> a[0] is ErrorValue })
+  // ---- Maths ----
+  out.add(__fxEager("sum") { a -> __fxSum(a) })
+  out.add(__fxEager("average") { a -> __fxAverage(a) })
+  __fxAlias(out, "avg", "average")
+  __fxAlias(out, "mean", "average")
+  out.add(__fxEager("min") { a -> __fxExtreme(a, false) })
+  out.add(__fxEager("max") { a -> __fxExtreme(a, true) })
+  out.add(__fxEager("count") { a -> __fxNumbers(a).size.toFloat() })
+  out.add(__fxEager("sqrt") { a -> Math.sqrt(__fxNumber(a[0])) })
+  out.add(__fxEager("exp") { a -> Math.exp(__fxNumber(a[0])) })
+  out.add(__fxEager("ln") { a -> Math.ln(__fxNumber(a[0])) })
+  out.add(__fxEager("sin") { a -> Math.sin(__fxNumber(a[0])) })
+  out.add(__fxEager("cos") { a -> Math.cos(__fxNumber(a[0])) })
+  out.add(__fxEager("round") { a -> __fxRound(a) })
+  out.add(__fxEager("mod") { a -> __fxMod(a) })
+  out.add(__fxEager("power") { a -> Math.pow(__fxNumber(a[0]), __fxNumber(a[1])) })
+  __fxAlias(out, "pow", "power")
+  // ---- Matrices ----
+  out.add(__fxEager("rows") { a -> __fxMatrixOf(a[0]).rowCount.toFloat() })
+  out.add(__fxEager("cols") { a -> __fxMatrixOf(a[0]).columnCount.toFloat() })
+  __fxAlias(out, "columns", "cols")
+  out.add(__fxEager("transpose") { a -> __fxTranspose(__fxMatrixOf(a[0])) })
+  out.add(__fxEager("mmul") { a -> __fxMatrixProduct(__fxMatrixOf(a[0]), __fxMatrixOf(a[1])) })
+  __fxAlias(out, "matmul", "mmul")
+  return out
+}

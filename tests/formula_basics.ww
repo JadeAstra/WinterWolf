@@ -1,0 +1,101 @@
+// import Formula, part 1: what the language does beyond Snips' tests, and what the library adds
+// (the formula plan's questions 2 and 4): numbers shown as Excel shows them, text read as Java
+// reads a number, 1e3, only the branch taken, matrices, errors, the depth limit, and what a
+// program's FormulaContext brings (functions, names, references of its own, Other values).
+import Formula.*
+
+fun s(f : string) : string => Formula.evaluate(f).toString()
+
+// Numbers to 15 significant digits, half up from the exact value; plain from 10^-9 to 10^15,
+// else in Java's scientific form.
+print(s("0.1 + 0.2"), s("1/3"), s("2/3"), s("0.1 + 0.7"), s("2^0.5"), s("-0.5"))
+// expect: 0.3 0.333333333333333 0.666666666666667 0.8 1.4142135623731 -0.5
+print(s("1e15"), s("1e16"), s("1.5e-10"), s("1e-9"), s("123456789012345678"), s("1234567890123.125"), s("-2.5e20"))
+// expect: 1000000000000000 1E+16 1.5E-10 0.000000001 1.23456789012346E+17 1234567890123.13 -2.5E+20
+// An operator's infinity is shown as one; a function's is #NUM!.
+print(s("1e308 * 10"), s("-1e308 * 10"), s("POWER(10, 400)"), s("SQRT(-1)"))
+// expect: ∞ -∞ #NUM! #NUM!
+
+// Text in arithmetic is read as Java reads a number: spaces around it, a suffix, hexadecimal.
+print(s("\" 5 \" + 1"), s("\"2.5f\" * 2"), s("\"0x10p0\" + 0"), s("\"1e2\" + 0"), s("\"abc\" + 1"), s("\"\" + 1"))
+// expect: 6 5 16 100 #VALUE! #VALUE!
+print(s("TRUE + TRUE"), s("\"true\" and 1"), s("\"FALSE\" or 0"), s("\"x\" and TRUE"))
+// expect: 2 TRUE FALSE #VALUE!
+
+// 1e3 is a thousand (a lower-case e and digits); 2E3 is 2 times the cell E3, as in Snips.
+print(s("1e3"), s("2.5e-4"), s("1e+2"), s("2E3"), s("2e"))
+// expect: 1000 0.00025 100 #NAME? 'E3' #NAME? 'e'
+
+// IF and its kind, and and or, work out only what they take.
+print(s("IF(FALSE, 1/0, 2)"), s("IF(TRUE, 3)"), s("IF(FALSE, 3)"), s("IFERROR(1/0, \"x\")"), s("CHOOSE(2, 1/0, \"b\")"), s("FALSE and 1/0"), s("TRUE or 1/0"))
+// expect: 2 3 FALSE x b FALSE TRUE
+print(s("IFS(FALSE, 1, TRUE, 2)"), s("IFS(FALSE, 1)"), s("IFNA(IFS(FALSE, 1), \"na\")"), s("IFNA(1/0, \"na\")"), s("CHOOSE(0, 7, 8)"))
+// expect: 2 #N/A na #DIV/0! 0
+// An error met inside an argument is that argument's value, so IFERROR sees it.
+print(s("IFERROR(\"x\" and TRUE, \"caught\")"), s("ISERROR(\"x\" + 1)"))
+// expect: caught TRUE
+
+// Matrices: + and - of one shape, * the product or a scaling, / by a number, ^ of a square one.
+print(s("[1, 2] + [3, 4]"), s("[1, 2] + 1"), s("[[1, 2], [3, 4]] ^ 2"), s("[[1, 2]] * [[1], [2]]"), s("[1, 2] / 2"), s("2 / [1, 2]"), s("TRANSPOSE([1, 2, 3])"))
+// expect: [4, 6] #VALUE! [[7, 10], [15, 22]] [5] [0.5, 1] #VALUE! [[1], [2], [3]]
+print(s("[]"), s("[[1, 2], 3]"), s("-[1, 2]"), s("[1, \"a\"] * 2"))
+// expect: [] [[1, 2], 3] [-1, -2] [2, #VALUE!]
+
+// An error is the result of what it is in.
+print(s("(1/0) + 1"), s("\"a\" & 1/0"), s("1/0 = 1"), s("SUM(1, 1/0)"), s("NOSUCH(1)"))
+// expect: #DIV/0! #DIV/0! #DIV/0! #DIV/0! #NAME?
+
+// A formula that does not parse is #ERR!; one nested too deeply #DEEP!.
+print(s("1 +"), s("(1"), s(""), s("1 2 +"), Formula.parse("1 +").isValid, Formula.parse("=1 + 2").isValid, s("=1 + 2"))
+// expect: #ERR! #ERR! #ERR! #ERR! false true 3
+print(s("(".repeat(300) + "1" + ")".repeat(300)), s("(".repeat(500) + "1" + ")".repeat(500)), s("-".repeat(500) + "1"))
+// expect: 1 #DEEP! #DEEP!
+
+// A tree parsed once and worked out often.
+val tree = Formula.parse("2 * 21")
+print(tree.evaluate(), tree.evaluate(), tree)   // expect: 42 42 2 * 21
+
+// ---- What a program brings ----
+
+// Its own functions, in place of the library's too; arguments worked out, errors among them.
+val functions = FormulaFunctions()
+functions.add("DAMAGE") { args -> args[0].number * (1.0 - args[1].number) }
+functions.add("twice") { args -> [args[0], args[0]] }
+functions.add("SUM") { args -> "my sum" }
+val own = FormulaContext(functions)
+print(Formula.evaluate("DAMAGE(100, 0.25)", own), Formula.evaluate("Twice(\"a\")", own), Formula.evaluate("sum(1, 2)", own), Formula.evaluate("DAMAGE(\"x\", 1)", own))
+// expect: 75 [a, a] my sum #VALUE!
+print(functions.contains("damage"), functions.contains("nothing"), FormulaFunctions().contains("damage"))
+// expect: true false false
+
+// Names, references of its own (dotted paths, #v), calls on them, and a value of its own carried
+// through untouched.
+class Blocks : FormulaContext {
+  override fun name(name : string) : FormulaValue? => when (name) {
+    "a" -> NumberValue(2.0)
+    "x" -> NumberValue(3.0)
+    "rate" -> NumberValue(0.5)
+    "badge" -> OtherValue(Pair("gold", 7))
+    else -> null
+  }
+  override fun reference(path : List<string>) : FormulaValue? {
+    if (path.join(".") == "M1.x") { return NumberValue(10.0) }
+    if (path.join(".") == "#v") { return TextValue("this cell") }
+    return null
+  }
+  override fun call(path : List<string>, arguments : List<FormulaValue>) : FormulaValue? {
+    if (path.join(".") == "M1.f") { return NumberValue(arguments[0].number * 100.0) }
+    return null
+  }
+}
+val blocks = Blocks()
+fun b(f : string) : string => Formula.evaluate(f, blocks).toString()
+print(b("rate * 4"), b("ax"), b("2x"), b("2(x + 1)"), b("M1.x + 1"), b("M1.f(5)"), b("#v"), b("M2.y"), b("M2.g(1)"), b("ab"))
+// expect: 2 6 6 8 11 500 this cell #REF! #NAME? #NAME? 'ab'
+val carried = Formula.evaluate("IF(TRUE, badge, 0)", blocks)
+print(carried is OtherValue, carried, b("badge + 1"))
+// expect: true Pair(first="gold", second=7) #VALUE!
+
+// valueOf and literal.
+print(Formula.valueOf(3), Formula.valueOf("t"), Formula.valueOf(true), Formula.valueOf(null) == EmptyValue, Formula.valueOf([[1, 2], [3, 4]]), Formula.literal(" 12 "), Formula.literal("12a"))
+// expect: 3 t TRUE true [[1, 2], [3, 4]] 12 12a

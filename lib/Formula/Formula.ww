@@ -1,0 +1,112 @@
+// ---- import Formula: a spreadsheet's formulas (formula plan, part 1, 2026-11-21) ----
+//
+//   import Formula.*
+//
+//   print(Formula.evaluate("ROUND(2.345, 2) * 2"))      // 4.7
+//   print(Formula.evaluate("\"a\" & \"b\" = \"AB\""))   // TRUE: text compares without case
+//   val tree = Formula.parse("SUM(A1:A3) / 2")         // parsed once, worked out often
+//   print(tree.evaluate(mySheet))                       // with a FormulaContext for the cells
+//
+// Snips' formula language, as a library any program can use: a game's stat table, a tool's
+// settings sheet, a table with computed columns. Numbers are doubles, as in Excel; text compares
+// without regard to case; a value has Excel's conversions (FormulaValue). The operators, loosest
+// first: or, and, not (words, any case); one comparison (= <> < > <= >=, or ≠ ≤ ≥); & to join
+// text; + -; * / % (% is modulo, the divisor's sign) and two factors side by side (2x); signs;
+// ^ (right to left: -2^2 is -4). Arrays are written [1, 2] and [[1, 2], [3, 4]], and with a
+// matrix * is the matrix product. References: A1, $A$1, a whole column A or row r5, ranges
+// A1:B5 and A:A, and Snips' hint forms c5, r5, c1r1; a path before one names another sheet
+// (Stats.A1), and anything else a dotted path names (T1.A1, M1.f(5)) is the program's, through
+// its FormulaContext. IF, IFS, IFERROR, IFNA, CHOOSE, and and or work out only what they take.
+// A number in a formula may have an exponent after a lower-case e (1e3, 2.5e-4).
+object Formula {
+  // `text` parsed: a FormulaTree to work out as often as wanted. A leading "=" (a cell's) is
+  // passed over. A formula that does not parse is kept as its error (#ERR!), which is what it
+  // works out to.
+  fun parse(text : string) : FormulaTree {
+    val body = text.startsWith("=") ? text[1..] : text
+    try {
+      return FormulaTree(text, __FxParser(__fxTokenize(body)).parse(), null)
+    } catch (e : FormulaException) {
+      return FormulaTree(text, null, e.error)
+    }
+  }
+
+  // `text` worked out, its references and calls through `context` (by default, none: a
+  // reference is then #NAME? or #REF!, and only the library's functions are there).
+  fun evaluate(text : string, context : FormulaContext = FormulaContext()) : FormulaValue => parse(text).evaluate(context)
+
+  // A plain value as a formula's: a FormulaValue as it is; a number (an int too) as a number;
+  // text; a bool; null as empty; a list as a row, and a list of lists as rows; anything else as
+  // Other.
+  fun valueOf(x : any?) : FormulaValue {
+    if (x == null) { return EmptyValue }
+    if (x is FormulaValue) { return x as FormulaValue }
+    if (x is float) { return NumberValue(x as float) }
+    if (x is int) { return NumberValue((x as int).toFloat()) }
+    if (x is string) { return TextValue(x as string) }
+    if (x is bool) { return BoolValue(x as bool) }
+    if (x is List) {
+      val items = x as List<any?>
+      if (!items.isEmpty() and items.all { it is List }) {
+        return MatrixValue(items.map { row -> (row as List<any?>).map { valueOf(it) } })
+      }
+      return MatrixValue([items.map { valueOf(it) }])
+    }
+    return OtherValue(x!!)
+  }
+
+  // What a cell holding `text` that is no formula holds: a number where it reads as one (as
+  // Java reads one: " 7 ", "1e3"), else the text.
+  fun literal(text : string) : FormulaValue => __fxLiteral(text)
+}
+
+// A formula parsed once (Formula.parse), to work out as often as its cell needs.
+class FormulaTree(val text : string, private val root : __FxNode?, val syntaxError : ErrorValue?) {
+  // Whether it parsed.
+  val isValid : bool
+    get() => syntaxError == null
+
+  // Its value, references and calls through `context`. Any error met is the value: a
+  // reference to nothing, a function given text, a formula nested deeper than 400 levels
+  // (#DEEP!).
+  fun evaluate(context : FormulaContext = FormulaContext()) : FormulaValue {
+    if (root == null) { return syntaxError!! }
+    try {
+      return root!!.evaluate(__FxEvaluator(context))
+    } catch (e : FormulaException) {
+      return e.error
+    } catch (e : RuntimeException) {
+      return ErrorValue("#ERR!", e.message)
+    }
+  }
+
+  override fun toString() : string => text
+}
+
+// What a formula's references and calls reach: a program gives one, with what it has in place
+// of what this one has (nothing). Sheets are whatever the program keeps them as (`any`): a
+// reference's path before its cell ([] for the formula's own sheet, ["Stats"] for Stats.A1)
+// names one, or none.
+class FormulaContext(val functions : FormulaFunctions = FormulaFunctions()) {
+  // The sheet `path` names; [] is the formula's own. Null where it names none.
+  fun sheet(path : List<string>) : any? => null
+
+  // A cell's value, its column and row counted from 0.
+  fun cell(sheet : any, column : int, row : int) : FormulaValue => EmptyValue
+
+  // How many columns and rows a sheet has, where an open range (A:A, r1:r2) ends.
+  fun columns(sheet : any) : int => 0
+  fun rows(sheet : any) : int => 0
+
+  // A name's value (a named range, a variable), or null where it is none.
+  fun name(name : string) : FormulaValue? => null
+
+  // A reference of the program's own, a dotted path (T1.A1, M1.x) or a name the library does
+  // not know (#v), or null where it is none.
+  fun reference(path : List<string>) : FormulaValue? => null
+
+  // A call of the program's own: a dotted path (M1.f(5), S1.fn()) or a name, its arguments
+  // worked out; null where it is none, for the function table to answer. Asked before the
+  // table, but not for IF and its kind.
+  fun call(path : List<string>, arguments : List<FormulaValue>) : FormulaValue? => null
+}

@@ -1,0 +1,333 @@
+// ---- Formula values (formula plan, part 1, 2026-11-21) ----
+//
+//   Formula.evaluate("1 + 2")                 // NumberValue 3, shown as "3"
+//   Formula.evaluate("\"a\" & 1")             // TextValue "a1"
+//   Formula.evaluate("[[1, 2], [3, 4]] * 2")  // MatrixValue [[2, 4], [6, 8]]
+//
+// What a formula works with: a number (a double), text, a bool, an error (an Excel code as
+// #DIV/0!, and a detail saying why), empty (a cell with nothing in it), a matrix (a range, or an
+// array written [1, 2]) and Other, a value of the program's own carried through formulas
+// untouched. Each is shown as a spreadsheet shows it: a number to 15 significant digits, half
+// up (0.1 + 0.2 shows 0.3), a whole one without a point, a bool as TRUE or FALSE, an error as its
+// code. The conversions are Excel's, as Snips has them: see number, truth and text.
+
+abstract class FormulaValue {
+  // As a number: a bool is 1 or 0, empty is 0, text that reads as a number (as Java reads one:
+  // " 5 ", "1e3", "2.5f") is that number, and a matrix of one item is that item. A
+  // FormulaException with #VALUE! for anything else, or with the error an error is.
+  val number : float
+    get() => __fxNumber(this)
+  // As a bool: a number is true unless 0; empty is false; text is true for "true", false for
+  // "false" or "", any case, or else as the number it reads as. A FormulaException otherwise.
+  val truth : bool
+    get() => __fxTruth(this)
+  // As text: text as it is, empty as "", anything else as it is shown. A FormulaException for
+  // an error.
+  val text : string
+    get() => __fxText(this)
+  // Whether it is an error.
+  val isError : bool
+    get() => this is ErrorValue
+}
+
+// A number. NaN shows as #NUM! and an infinity as ∞; a function's result that is either is
+// #NUM! instead (Formula.evaluate("SQRT(-1)")).
+data NumberValue(val value : float) : FormulaValue() {
+  override fun toString() : string => __fxFormatNumber(value)
+}
+
+// Text.
+data TextValue(val value : string) : FormulaValue() {
+  override fun toString() : string => value
+}
+
+// TRUE or FALSE; 1 or 0 in arithmetic.
+data BoolValue(val value : bool) : FormulaValue() {
+  override fun toString() : string => value ? "TRUE" : "FALSE"
+}
+
+// An error: its code as a cell shows it (#DIV/0!, #NAME?, ...) and what went wrong, where the
+// formula knows ("'b4' is not a defined name or valid reference — cell references are
+// upper-case; did you mean B4?"). The codes: #DIV/0! (a division by 0), #REF! (a reference to
+// nothing), #NAME? (an unknown name or function; its code names the token: #NAME? 'b4'),
+// #VALUE! (a value of the wrong kind), #N/A (not found), #NUM! (not a finite number), #CIRC! (a
+// cell that needs itself), #ERR! (a formula that does not parse) and #DEEP! (nested too deeply).
+data ErrorValue(val code : string, val detail : string? = null) : FormulaValue() {
+  override fun toString() : string => code
+  static {
+    fun divideByZero() : ErrorValue => ErrorValue("#DIV/0!")
+    fun ref() : ErrorValue => ErrorValue("#REF!")
+    fun name() : ErrorValue => ErrorValue("#NAME?")
+    fun value() : ErrorValue => ErrorValue("#VALUE!")
+    fun circular() : ErrorValue => ErrorValue("#CIRC!")
+    fun notAvailable() : ErrorValue => ErrorValue("#N/A")
+    fun num() : ErrorValue => ErrorValue("#NUM!")
+    fun syntax() : ErrorValue => ErrorValue("#ERR!")
+  }
+}
+
+// Nothing: a cell with nothing in it. 0 in arithmetic, "" as text.
+object EmptyValue : FormulaValue() {
+  override fun toString() : string => ""
+}
+
+// A block of values, row by row: a range (A1:B3), an array ([1, 2], [[1, 2], [3, 4]]) or what
+// a function gives. A vector is one row or one column. Shown as [a, b] for one row, and row by
+// row otherwise ([[a], [b]] for a column), so a column is not taken for a row.
+data MatrixValue(val rows : List<List<FormulaValue>>) : FormulaValue() {
+  // How many rows.
+  val rowCount : int
+    get() => rows.size
+  // How many columns: the first row's length.
+  val columnCount : int
+    get() => rows.isEmpty() ? 0 : rows[0].size
+  // Every item, row by row.
+  fun flatten() : List<FormulaValue> {
+    val out : open List<FormulaValue> = []
+    for (row in rows) { out.addAll(row) }
+    return out
+  }
+  override fun toString() : string {
+    if (rows.size <= 1) { return "[" + flatten().map { it.toString() }.join(", ") + "]" }
+    return "[" + rows.map { row -> "[" + row.map { it.toString() }.join(", ") + "]" }.join(", ") + "]"
+  }
+}
+
+// A value of the program's own (a coloured value, a picture), carried through formulas as it
+// is: handed on by =A1 or out of an IF untouched. A function that does not know it gives
+// #VALUE!.
+data OtherValue(val value : any) : FormulaValue() {
+  override fun toString() : string => "$value"
+}
+
+// An error met while a formula is worked out: the error is the formula's value (or the value of
+// the function it happened in).
+class FormulaException(val error : ErrorValue) : RuntimeException(error.detail == null ? error.code : "${error.code}: ${error.detail}")
+
+// ---- Conversions (Snips' Compute.num, truth, str) ----
+
+fun __fxNumber(v : FormulaValue) : float => when (v) {
+  is NumberValue -> v.value
+  is BoolValue -> v.value ? 1.0 : 0.0
+  is TextValue -> __fxJavaDouble(v.value) ?: throw FormulaException(ErrorValue.value())
+  is ErrorValue -> throw FormulaException(v)
+  is MatrixValue -> v.rows.size == 1 and v.columnCount == 1 ? __fxNumber(v.rows[0][0]) : throw FormulaException(ErrorValue.value())
+  else -> v == EmptyValue ? 0.0 : throw FormulaException(ErrorValue.value())
+}
+
+fun __fxTruth(v : FormulaValue) : bool {
+  when (v) {
+    is BoolValue -> return v.value
+    is NumberValue -> return v.value != 0.0
+    is TextValue -> {
+      val t = v.value.trim().lower()
+      if (t == "true") { return true }
+      if (t == "false" or t == "") { return false }
+      val n = __fxJavaDouble(v.value)
+      if (n == null) { throw FormulaException(ErrorValue.value()) }
+      return n!! != 0.0
+    }
+    is ErrorValue -> throw FormulaException(v)
+    is MatrixValue -> {
+      if (v.rows.size == 1 and v.columnCount == 1) { return __fxTruth(v.rows[0][0]) }
+      throw FormulaException(ErrorValue.value())
+    }
+    else -> {
+      if (v == EmptyValue) { return false }
+      throw FormulaException(ErrorValue.value())
+    }
+  }
+}
+
+fun __fxText(v : FormulaValue) : string => when (v) {
+  is TextValue -> v.value
+  is ErrorValue -> throw FormulaException(v)
+  else -> v.toString()
+}
+
+// Text as a value as a cell holds it: a number where it reads as one, else the text.
+fun __fxLiteral(text : string) : FormulaValue {
+  val n = __fxJavaDouble(text)
+  return n != null ? NumberValue(n!!) : TextValue(text)
+}
+
+// ---- Numbers as Java reads them (Kotlin's toDoubleOrNull) ----
+
+// The number `s` is as Java's Double.valueOf reads it, or null: spaces and control characters
+// around it, a sign, NaN, Infinity, a decimal with an optional point and exponent, or a
+// hexadecimal one (0x1.8p3), each with an optional f, F, d or D after it.
+fun __fxJavaDouble(s : string) : float? {
+  var start = 0
+  var end = s.size
+  while (start < end and s[start].code <= 0x20) { start += 1 }
+  while (end > start and s[end - 1].code <= 0x20) { end -= 1 }
+  if (start == end) { return null }
+  var i = start
+  var negative = false
+  if (s[i] == '+' or s[i] == '-') {
+    negative = s[i] == '-'
+    i += 1
+  }
+  val rest = s[i..<end]
+  if (rest == "NaN") { return 0.0 / 0.0 }
+  if (rest == "Infinity") { return negative ? -1.0 / 0.0 : 1.0 / 0.0 }
+  var stop = end
+  if (stop > i and (s[stop - 1] == 'f' or s[stop - 1] == 'F' or s[stop - 1] == 'd' or s[stop - 1] == 'D')) { stop -= 1 }
+  if (stop - i >= 2 and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
+    val v = __fxHexDouble(s[i + 2..<stop])
+    if (v == null) { return null }
+    return negative ? -(v!!) : v
+  }
+  // digits [. digits?] | . digits; then [eE [+-] digits]
+  var j = i
+  var whole = 0
+  while (j < stop and s[j] >= '0' and s[j] <= '9') { j += 1; whole += 1 }
+  var fraction = 0
+  if (j < stop and s[j] == '.') {
+    j += 1
+    while (j < stop and s[j] >= '0' and s[j] <= '9') { j += 1; fraction += 1 }
+  }
+  if (whole == 0 and fraction == 0) { return null }
+  if (j < stop and (s[j] == 'e' or s[j] == 'E')) {
+    j += 1
+    if (j < stop and (s[j] == '+' or s[j] == '-')) { j += 1 }
+    var exponent = 0
+    while (j < stop and s[j] >= '0' and s[j] <= '9') { j += 1; exponent += 1 }
+    if (exponent == 0) { return null }
+  }
+  if (j != stop) { return null }
+  val v = s[i..<stop].toFloatOrNull()
+  if (v == null) { return null }
+  return negative ? -(v!!) : v
+}
+
+// A hexadecimal number's digits after 0x: hex digits with an optional point, then p and a
+// binary exponent (which Java requires).
+fun __fxHexDouble(t : string) : float? {
+  var j = 0
+  var mantissa = 0.toBigInt()
+  var digits = 0
+  var afterPoint = 0
+  var point = false
+  while (j < t.size and (t[j].digitToIntOrNull(16) != null or (t[j] == '.' and !point))) {
+    if (t[j] == '.') {
+      point = true
+    } else {
+      mantissa = mantissa * 16.toBigInt() + t[j].digitToInt(16).toBigInt()
+      digits += 1
+      if (point) { afterPoint += 1 }
+    }
+    j += 1
+  }
+  if (digits == 0 or j >= t.size or (t[j] != 'p' and t[j] != 'P')) { return null }
+  j += 1
+  val exponentText = t[j..]
+  var k = 0
+  if (k < exponentText.size and (exponentText[k] == '+' or exponentText[k] == '-')) { k += 1 }
+  if (k >= exponentText.size) { return null }
+  for (c in exponentText[k..]) { if (c < '0' or c > '9') { return null } }
+  val exponent = exponentText.toIntOrNull() ?: return null
+  return mantissa.toFloat() * Math.pow(2.0, (exponent - 4 * afterPoint).toFloat())
+}
+
+// ---- Showing a number (Snips' formatNumber: Excel's 15 significant digits) ----
+
+// `n` as a spreadsheet shows it: NaN as #NUM!, infinities as ∞ and -∞, a whole number under
+// 10^15 without a point, anything else rounded to 15 significant digits, half up, with no zeros
+// at the end: plain from 10^-9 to 10^15, else in scientific form as Java's BigDecimal writes it
+// (1.5E-10, 1.23456789012346E+20).
+fun __fxFormatNumber(n : float) : string {
+  if (n.isNaN()) { return "#NUM!" }
+  if (n == 1.0 / 0.0) { return "∞" }
+  if (n == -1.0 / 0.0) { return "-∞" }
+  if (n == 0.0) { return "0" }
+  val a = Math.abs(n)
+  if (n == __fxFloor(n) and a < 1.0e15) { return n.toInt().toString() }
+  // The digits of a, value = 0.d1d2d3... × 10^point.
+  var digits = ""
+  var point = 0
+  val shortest = __fxShortestDigits(a)
+  if (shortest.first.size <= 15) {
+    // Where the shortest digits that read back as a are 15 or fewer, rounding a's exact value to
+    // 15 gives them: a is within half an ulp of them, a fraction of a 15-digit step.
+    digits = shortest.first
+    point = shortest.second
+  } else {
+    val exact = __fxExactDigits(a)
+    var d = exact.first
+    point = exact.second
+    if (d.size > 15) {
+      val up = d[15] >= '5'
+      d = d[0..<15]
+      if (up) {
+        val bumped = (d.toBigInt() + 1.toBigInt()).toString()
+        if (bumped.size > 15) { point += 1 }
+        d = bumped
+      }
+    }
+    digits = d
+  }
+  var last = digits.size
+  while (last > 1 and digits[last - 1] == '0') { last -= 1 }
+  digits = digits[0..<last]
+  val sign = n < 0.0 ? "-" : ""
+  if (a >= 1.0e-9 and a <= 1.0e15) { return sign + __fxPlain(digits, point) }
+  // BigDecimal.toString: plain where the scale is not negative and the exponent is -6 or more.
+  val scale = digits.size - point
+  val adjusted = point - 1
+  if (scale >= 0 and adjusted >= -6) { return sign + __fxPlain(digits, point) }
+  val mantissa = digits.size > 1 ? digits[0..<1] + "." + digits[1..] : digits
+  return sign + mantissa + "E" + (adjusted >= 0 ? "+" : "-") + Math.abs(adjusted).toString()
+}
+
+fun __fxPlain(digits : string, point : int) : string {
+  if (point <= 0) { return "0." + "0".repeat(-point) + digits }
+  if (point >= digits.size) { return digits + "0".repeat(point - digits.size) }
+  return digits[0..<point] + "." + digits[point..]
+}
+
+// The shortest digits that read back as `a` (a > 0, finite), without leading or trailing
+// zeros, and where the point goes: a = 0.digits × 10^point.
+fun __fxShortestDigits(a : float) : Pair<string, int> {
+  val s = a.toString()
+  var mantissa = s
+  var exponent = 0
+  val e = s.indexOf('e')
+  if (e >= 0) {
+    mantissa = s[0..<e]
+    exponent = s[e + 1..].toInt()
+  }
+  val dot = mantissa.indexOf('.')
+  val whole = dot >= 0 ? mantissa[0..<dot] : mantissa
+  val fraction = dot >= 0 ? mantissa[dot + 1..] : ""
+  var all = whole + fraction
+  var point = whole.size + exponent
+  var lead = 0
+  while (lead < all.size - 1 and all[lead] == '0') { lead += 1 }
+  all = all[lead..]
+  point -= lead
+  var last = all.size
+  while (last > 1 and all[last - 1] == '0') { last -= 1 }
+  return Pair(all[0..<last], point)
+}
+
+// Every digit of `a`'s exact value (a > 0, finite) and where the point goes: a = m × 2^e is
+// m × 5^-e / 10^-e where e is negative.
+fun __fxExactDigits(a : float) : Pair<string, int> {
+  val bits = Bytes(8).putFloat64(0, a).int64(0)
+  val biased = (bits >> 52) & 0x7FF
+  var mantissa = bits & 0xFFFFFFFFFFFFF
+  var e2 = 0
+  if (biased == 0) {
+    e2 = -1074
+  } else {
+    mantissa = mantissa | 0x10000000000000
+    e2 = biased - 1075
+  }
+  if (e2 >= 0) {
+    val s = (mantissa.toBigInt() * 2.toBigInt().pow(e2)).toString()
+    return Pair(s, s.size)
+  }
+  val s = (mantissa.toBigInt() * 5.toBigInt().pow(-e2)).toString()
+  return Pair(s, s.size + e2)
+}
