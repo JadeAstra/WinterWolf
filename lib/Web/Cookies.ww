@@ -1,0 +1,166 @@
+// ---- Cookies (RFC 6265; networking plan, part 6) ----
+//
+//   response.setCookie(Cookie("session", id, httpOnly = true, secure = true, maxAge = 3600))
+//   val id = request.cookies()["session"]
+//
+//   val client = HttpClient(cookies = CookieJar())   // keeps what servers set, sends it back
+
+// How a cookie goes with requests from other sites (SameSite): strict (never), lax (top-level
+// navigations), none (always, and only with secure).
+enum SameSite { strict, lax, none }
+
+// A cookie: what a server sets (toSetCookie) and a client keeps.
+class Cookie(val name : string, val value : string, val domain : string? = null, val path : string? = null,
+             val expires : Instant? = null, val maxAge : int? = null, val secure : bool = false, val httpOnly : bool = false,
+             val sameSite : SameSite? = null) {
+  init {
+    if (name.isEmpty() or !name.all { __isTokenChar(it) }) { throw IllegalArgumentException("'$name' is not a cookie name") }
+    for (c in value) {
+      if (c.code < 0x21 or c.code > 0x7E or c == '"' or c == ',' or c == ';' or c == '\\') {
+        throw IllegalArgumentException("a cookie value holding '${c.code < 0x21 ? "\\u{${c.code.toString(16)}}" : "$c"}' (encode it: UrlEncoding.encode)")
+      }
+    }
+  }
+
+  // The Set-Cookie header's value.
+  fun toSetCookie() : string {
+    val out = StringBuilder()
+    out.append(name).append('=').append(value)
+    if (domain != null) { out.append("; Domain=").append(domain!!) }
+    if (path != null) { out.append("; Path=").append(path!!) }
+    if (expires != null) { out.append("; Expires=").append(HttpDate.format(expires!!)) }
+    if (maxAge != null) { out.append("; Max-Age=").append(maxAge!!) }
+    if (secure) { out.append("; Secure") }
+    if (httpOnly) { out.append("; HttpOnly") }
+    if (sameSite != null) { out.append("; SameSite=").append(sameSite == SameSite.strict ? "Strict" : sameSite == SameSite.lax ? "Lax" : "None") }
+    return out.toString()
+  }
+
+  override fun toString() : string => toSetCookie()
+
+  static {
+    // A Set-Cookie header's value read, or null where it is not one (no name=value).
+    fun parse(setCookie : string) : Cookie? {
+      val parts = setCookie.split(';')
+      val pair = parts[0]
+      val eq = pair.indexOf('=')
+      if (eq <= 0) { return null }
+      val name = pair[0..<eq].trim()
+      var value = pair[eq + 1..].trim()
+      if (value.size >= 2 and value.startsWith("\"") and value.endsWith("\"")) { value = value[1..<value.size - 1] }
+      var domain : string? = null
+      var path : string? = null
+      var expires : Instant? = null
+      var maxAge : int? = null
+      var secure = false
+      var httpOnly = false
+      var sameSite : SameSite? = null
+      for (attribute in parts.drop(1)) {
+        val e = attribute.indexOf('=')
+        val key = (e < 0 ? attribute : attribute[0..<e]).trim().lower()
+        val v = e < 0 ? "" : attribute[e + 1..].trim()
+        when (key) {
+          "domain" -> if (v.isNotEmpty()) { domain = v.removePrefix(".").lower() }
+          "path" -> if (v.startsWith("/")) { path = v }
+          "expires" -> expires = HttpDate.parse(v)
+          "max-age" -> {
+            val n = v.toIntOrNull()
+            if (n != null and (v[0].isDigit() or v[0] == '-')) { maxAge = n }
+          }
+          "secure" -> secure = true
+          "httponly" -> httpOnly = true
+          "samesite" -> sameSite = v.lower() == "strict" ? SameSite.strict : v.lower() == "lax" ? SameSite.lax : v.lower() == "none" ? SameSite.none : null
+          else -> { }
+        }
+      }
+      try {
+        return Cookie(name, value, domain, path, expires, maxAge, secure, httpOnly, sameSite)
+      } catch (x : IllegalArgumentException) {
+        return null
+      }
+    }
+
+    // The cookies of Cookie request headers, by name (the first of a name kept).
+    fun parseRequest(headerValues : List<string>) : Map<string, string> {
+      val map : open Map<string, string> = {:}
+      for (h in headerValues) {
+        for (part in h.split(';')) {
+          val eq = part.indexOf('=')
+          if (eq <= 0) { continue }
+          val n = part[0..<eq].trim()
+          var v = part[eq + 1..].trim()
+          if (v.size >= 2 and v.startsWith("\"") and v.endsWith("\"")) { v = v[1..<v.size - 1] }
+          if (map[n] == null) { map[n] = v }
+        }
+      }
+      return map
+    }
+  }
+}
+
+// The cookies a client keeps, as RFC 6265 5 has a browser keep them: by domain and path, until
+// they expire. A Domain attribute must cover the host that set it and not be a top-level domain
+// ("com"); the public suffix list (which would refuse "co.uk" too) is not here.
+class CookieJar {
+  private val lock = Lock()
+  private val stored : open List<__StoredCookie> = []
+
+  // Keeps the cookies of a response's Set-Cookie headers, from `url`.
+  fun store(url : Url, setCookies : List<string>, now : Instant = Instant.now()) {
+    for (text in setCookies) {
+      val c = Cookie.parse(text)
+      if (c == null) { continue }
+      val cookie = c!!
+      val host = url.host
+      var domain = host
+      var hostOnly = true
+      if (cookie.domain != null) {
+        val d = cookie.domain!!
+        val covers = host == d or (host.endsWith("." + d) and IpAddress.parse(host) == null)
+        if (!covers or !d.contains('.')) { continue }
+        domain = d
+        hostOnly = false
+      }
+      if (cookie.secure and !url.isSecure and host != "localhost" and host != "127.0.0.1") { continue }
+      val path = cookie.path ?: __defaultCookiePath(url.path)
+      val expiry : Instant? = cookie.maxAge != null ? now + cookie.maxAge!!.seconds : cookie.expires
+      lock.useKey {
+        stored.removeIf { it.cookie.name == cookie.name and it.domain == domain and it.path == path }
+        if (expiry == null or expiry!! > now) {
+          stored.add(__StoredCookie(cookie, domain, hostOnly, path, expiry, now))
+        }
+      }
+    }
+  }
+
+  // The Cookie header for a request to `url`, or null where no cookie goes with it: the longest
+  // paths first.
+  fun headerFor(url : Url, now : Instant = Instant.now()) : string? {
+    val fitting = lock.useKey {
+      stored.removeIf { it.expiry != null and it.expiry!! <= now }
+      stored.filter { s ->
+        val hostFits = s.hostOnly ? url.host == s.domain : (url.host == s.domain or url.host.endsWith("." + s.domain))
+        val path = url.path.isEmpty() ? "/" : url.path
+        val pathFits = path == s.path or (path.startsWith(s.path) and (s.path.endsWith("/") or path[s.path.size] == '/'))
+        hostFits and pathFits and (!s.cookie.secure or url.isSecure or url.host == "localhost" or url.host == "127.0.0.1")
+      }.sortedByDescending { it.path.size }
+    }
+    return fitting.isEmpty() ? null : fitting.map { "${it.cookie.name}=${it.cookie.value}" }.join("; ")
+  }
+
+  // Every cookie kept.
+  val cookies : List<Cookie>
+    get() => lock.useKey { stored.map { it.cookie } }
+  fun clear() {
+    lock.useKey { stored.clear() }
+  }
+}
+
+class __StoredCookie(val cookie : Cookie, val domain : string, val hostOnly : bool, val path : string, val expiry : Instant?, val created : Instant)
+
+// RFC 6265 5.1.4: the request's path up to its last '/', or "/".
+fun __defaultCookiePath(path : string) : string {
+  if (!path.startsWith("/")) { return "/" }
+  val last = path.lastIndexOf('/')
+  return last <= 0 ? "/" : path[0..<last]
+}

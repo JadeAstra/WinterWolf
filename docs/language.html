@@ -532,6 +532,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#ForeignFunction"><code>ForeignFunction</code></a> (6)</li>
 <li><a href="#Function.invoke"><code>Function</code></a> (7)</li>
 <li><a href="#Grid"><code>Grid</code></a> (86)</li>
+<li><a href="#Gzip"><code>Gzip</code></a> (3)</li>
 <li><a href="#HuffmanTable"><code>HuffmanTable</code></a> (2)</li>
 <li><a href="#IOException"><code>IOException</code></a> (1)</li>
 <li><a href="#IllegalArgumentException"><code>IllegalArgumentException</code></a> (1)</li>
@@ -1051,6 +1052,19 @@ print(packed.inflate().decodeToString())   // hello hello hello
 </div>
 <div class="entry" id="Bytes.crc32"><code class="sig">fun Bytes.crc32(crc : int = 0) : int</code><a class="anchor" href="#Bytes.crc32">#</a>
 <p>The CRC-32 of the bytes, as PNG, ZIP and gzip have it, carried on from <code>crc</code> for data in parts.</p>
+</div>
+<div class="entry" id="Gzip"><code class="sig">object Gzip</code><a class="anchor" href="#Gzip">#</a>
+<p>gzip (RFC 1952): what .gz files and HTTP's &quot;Content-Encoding: gzip&quot; hold, deflate with a header and a CRC-32 after it.</p>
+<pre>val packed = Gzip.compress(FilePath(&quot;log.txt&quot;).readBytes())
+FilePath(&quot;log.txt.gz&quot;).writeBytes(packed)
+val back = Gzip.decompress(packed)
+</pre>
+</div>
+<div class="entry member" id="Gzip.compress"><code class="sig">fun compress(data : Bytes, level : int = 6) : Bytes</code><a class="anchor" href="#Gzip.compress">#</a>
+<p>The bytes as one gzip member, deflated at <code>level</code> (0 to 9, as Bytes.deflate).</p>
+</div>
+<div class="entry member" id="Gzip.decompress"><code class="sig">fun decompress(data : Bytes, limit : int? = null) : Bytes throws DataFormatException</code><a class="anchor" href="#Gzip.decompress">#</a>
+<p>What gzip data holds: one member, or several one after another (as <code>cat a.gz b.gz</code> makes), joined; its header's name, comment and extra fields passed over. No more than <code>limit</code> bytes. A DataFormatException where it is not gzip, is damaged (its CRC-32 or size not right), or expands past the limit.</p>
 </div>
 <div class="entry" id="Bytes.adler32"><code class="sig">fun Bytes.adler32(adler : int = 1) : int</code><a class="anchor" href="#Bytes.adler32">#</a>
 <p>The Adler-32 of the bytes, as zlib has it, carried on from <code>adler</code> for data in parts.</p>

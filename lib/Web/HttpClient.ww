@@ -1,0 +1,291 @@
+import Crypto.*
+
+// ---- The HTTP client (networking plan, part 6) ----
+//
+//   val client = HttpClient()
+//   val page = client.get("https://example.com/")
+//   print(page.status, page.text.take(100))
+//   val made = client.post("https://example.com/api/items", HttpBody.json({"name": "wolf"}))
+//   client.download("https://example.com/big.zip", FilePath("big.zip"))
+//
+// HTTP/1.1 over TCP or TLS (import Crypto's TlsSocket, the server's certificate checked against
+// `trust`, the system's roots unless given). Connections are kept and used again for the same
+// origin; redirects followed (10 at most); bodies sent with their length and read by length,
+// chunks or the connection's end; gzip and deflate bodies decoded; cookies kept where a
+// CookieJar is given. A status of 4xx or 5xx is a response like any other; what goes wrong on
+// the way (a host not found, a timeout, a malformed response) is an IOException.
+class HttpClient {
+  // How long a connection, and each read, may wait.
+  val timeout : Duration
+  val followRedirects : bool
+  // Where cookies are kept and taken from; none where null.
+  val cookies : CookieJar?
+  // What checks HTTPS servers' certificates (the system's roots where null), or whole TLS options.
+  val trust : TrustStore?
+  val tls : TlsClientOptions?
+  // Sent as User-Agent where a request has none.
+  val userAgent : string
+  // The most a response's body may hold, decoded.
+  val maxBody : int
+  private val lock = Lock()
+  private val idle : open Map<string, open List<__HttpConnection>> = {:}
+
+  fun init(timeout : Duration = 30.seconds, followRedirects : bool = true, cookies : CookieJar? = null, trust : TrustStore? = null,
+           tls : TlsClientOptions? = null, userAgent : string = "WinterWolf", maxBody : int = 268435456) {
+    this.timeout = timeout
+    this.followRedirects = followRedirects
+    this.cookies = cookies
+    this.trust = trust
+    this.tls = tls
+    this.userAgent = userAgent
+    this.maxBody = maxBody
+  }
+
+  fun get(url : Url | string, headers : Headers = Headers()) : HttpResponse throws IOException => send(HttpRequest("GET", url, headers))
+  fun head(url : Url | string, headers : Headers = Headers()) : HttpResponse throws IOException => send(HttpRequest("HEAD", url, headers))
+  fun delete(url : Url | string, headers : Headers = Headers()) : HttpResponse throws IOException => send(HttpRequest("DELETE", url, headers))
+  fun post(url : Url | string, body : HttpBody, headers : Headers = Headers()) : HttpResponse throws IOException => send(HttpRequest("POST", url, headers, body))
+  fun put(url : Url | string, body : HttpBody, headers : Headers = Headers()) : HttpResponse throws IOException => send(HttpRequest("PUT", url, headers, body))
+  fun patch(url : Url | string, body : HttpBody, headers : Headers = Headers()) : HttpResponse throws IOException => send(HttpRequest("PATCH", url, headers, body))
+
+  // Sends the request, following redirects where followRedirects; gives the last response.
+  fun send(request : HttpRequest) : HttpResponse throws IOException => sendTo(request, null)
+
+  // Sends a GET and writes the body to `file` as it comes, not held whole (no limit on its size);
+  // gives the response, its body empty. Where the status is not 2xx, nothing is written.
+  fun download(url : Url | string, file : FilePath, headers : Headers = Headers()) : HttpResponse throws IOException {
+    val h = headers.copy()
+    if (!h.contains("Accept-Encoding")) { h.set("Accept-Encoding", "identity") }
+    return sendTo(HttpRequest("GET", url, h), file)
+  }
+
+  // Closes the connections kept for use again.
+  fun close() {
+    val all = lock.useKey {
+      val list = idle.keys.toList().flatMap { idle[it]!! }
+      idle.clear()
+      list
+    }
+    for (c in all) { c.close() }
+  }
+
+  private fun sendTo(first : HttpRequest, file : FilePath?) : HttpResponse throws IOException {
+    var request = first
+    var redirects = 0
+    while (true) {
+      val response = exchange(request, file)
+      cookies?.store(request.url, response.headers.getAll("Set-Cookie"))
+      val location = response.headers.get("Location")
+      val redirect = response.status == 301 or response.status == 302 or response.status == 303 or response.status == 307 or response.status == 308
+      if (!followRedirects or !redirect or location == null) {
+        response.url = request.url
+        return response
+      }
+      redirects++
+      if (redirects > 10) { throw HttpException("more than 10 redirects, the last to $location") }
+      val next = request.url.resolve(location!!)
+      if (next.scheme != "http" and next.scheme != "https") { throw HttpException("a redirect to $next, which is not HTTP") }
+      // 303, and 301 and 302 after a POST, become GET with no body (as browsers do, RFC 9110 15.4).
+      val toGet = response.status == 303 and request.method != "HEAD" or (response.status == 301 or response.status == 302) and request.method == "POST"
+      val headers = request.headers.copy()
+      if (toGet) {
+        headers.remove("Content-Type").remove("Content-Length")
+      }
+      // What proves who the client is goes to the origin it was meant for alone.
+      if (next.origin != request.url.origin) { headers.remove("Authorization").remove("Cookie") }
+      request = HttpRequest(toGet ? "GET" : request.method, next, headers, toGet or request.body.size == 0 ? null : HttpBody(request.body, null))
+    }
+  }
+
+  // One request and its response, on a connection kept or a new one; a kept one the server has
+  // closed meanwhile is given up and the request sent again on a new one.
+  private fun exchange(request : HttpRequest, file : FilePath?) : HttpResponse throws IOException {
+    val url = request.url
+    if (url.scheme != "http" and url.scheme != "https") { throw IllegalArgumentException("not an HTTP URL: $url") }
+    val head = Headers()
+    if (!request.headers.contains("Host")) { head.add("Host", url.authority) }
+    for (p in request.headers.pairs) { head.add(p.first, p.second) }
+    if (!head.contains("User-Agent")) { head.add("User-Agent", userAgent) }
+    if (!head.contains("Accept-Encoding")) { head.add("Accept-Encoding", "gzip, deflate") }
+    if (!head.contains("Accept")) { head.add("Accept", "*/*") }
+    if (request.body.size > 0 or request.method == "POST" or request.method == "PUT" or request.method == "PATCH") {
+      head.set("Content-Length", "${request.body.size}")
+    }
+    if (cookies != null and !head.contains("Cookie")) {
+      val c = cookies!!.headerFor(url)
+      if (c != null) { head.add("Cookie", c!!) }
+    }
+    var attempt = 0
+    while (true) {
+      attempt++
+      val kept = attempt == 1 ? takeIdle(url.origin) : null
+      val connection = kept ?: connect(url)
+      try {
+        __writeHead(connection.writer, "${request.method} ${url.requestTarget} HTTP/1.1", head)
+        if (request.body.size > 0) { connection.writer.write(request.body) }
+        val response = readResponse(connection, request, url, file)
+        return response
+      } catch (e : __StaleConnection) {
+        connection.close()
+        if (kept == null) { throw HttpException("the server closed the connection with no response") }
+      } catch (e : IOException) {
+        connection.close()
+        // Written to a kept connection the server had closed: sent again once on a new one. Never
+        // after a timeout, where the server may have the request and be slow.
+        if (kept == null or e is HttpException or e is SocketTimeoutException) { throw e }
+      }
+    }
+  }
+
+  private fun readResponse(connection : __HttpConnection, request : HttpRequest, url : Url, file : FilePath?) : HttpResponse throws IOException {
+    val limits = __HttpLimits(8192, 262144, 200, maxBody)
+    var status = 0
+    var reason = ""
+    var version = ""
+    var headers = Headers()
+    var first = true
+    while (true) {
+      val line = connection.input.readLine(limits.line, 502)
+      if (line == null) {
+        if (first) { throw __StaleConnection() }
+        throw HttpException("the connection ended before the response's status line")
+      }
+      first = false
+      val parts = line!!.split(' ')
+      if (parts.size < 2 or !parts[0].startsWith("HTTP/1.") or parts[1].size != 3 or !parts[1].all { it.isDigit() }) {
+        throw HttpException("not an HTTP/1.x status line: '${line!!.take(80)}'")
+      }
+      version = parts[0]
+      status = parts[1].toInt()
+      reason = parts.size > 2 ? line!![parts[0].size + parts[1].size + 2..] : ""
+      headers = __readHeaders(connection.input, limits)
+      // 1xx (100 Continue, 103 Early Hints): a final response follows; 101 is final.
+      if (status >= 200 or status == 101) { break }
+    }
+    val noBody = request.method == "HEAD" or status < 200 or status == 204 or status == 304
+    val framed = headers.contains("Transfer-Encoding") or headers.contains("Content-Length")
+    var body = Bytes(0)
+    if (!noBody) {
+      if (file != null and status >= 200 and status < 300) {
+        __streamBody(connection.input, headers, framed, file!!)
+      } else {
+        body = __readBody(connection.input, headers, limits, true)
+      }
+    }
+    val encoding = (headers.get("Content-Encoding") ?: "").trim().lower()
+    if (encoding.isNotEmpty() and encoding != "identity" and body.size > 0) {
+      try {
+        if (encoding == "gzip" or encoding == "x-gzip") {
+          body = Gzip.decompress(body, maxBody)
+        } else if (encoding == "deflate") {
+          body = __inflateEither(body, maxBody)
+        } else {
+          throw HttpException("a body in Content-Encoding '$encoding', which is not read here")
+        }
+      } catch (e : DataFormatException) {
+        throw HttpException("a $encoding body that does not decode: ${e.message}")
+      }
+      headers.remove("Content-Encoding").remove("Content-Length")
+    }
+    // Kept for another request where both sides keep it and the body's end was known.
+    val keep = status != 101 and (noBody or framed) and !headers.hasToken("Connection", "close") and
+               (version == "HTTP/1.1" or headers.hasToken("Connection", "keep-alive")) and connection.input.buffered == 0
+    if (keep) { putIdle(url.origin, connection) } else if (status != 101) { connection.close() }
+    val response = HttpResponse(status, body.size > 0 ? HttpBody(body, null) : null, headers)
+    response.reason = reason
+    if (status == 101) { response.connection = connection }
+    return response
+  }
+
+  private fun connect(url : Url) : __HttpConnection throws IOException {
+    val socket = Socket()
+    socket.readTimeout = timeout
+    socket.connect(url.host, url.effectivePort, timeout)
+    if (!url.isSecure) { return __HttpConnection(socket) }
+    try {
+      val o = tls
+      val options = o == null ? TlsClientOptions(trust = trust, alpn = ["http/1.1"]) :
+                    TlsClientOptions(trust = o!!.trust ?: trust, alpn = ["http/1.1"], identity = o!!.identity, sessions = o!!.sessions,
+                                     minimumVersion = o!!.minimumVersion, maximumVersion = o!!.maximumVersion, at = o!!.at,
+                                     cipherSuites = o!!.cipherSuites, groups = o!!.groups)
+      return __HttpConnection(socket, TlsSocket.client(socket, url.host, options))
+    } catch (e : IOException) {
+      socket.close()
+      throw e
+    }
+  }
+
+  private fun takeIdle(origin : string) : __HttpConnection? {
+    return lock.useKey {
+      var found : __HttpConnection? = null
+      val list = idle[origin]
+      while (list != null and !list!!.isEmpty() and found == null) {
+        val c = list!!.removeLast()
+        // Kept no more than 30 seconds: servers close idle connections, often sooner.
+        if (clock() - c.lastUsed < 30.0) { found = c } else { c.close() }
+      }
+      found
+    }
+  }
+
+  private fun putIdle(origin : string, connection : __HttpConnection) {
+    connection.lastUsed = clock()
+    val dropped = lock.useKey {
+      val list = idle[origin]
+      if (list == null) {
+        idle[origin] = [connection]
+        null
+      } else {
+        list!!.add(connection)
+        list!!.size > 8 ? list!!.removeAt(0) : null
+      }
+    }
+    dropped?.close()
+  }
+}
+
+// A kept connection that gave no response at all: the server had closed it.
+class __StaleConnection : IOException("stale")
+
+// zlib's deflate as RFC 9110 means it, or raw deflate as some servers send.
+fun __inflateEither(body : Bytes, limit : int) : Bytes throws DataFormatException {
+  try {
+    return body.inflate(false, limit)
+  } catch (e : DataFormatException) {
+    return body.inflate(true, limit)
+  }
+}
+
+// A body written to a file as it comes, by length, chunks or the connection's end.
+fun __streamBody(input : __HttpInput, headers : Headers, framed : bool, file : FilePath) throws IOException {
+  val sink = __FileSink(RandomAccessFile(file, "rw"))
+  try {
+    sink.file.setSize(0)
+    if (headers.contains("Transfer-Encoding")) {
+      __readChunked(input, headers, __HttpLimits(8192, 262144, 200, 9007199254740991), sink)
+      return
+    }
+    val length = __contentLength(headers)
+    var at = 0
+    while (length == null or at < length!!) {
+      val part = input.readSome(length == null ? 65536 : Math.min(65536, length!! - at))
+      if (part == null) {
+        if (length != null) { throw HttpException("the connection ended ${length!! - at} bytes before the body's end") }
+        break
+      }
+      sink.take(part!!)
+      at += part!!.size
+    }
+  } finally {
+    sink.file.close()
+  }
+}
+
+// Where a body's parts go as they come: a file, written on at its end.
+class __FileSink(val file : RandomAccessFile) {
+  private var at = 0
+  fun take(part : Bytes) throws IOException {
+    file.writeAt(at, part)
+    at += part.size
+  }
+}

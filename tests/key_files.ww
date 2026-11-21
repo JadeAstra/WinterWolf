@@ -4,7 +4,8 @@
 // OpenSSL and keytool read keys encrypted here, inside PKCS#12 files).
 import Crypto.*
 
-fun text(name : string) : string => FilePath("data/keys/$name").readText()
+// A file's text, its line ends as "\n" whatever a checkout made them (Git on Windows makes them "\r\n").
+fun text(name : string) : string => FilePath("data/keys/$name").readText().replace("\r\n", "\n")
 fun publicOf(key : PrivateKey) : PublicKey => when (key) {
   is RsaPrivateKey -> key.publicKey
   is EcPrivateKey -> key.publicKey

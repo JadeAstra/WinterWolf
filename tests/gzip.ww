@@ -1,0 +1,46 @@
+// Gzip (std, networking plan part 6): what the gzip tool made is read (one member, two after one
+// another, one with a file name in its header); what Gzip makes reads back, at each level and
+// size; damaged data, a wrong CRC or size, and too much are refused with a reason.
+
+print(Gzip.decompress("1f8b0800000000000003cb48cdc9c957c84090008088f9e511000000".hexToBytes()).decodeToString())
+// expect: hello hello hello
+print(Gzip.decompress("1f8b08000000000000032b482c2a51c8cf4bd5510000eb3dfd230a0000001f8b08000000000000032b482c2a512829cf0700271fb2e008000000".hexToBytes()).decodeToString())
+// expect: part one, part two
+print(Gzip.decompress("1f8b08086c39016b00036e616d65642e747874002bcf2cc9504854c84bcc4d05008c9b9e8d0b000000".hexToBytes()).decodeToString())
+// expect: with a name
+
+var right = 0
+for (size in [0, 1, 100, 65535, 65536, 300000]) {
+  val data = Bytes(size)
+  for (i in 0..<size) { data[i] = (i * 31 / 7 + (i >> 9)).toByteWrapped() }
+  for (level in [0, 1, 6, 9]) {
+    val packed = Gzip.compress(data, level)
+    if (packed[0].toInt() == 0x1f and packed[1].toInt() == 0x8b and Gzip.decompress(packed) == data) { right++ }
+  }
+}
+print(right)
+// expect: 24
+
+fun refusal(data : Bytes, limit : int? = null) : string {
+  try {
+    Gzip.decompress(data, limit)
+    return "read"
+  } catch (e : DataFormatException) {
+    return e.message ?: ""
+  }
+}
+val good = Gzip.compress("a message, a message, a message".toBytes())
+val badCrc = good[0..]
+badCrc[badCrc.size - 6] = (badCrc[badCrc.size - 6].toInt() ^ 1).toByteWrapped()
+val badSize = good[0..]
+badSize[badSize.size - 1] = 9.toByteWrapped()
+print(refusal("hello".toBytes()))
+print(refusal(badCrc))
+print(refusal(badSize))
+print(refusal(good[0..<good.size - 3]))
+print(refusal(Gzip.compress(Bytes(100000)), 1000))
+// expect: not gzip data (no 1f 8b at 0)
+// expect: gzip data whose CRC-32 is not right (damaged)
+// expect: gzip data whose size is not right (damaged)
+// expect: gzip cut short in its trailer
+// expect: the compressed data expands past the limit

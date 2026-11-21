@@ -1,0 +1,522 @@
+// ---- HTTP messages: headers, requests, responses and bodies (networking plan, part 6) ----
+//
+//   val response = HttpClient().get("https://example.com/api/items")
+//   if (response.isSuccess) { print(response.json()) }
+//
+//   val server = HttpServer(8080, HttpRouter().get("/hello/{name}") { request ->
+//     HttpResponse.text("hello ${request.pathParameter("name")}")
+//   }).start()
+//
+// HTTP/1.1 (RFC 9110, 9112): what a client sends and a server answers, the same classes both
+// ways. Bodies are bytes, with helpers for text, JSON (Json), forms and multipart forms.
+
+// Something wrong with an HTTP message: one that cannot be read, or that breaks a limit.
+class HttpException(message : string, val status : int = 400) : IOException(message)
+
+// Header fields, in the order given; names compared without regard to case, and kept as given.
+class Headers {
+  private val names : open List<string> = []
+  private val values : open List<string> = []
+
+  // Empty, or holding `pairs` ("Content-Type" to "text/plain", ...).
+  fun init(pairs : List<Pair<string, string>> = []) {
+    for (p in pairs) { add(p.first, p.second) }
+  }
+
+  // The first value of a field, or null.
+  fun get(name : string) : string? {
+    for (i in 0..<names.size) {
+      if (names[i].equals(name, true)) { return values[i] }
+    }
+    return null
+  }
+  op [](name : string) : string? => get(name)
+  // Every value of a field, in order (Set-Cookie may come many times).
+  fun getAll(name : string) : List<string> {
+    val out : open List<string> = []
+    for (i in 0..<names.size) {
+      if (names[i].equals(name, true)) { out.add(values[i]) }
+    }
+    return out
+  }
+  fun contains(name : string) : bool => names.any { it.equals(name, true) }
+  // Whether a field holds `token` in its comma-separated list ("Connection: keep-alive, Upgrade").
+  fun hasToken(name : string, token : string) : bool =>
+    getAll(name).any { v -> v.split(',').any { it.trim().equals(token, true) } }
+
+  // Another value of a field, after those it has. An IllegalArgumentException for a name or
+  // value that would break the message (a line end, a character a name may not hold).
+  fun add(name : string, value : string) : Headers {
+    __checkHeader(name, value)
+    names.add(name)
+    values.add(value)
+    return this
+  }
+  // The field set to this value alone.
+  fun set(name : string, value : string) : Headers {
+    remove(name)
+    return add(name, value)
+  }
+  op []=(name : string, value : string) {
+    set(name, value)
+  }
+  // Every value of the field taken out.
+  fun remove(name : string) : Headers {
+    var i = 0
+    while (i < names.size) {
+      if (names[i].equals(name, true)) {
+        names.removeAt(i)
+        values.removeAt(i)
+      } else {
+        i++
+      }
+    }
+    return this
+  }
+
+  val size : int
+    get() => names.size
+  // The fields as name and value pairs, in order.
+  val pairs : List<Pair<string, string>>
+    get() => (0..<names.size).map { Pair(names[it], values[it]) }
+  fun copy() : Headers => Headers(pairs)
+
+  override fun toString() : string => pairs.map { "${it.first}: ${it.second}" }.join("\n")
+}
+
+fun __checkHeader(name : string, value : string) {
+  if (name.isEmpty() or !name.all { __isTokenChar(it) }) { throw IllegalArgumentException("'$name' is not a header name") }
+  for (c in value) {
+    if (c == '\r' or c == '\n' or c.code == 0) { throw IllegalArgumentException("the value of $name holds a line end") }
+  }
+}
+
+// RFC 9110's token characters.
+fun __isTokenChar(c : char) : bool =>
+  c.isLetterOrDigit() and c.code < 128 or "!#$%&'*+-.^_`|~".contains(c)
+
+// A body to send: its bytes and its content type.
+class HttpBody(val bytes : Bytes, val contentType : string?) {
+  static {
+    // Text, as UTF-8.
+    fun text(text : string, contentType : string = "text/plain; charset=utf-8") : HttpBody => HttpBody(text.toBytes(), contentType)
+    // HTML, as UTF-8.
+    fun html(text : string) : HttpBody => HttpBody(text.toBytes(), "text/html; charset=utf-8")
+    // A value as JSON (Json.write).
+    fun json(value : any?) : HttpBody => HttpBody(Json.write(value).toBytes(), "application/json")
+    // A form as browsers send one (application/x-www-form-urlencoded).
+    fun form(fields : List<Pair<string, string>> | Map<string, string>) : HttpBody {
+      val pairs = fields is Map ? (fields as Map<string, string>).keys.toList().map { Pair(it, (fields as Map<string, string>)[it]!!) } : fields as List<Pair<string, string>>
+      return HttpBody(UrlEncoding.form(pairs).toBytes(), "application/x-www-form-urlencoded")
+    }
+    // A multipart form (multipart/form-data), as a form with files sends one.
+    fun multipart(parts : List<FormPart>) : HttpBody {
+      val boundary = "----WinterWolf" + SecureRandom.bytes(12).toHex()
+      val out = __ByteJoin()
+      for (p in parts) {
+        out.text("--$boundary\r\nContent-Disposition: form-data; name=\"${__quoted(p.name)}\"")
+        if (p.fileName != null) { out.text("; filename=\"${__quoted(p.fileName!!)}\"") }
+        out.text("\r\n")
+        if (p.contentType != null) { out.text("Content-Type: ${p.contentType!!}\r\n") }
+        out.text("\r\n")
+        out.bytes(p.bytes)
+        out.text("\r\n")
+      }
+      out.text("--$boundary--\r\n")
+      return HttpBody(out.toBytes(), "multipart/form-data; boundary=$boundary")
+    }
+    // Bytes as they are, of the type given.
+    fun bytes(bytes : Bytes, contentType : string = "application/octet-stream") : HttpBody => HttpBody(bytes, contentType)
+  }
+}
+
+// One part of a multipart form: a field (text) or a file.
+class FormPart(val name : string, val bytes : Bytes, val fileName : string? = null, val contentType : string? = null) {
+  // The part's bytes as UTF-8 text.
+  val text : string
+    get() => bytes.decodeToString()
+  static {
+    fun field(name : string, value : string) : FormPart => FormPart(name, value.toBytes())
+    fun file(name : string, fileName : string, bytes : Bytes, contentType : string = ContentTypes.of(fileName)) : FormPart => FormPart(name, bytes, fileName, contentType)
+  }
+}
+
+fun __quoted(text : string) : string => text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "").replace("\n", "")
+
+// A request: what a client sends, what a server's handler is given.
+class HttpRequest {
+  // "GET", "POST", ... in upper case.
+  val method : string
+  // The whole URL: on a server, made from the Host header and the request's target.
+  val url : Url
+  val headers : Headers
+  // The body's bytes; empty where there is none.
+  val body : Bytes
+  // On a server: the values of the route's {names}, and the client's address; "HTTP/1.1" or
+  // "HTTP/1.0".
+  internal var parameters : Map<string, string> = {:}
+  var remoteAddress : string = ""
+  var version : string = "HTTP/1.1"
+
+  // A request of `method` for `url`, with these headers and body (whose content type is set from
+  // it where the headers have none).
+  fun init(method : string, url : Url | string, headers : Headers = Headers(), body : HttpBody? = null) {
+    this.method = method.upper()
+    this.url = url is Url ? url as Url : Url.parse(url as string)
+    this.headers = headers
+    this.body = body == null ? Bytes(0) : body!!.bytes
+    if (body != null and body!!.contentType != null and !headers.contains("Content-Type")) { headers.set("Content-Type", body!!.contentType!!) }
+  }
+
+  // The path, decoded ("/users/ann smith").
+  val path : string
+    get() => url.decodedPath
+  // A query parameter's first value, decoded; null where there is none.
+  fun query(name : string) : string? => url.queryParameter(name)
+  // A header's first value, or null.
+  fun header(name : string) : string? => headers.get(name)
+  // The value a route's {name} matched, or null.
+  fun pathParameter(name : string) : string? => parameters[name]
+
+  // The body as text, in the charset its content type names (UTF-8 where none).
+  val text : string
+    get() => __bodyText(body, headers.get("Content-Type"))
+  // The body read as JSON (Json.read). A JsonParseException where it is not JSON.
+  fun json() : any? throws JsonParseException => Json.read(text)
+  // The body read as a form, urlencoded or multipart: each field's name and text value (a file's
+  // text is its content; see parts() for files).
+  fun form() : List<Pair<string, string>> throws HttpException {
+    val type = headers.get("Content-Type") ?: ""
+    if (type.lower().startsWith("multipart/form-data")) { return parts().map { Pair(it.name, it.text) } }
+    return UrlEncoding.parseForm(body.decodeToString())
+  }
+  // A form field's first value, or null.
+  fun formField(name : string) : string? throws HttpException => form().firstOrNull { it.first == name }?.second
+  // A multipart form's parts. An HttpException where the body is not one.
+  fun parts() : List<FormPart> throws HttpException => __multipartParts(body, headers.get("Content-Type") ?: "")
+  // The cookies the client sent, by name.
+  fun cookies() : Map<string, string> => Cookie.parseRequest(headers.getAll("Cookie"))
+
+  override fun toString() : string => "$method $url"
+}
+
+// A response: what a server's handler gives, what a client receives.
+class HttpResponse {
+  val status : int
+  val headers : Headers
+  // The body's bytes (decoded from gzip where the client asked for it); empty where there is none.
+  val body : Bytes
+  // A client's: the URL it came from, after any redirects; the reason phrase the server sent.
+  var url : Url? = null
+  var reason : string = ""
+  // A server's: what writes the body as it is made, in chunks (see stream); null for `body`.
+  internal var producer : ((Writer) -> unit throws IOException)? = null
+  // A server's: what takes the connection over (WebSocket's upgrade). A client's: the connection
+  // a 101 Switching Protocols left open.
+  internal var takeover : ((__HttpConnection) -> unit throws IOException)? = null
+  internal var connection : __HttpConnection? = null
+
+  fun init(status : int = 200, body : HttpBody? = null, headers : Headers = Headers()) {
+    if (status < 100 or status > 999) { throw IllegalArgumentException("an HTTP status is 100 to 999, not $status") }
+    this.status = status
+    this.headers = headers
+    this.body = body == null ? Bytes(0) : body!!.bytes
+    if (body != null and body!!.contentType != null and !headers.contains("Content-Type")) { headers.set("Content-Type", body!!.contentType!!) }
+    this.reason = __statusText(status)
+  }
+
+  static {
+    fun text(text : string, status : int = 200) : HttpResponse => HttpResponse(status, HttpBody.text(text))
+    fun html(text : string, status : int = 200) : HttpResponse => HttpResponse(status, HttpBody.html(text))
+    fun json(value : any?, status : int = 200) : HttpResponse => HttpResponse(status, HttpBody.json(value))
+    fun bytes(bytes : Bytes, contentType : string = "application/octet-stream", status : int = 200) : HttpResponse => HttpResponse(status, HttpBody.bytes(bytes, contentType))
+    // A redirect to `location` (302 Found unless said: 301, 303, 307, 308).
+    fun redirect(location : string, status : int = 302) : HttpResponse {
+      val r = HttpResponse(status)
+      r.headers.set("Location", location)
+      return r
+    }
+    // A response of `status` with its reason as a short text body ("404 Not Found").
+    fun status(status : int, message : string? = null) : HttpResponse => text(message ?: "$status ${__statusText(status)}", status)
+    fun notFound() : HttpResponse => status(404)
+    // A body written as it is made, in chunks: for what is long, or not known in advance.
+    fun stream(contentType : string, write : (Writer) -> unit throws IOException, status : int = 200) : HttpResponse {
+      val r = HttpResponse(status)
+      r.headers.set("Content-Type", contentType)
+      r.producer = write
+      return r
+    }
+  }
+
+  // Whether the status is 2xx.
+  val isSuccess : bool
+    get() => status >= 200 and status < 300
+  fun header(name : string) : string? => headers.get(name)
+  // The body as text, in the charset its content type names (UTF-8 where none).
+  val text : string
+    get() => __bodyText(body, headers.get("Content-Type"))
+  fun json() : any? throws JsonParseException => Json.read(text)
+
+  // Adds a cookie for the client to keep (Set-Cookie).
+  fun setCookie(cookie : Cookie) : HttpResponse {
+    headers.add("Set-Cookie", cookie.toSetCookie())
+    return this
+  }
+  // A header set, for more: HttpResponse.text("x").withHeader("Cache-Control", "no-store").
+  fun withHeader(name : string, value : string) : HttpResponse {
+    headers.set(name, value)
+    return this
+  }
+
+  override fun toString() : string => "$status $reason"
+}
+
+fun __bodyText(body : Bytes, contentType : string?) : string {
+  val cs = contentType == null ? null : __parameter(contentType!!, "charset")
+  return body.decodeToString(__charsetOf(cs))
+}
+
+fun __charsetOf(name : string?) : Charset => when ((name ?: "").lower()) {
+  "iso-8859-1", "latin1", "latin-1" -> Charset.latin1
+  "us-ascii", "ascii" -> Charset.ascii
+  "windows-1252", "cp1252" -> Charset.windows1252
+  "utf-16le" -> Charset.utf16le
+  "utf-16be" -> Charset.utf16be
+  "utf-16" -> Charset.utf16
+  "iso-8859-15" -> Charset.latin9
+  else -> Charset.utf8
+}
+
+// A parameter of a header value ("text/html; charset=utf-8", "charset"), unquoted; null where
+// it has none.
+fun __parameter(value : string, name : string) : string? {
+  for (part in value.split(';').drop(1)) {
+    val eq = part.indexOf('=')
+    if (eq > 0 and part[0..<eq].trim().equals(name, true)) {
+      val v = part[eq + 1..].trim()
+      return v.startsWith("\"") and v.endsWith("\"") and v.size >= 2 ? v[1..<v.size - 1].replace("\\\"", "\"").replace("\\\\", "\\") : v
+    }
+  }
+  return null
+}
+
+// A multipart body's parts.
+fun __multipartParts(body : Bytes, contentType : string) : List<FormPart> throws HttpException {
+  val boundary = __parameter(contentType, "boundary")
+  if (!contentType.lower().startsWith("multipart/") or boundary == null or boundary!!.isEmpty()) { throw HttpException("not a multipart body") }
+  val delimiter = ("--" + boundary!!).toBytes()
+  val parts : open List<FormPart> = []
+  var at = __find(body, delimiter, 0)
+  if (at < 0) { throw HttpException("a multipart body with no boundary") }
+  while (true) {
+    at += delimiter.size
+    if (at + 2 <= body.size and body[at].toInt() == 0x2D and body[at + 1].toInt() == 0x2D) { break }   // "--": the end
+    if (at + 2 > body.size or body[at].toInt() != 13 or body[at + 1].toInt() != 10) { throw HttpException("a multipart boundary not followed by a line end") }
+    at += 2
+    val headersEnd = __find(body, "\r\n\r\n".toBytes(), at)
+    if (headersEnd < 0) { throw HttpException("a multipart part with no end to its headers") }
+    val partHeaders = body[at..<headersEnd].decodeToString(Charset.utf8)
+    val next = __find(body, ("\r\n--" + boundary!!).toBytes(), headersEnd + 4)
+    if (next < 0) { throw HttpException("a multipart part with no boundary after it") }
+    var disposition = ""
+    var type : string? = null
+    for (line in partHeaders.split("\r\n")) {
+      val colon = line.indexOf(':')
+      if (colon < 0) { continue }
+      val n = line[0..<colon].trim()
+      if (n.equals("Content-Disposition", true)) { disposition = line[colon + 1..].trim() }
+      if (n.equals("Content-Type", true)) { type = line[colon + 1..].trim() }
+    }
+    val name = __parameter(disposition, "name") ?: ""
+    parts.add(FormPart(name, body[headersEnd + 4..<next], __parameter(disposition, "filename"), type))
+    at = next + 2
+  }
+  return parts
+}
+
+// Where `pattern` first appears in `data` at or after `from`, or -1.
+fun __find(data : Bytes, pattern : Bytes, from : int) : int {
+  if (pattern.size == 0) { return from }
+  val first = pattern[0]
+  var i = data.indexOf(first, from)
+  while (i >= 0 and i + pattern.size <= data.size) {
+    var j = 1
+    while (j < pattern.size and data[i + j] == pattern[j]) { j++ }
+    if (j == pattern.size) { return i }
+    i = data.indexOf(first, i + 1)
+  }
+  return -1
+}
+
+// Bytes joined one piece after another.
+class __ByteJoin {
+  private val parts : open List<Bytes> = []
+  private var size = 0
+  fun bytes(b : Bytes) : __ByteJoin {
+    parts.add(b)
+    size += b.size
+    return this
+  }
+  fun text(t : string) : __ByteJoin => bytes(t.toBytes())
+  fun toBytes() : Bytes {
+    val out = Bytes(size)
+    var at = 0
+    for (p in parts) {
+      out.copyFrom(p, 0, 1, at, 1, p.size)
+      at += p.size
+    }
+    return out
+  }
+}
+
+// ---- Dates, statuses, content types ----
+
+// HTTP's dates (RFC 9110 5.6.7): written as IMF-fixdate, read in its three forms.
+object HttpDate {
+  private val days = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+  private val months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+  // "Sun, 06 Nov 1994 08:49:37 GMT".
+  fun format(at : Instant) : string {
+    val s = at.toString()   // 1994-11-06T08:49:37Z, perhaps with a fraction
+    val dayNumber = __floorDivide(at.epochSeconds, 86400)
+    val weekday = days[((dayNumber % 7) + 7) % 7]
+    return "$weekday, ${s[8..<10]} ${months[s[5..<7].toInt() - 1]} ${s[0..<4]} ${s[11..<19]} GMT"
+  }
+
+  // A date in any of HTTP's three forms; null where it is none of them.
+  fun parse(text : string) : Instant? {
+    val t = text.trim()
+    val words = t.replace(",", " ").split(' ').filter { it.isNotEmpty() }
+    try {
+      var day = 0
+      var month = 0
+      var year = 0
+      var time = ""
+      if (words.size == 4 and words[3] == "GMT" or words.size == 5 and words[4] == "GMT" or words.size == 6 and words[5] == "GMT") {
+        // IMF-fixdate (Sun 06 Nov 1994 08:49:37 GMT) or RFC 850 (Sunday 06-Nov-94 08:49:37 GMT).
+        if (words[1].contains('-')) {
+          val dmy = words[1].split('-')
+          day = dmy[0].toInt()
+          month = months.indexOf(dmy[1]) + 1
+          year = dmy[2].toInt()
+          year += year < 70 ? 2000 : year < 100 ? 1900 : 0
+          time = words[2]
+        } else {
+          day = words[1].toInt()
+          month = months.indexOf(words[2]) + 1
+          year = words[3].toInt()
+          time = words[4]
+        }
+      } else if (words.size == 5) {
+        // asctime: Sun Nov  6 08:49:37 1994
+        month = months.indexOf(words[1]) + 1
+        day = words[2].toInt()
+        time = words[3]
+        year = words[4].toInt()
+      } else {
+        return null
+      }
+      if (month < 1) { return null }
+      return Instant.parse("${"$year".padStart(4, '0')}-${"$month".padStart(2, '0')}-${"$day".padStart(2, '0')}T${time}Z")
+    } catch (e : RuntimeException) {
+      return null
+    }
+  }
+}
+
+fun __floorDivide(a : int, b : int) : int {
+  val q = a / b
+  return (a % b != 0 and (a < 0) != (b < 0)) ? q - 1 : q
+}
+
+// The reason phrase of a status (RFC 9110), or "" for one not known.
+fun __statusText(status : int) : string => when (status) {
+  100 -> "Continue"
+  101 -> "Switching Protocols"
+  200 -> "OK"
+  201 -> "Created"
+  202 -> "Accepted"
+  204 -> "No Content"
+  206 -> "Partial Content"
+  301 -> "Moved Permanently"
+  302 -> "Found"
+  303 -> "See Other"
+  304 -> "Not Modified"
+  307 -> "Temporary Redirect"
+  308 -> "Permanent Redirect"
+  400 -> "Bad Request"
+  401 -> "Unauthorized"
+  403 -> "Forbidden"
+  404 -> "Not Found"
+  405 -> "Method Not Allowed"
+  406 -> "Not Acceptable"
+  408 -> "Request Timeout"
+  409 -> "Conflict"
+  410 -> "Gone"
+  411 -> "Length Required"
+  412 -> "Precondition Failed"
+  413 -> "Content Too Large"
+  414 -> "URI Too Long"
+  415 -> "Unsupported Media Type"
+  416 -> "Range Not Satisfiable"
+  417 -> "Expectation Failed"
+  422 -> "Unprocessable Content"
+  426 -> "Upgrade Required"
+  429 -> "Too Many Requests"
+  431 -> "Request Header Fields Too Large"
+  500 -> "Internal Server Error"
+  501 -> "Not Implemented"
+  502 -> "Bad Gateway"
+  503 -> "Service Unavailable"
+  504 -> "Gateway Timeout"
+  505 -> "HTTP Version Not Supported"
+  else -> ""
+}
+
+// Content types by file name, for what a server sends from files.
+object ContentTypes {
+  // The type a file of this name holds, by its extension; application/octet-stream where it is
+  // not known.
+  fun of(fileName : string) : string {
+    val dot = fileName.lastIndexOf('.')
+    val ext = dot < 0 ? "" : fileName[dot + 1..].lower()
+    return when (ext) {
+      "html", "htm" -> "text/html; charset=utf-8"
+      "css" -> "text/css; charset=utf-8"
+      "js", "mjs" -> "text/javascript; charset=utf-8"
+      "json" -> "application/json"
+      "txt", "text", "log" -> "text/plain; charset=utf-8"
+      "csv" -> "text/csv; charset=utf-8"
+      "xml" -> "application/xml"
+      "svg" -> "image/svg+xml"
+      "png" -> "image/png"
+      "jpg", "jpeg" -> "image/jpeg"
+      "gif" -> "image/gif"
+      "webp" -> "image/webp"
+      "ico" -> "image/x-icon"
+      "bmp" -> "image/bmp"
+      "wasm" -> "application/wasm"
+      "pdf" -> "application/pdf"
+      "zip" -> "application/zip"
+      "gz" -> "application/gzip"
+      "woff" -> "font/woff"
+      "woff2" -> "font/woff2"
+      "ttf" -> "font/ttf"
+      "otf" -> "font/otf"
+      "mp3" -> "audio/mpeg"
+      "wav" -> "audio/wav"
+      "ogg" -> "audio/ogg"
+      "mp4" -> "video/mp4"
+      "webm" -> "video/webm"
+      "md" -> "text/markdown; charset=utf-8"
+      "ww" -> "text/plain; charset=utf-8"
+      else -> "application/octet-stream"
+    }
+  }
+  // Whether a body of this type is worth compressing (text, JSON, JavaScript, XML, SVG).
+  fun isCompressible(contentType : string) : bool {
+    val t = contentType.lower()
+    return t.startsWith("text/") or t.contains("json") or t.contains("javascript") or t.contains("xml") or t.startsWith("image/svg")
+  }
+}

@@ -1,0 +1,48 @@
+// A ww HTTP server for tools/web/web_interop.sh (curl against it) and for a browser:
+//
+//   ww tools/web/web_peer.ww PORT [--tls P12 PASSWORD] [--seconds N]
+//
+// Serves until --seconds have passed (60 unless given):
+//   GET  /                the browser's test page (tools/web/page.html): fetch, a form, a WebSocket
+//   GET  /hello           "hello"            GET /big     200 KB of text (gzipped where asked)
+//   GET  /users/{id}      JSON of the id and the query's q
+//   POST /echo            what was sent: its size, content type and SHA-256
+//   POST /form            the form's fields as JSON (urlencoded or multipart)
+//   GET  /stream          ten lines, chunked          GET /redirect   a 302 to /hello
+//   GET  /cookie          sets wolf=pack              GET /cookies    the cookies sent, as JSON
+//   GET  /files/*         this folder's files          WS  /ws         echoes each message
+import Web.*
+import Crypto.*
+
+val args = Program.arguments
+val port = args[0].toInt()
+fun option(name : string) : string? {
+  val i = args.indexOf(name)
+  return i < 0 or i + 1 >= args.size ? null : args[i + 1]
+}
+val router = HttpRouter()
+  .get("/") { r -> HttpResponse.html(FilePath("tools/web/page.html").readText()) }
+  .get("/hello") { r -> HttpResponse.text("hello") }
+  .get("/big") { r -> HttpResponse.text("wolf pack ".repeat(20480)) }
+  .get("/users/{id}") { r -> HttpResponse.json({"id": r.pathParameter("id"), "q": r.query("q")}) }
+  .post("/echo") { r -> HttpResponse.json({"size": r.body.size, "type": r.header("Content-Type"), "sha256": Sha256.hash(r.body).toHex()}) }
+  .post("/form") { r ->
+    val fields : open Map<string, string> = {:}
+    for (p in r.form()) { fields[p.first] = p.second }
+    HttpResponse.json(fields)
+  }
+  .get("/stream") { r -> HttpResponse.stream("text/plain; charset=utf-8", { w -> for (i in 0..<10) { w.println("line $i") } }) }
+  .get("/redirect") { r -> HttpResponse.redirect("/hello") }
+  .get("/cookie") { r -> HttpResponse.text("set").setCookie(Cookie("wolf", "pack", path = "/")) }
+  .get("/cookies") { r -> HttpResponse.json(r.cookies()) }
+  .files("/files", FilePath("tools/web"))
+  .webSocket("/ws") { socket, request ->
+    for (m in socket) { if (m.isText) { socket.send("echo: ${m.text!!}") } else { socket.send(m.data!!) } }
+  }
+val p12 = option("--tls")
+val tls = p12 == null ? null : TlsServerOptions(TlsIdentity.of(Pkcs12.read(FilePath(p12!!).readBytes(), args[args.indexOf("--tls") + 2])[0]),
+                                                alpn = ["http/1.1"])
+val server = HttpServer(port, router, tls = tls, bindAddress = option("--bind") ?: "127.0.0.1").start()
+print("listening on ${server.port}${tls == null ? "" : " (TLS)"}")
+delay((option("--seconds") ?: "60").toInt().seconds)
+server.stop()

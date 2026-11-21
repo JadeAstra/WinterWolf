@@ -1,0 +1,313 @@
+// ---- URLs (networking plan, part 6, 2026-11-21) ----
+//
+//   val url = Url.parse("https://example.com/search?q=wolf%20pack#top")
+//   url.host                          // "example.com"
+//   url.queryParameter("q")           // "wolf pack"
+//   url.resolve("../about").toString() // "https://example.com/about"
+//
+// RFC 3986's URLs: a scheme, an authority (user information, a host, a port), a path, a query and a
+// fragment, kept as they were written (percent-encoded); the parts that are text come out decoded
+// from queryParameter and decodedPath. The scheme and host are kept in lower case. A host may be a
+// name, an IPv4 address or an IPv6 one in brackets; a name not in ASCII is refused (IDNA is not
+// here: write it as its xn-- form).
+
+class Url {
+  // "https", "http", "ws", "wss", "mailto", ... in lower case.
+  val scheme : string
+  // The user information before the host's "@" (as written, percent-encoded), or null.
+  val userInfo : string?
+  // The host: a name or address in lower case, an IPv6 address without its brackets; "" where
+  // there is no authority (mailto:x).
+  val host : string
+  // The port written, or null (see effectivePort).
+  val port : int?
+  // The path as written, percent-encoded: "" or "/..." where there is a host.
+  val path : string
+  // What follows "?" as written, or null where there is no "?".
+  val query : string?
+  // What follows "#", or null.
+  val fragment : string?
+
+  internal fun init(scheme : string, userInfo : string?, host : string, port : int?, path : string, query : string?, fragment : string?) {
+    this.scheme = scheme
+    this.userInfo = userInfo
+    this.host = host
+    this.port = port
+    this.path = path
+    this.query = query
+    this.fragment = fragment
+  }
+
+  static {
+    // A URL from its text. An IllegalArgumentException that says what is wrong where it is not one
+    // (no scheme, a port that is not a number, a character no URL may hold, ...).
+    fun parse(text : string) : Url {
+      val t = text.trim()
+      val colon = t.indexOf(':')
+      if (colon <= 0) { throw IllegalArgumentException("not a URL (no scheme): '$text'") }
+      val scheme = t[0..<colon].lower()
+      if (!scheme[0].isLetter() or !scheme.all { it.isLetterOrDigit() or it == '+' or it == '-' or it == '.' }) {
+        throw IllegalArgumentException("not a URL (the scheme '$scheme' is not one): '$text'")
+      }
+      for (c in t) {
+        if (c.code <= 0x20 or c.code >= 0x7F or c == '<' or c == '>' or c == '"' or c == '{' or c == '}' or c == '|' or c == '\\' or c == '^' or c == '`') {
+          throw IllegalArgumentException("not a URL (it holds '${c.code < 0x21 ? "\\u{${c.code.toString(16)}}" : "$c"}', which must be percent-encoded): '$text'")
+        }
+      }
+      return __parseAfterScheme(scheme, t[colon + 1..], text)
+    }
+
+    // The URL, or null where the text is not one.
+    fun parseOrNull(text : string) : Url? {
+      try {
+        return parse(text)
+      } catch (e : IllegalArgumentException) {
+        return null
+      }
+    }
+  }
+
+  // The port, written or the scheme's own (80 for http and ws, 443 for https and wss, 21 for
+  // ftp); -1 where there is neither.
+  val effectivePort : int
+    get() => port ?: __defaultPort(scheme)
+
+  // Whether it is https or wss.
+  val isSecure : bool
+    get() => scheme == "https" or scheme == "wss"
+
+  // The host as written in a URL: an IPv6 address in brackets.
+  val hostText : string
+    get() => host.contains(':') ? "[$host]" : host
+
+  // The host and port as a Host header has them: the port only where it is not the scheme's own.
+  val authority : string
+    get() => port == null or port == __defaultPort(scheme) ? hostText : "$hostText:$port"
+
+  // "scheme://host:port", the origin as browsers and CORS have it.
+  val origin : string
+    get() => "$scheme://$hostText:$effectivePort"
+
+  // The path and query as an HTTP request line has them: "/" where the path is empty.
+  val requestTarget : string
+    get() => (path.isEmpty() ? "/" : path) + (query == null ? "" : "?" + query!!)
+
+  // The path decoded (percent-escapes as UTF-8).
+  val decodedPath : string
+    get() => UrlEncoding.decode(path)
+
+  // The query's name=value pairs, decoded as forms are ('+' a space), in order.
+  val queryParameters : List<Pair<string, string>>
+    get() => query == null ? [] : UrlEncoding.parseForm(query!!)
+
+  // The first value of a query parameter, decoded; null where there is none.
+  fun queryParameter(name : string) : string? => queryParameters.firstOrNull { it.first == name }?.second
+  // Every value of a query parameter, in order.
+  fun queryParameters(name : string) : List<string> => queryParameters.filter { it.first == name }.map { it.second }
+
+  // The same URL with another path (given decoded, percent-encoded here), query or fragment.
+  fun withPath(decoded : string) : Url => Url(scheme, userInfo, host, port, UrlEncoding.encodePath(decoded), query, fragment)
+  fun withQuery(parameters : List<Pair<string, string>>) : Url =>
+    Url(scheme, userInfo, host, port, path, parameters.isEmpty() ? null : UrlEncoding.form(parameters), fragment)
+  fun withQueryParameter(name : string, value : string) : Url => withQuery(queryParameters.filter { it.first != name } + [Pair(name, value)])
+  fun withFragment(fragment : string?) : Url => Url(scheme, userInfo, host, port, path, query, fragment)
+
+  // A reference (absolute, or relative as "../a?b" or "//host/x" or "#f") resolved against this
+  // URL, as RFC 3986 5.2 says.
+  fun resolve(reference : string) : Url {
+    val r = reference.trim()
+    val colon = r.indexOf(':')
+    val slash = r.indexOf('/')
+    if (colon > 0 and (slash < 0 or colon < slash) and r[0].isLetter() and r[0..<colon].all { it.isLetterOrDigit() or it == '+' or it == '-' or it == '.' }) {
+      val u = parse(r)
+      return Url(u.scheme, u.userInfo, u.host, u.port, __removeDots(u.path), u.query, u.fragment)
+    }
+    val ref = __parseAfterScheme(scheme, r, reference, true)
+    if (r.startsWith("//")) { return Url(scheme, ref.userInfo, ref.host, ref.port, __removeDots(ref.path), ref.query, ref.fragment) }
+    if (ref.path.isEmpty()) { return Url(scheme, userInfo, host, port, path, ref.query ?: query, ref.fragment) }
+    if (ref.path.startsWith("/")) { return Url(scheme, userInfo, host, port, __removeDots(ref.path), ref.query, ref.fragment) }
+    val base = host.isNotEmpty() and path.isEmpty() ? "/" : path.substringBeforeLast("/", "") + "/"
+    return Url(scheme, userInfo, host, port, __removeDots(base + ref.path), ref.query, ref.fragment)
+  }
+
+  override fun toString() : string {
+    val out = StringBuilder()
+    out.append(scheme).append(':')
+    if (host.isNotEmpty() or userInfo != null or scheme == "file") {
+      out.append("//")
+      if (userInfo != null) { out.append(userInfo!!).append('@') }
+      out.append(hostText)
+      if (port != null) { out.append(':').append(port!!) }
+    }
+    out.append(path)
+    if (query != null) { out.append('?').append(query!!) }
+    if (fragment != null) { out.append('#').append(fragment!!) }
+    return out.toString()
+  }
+
+  op ==(other : any?) : bool => other is Url and other.toString() == toString()
+  fun hashCode() : int => toString().hashCode()
+}
+
+fun __defaultPort(scheme : string) : int => when (scheme) {
+  "http", "ws" -> 80
+  "https", "wss" -> 443
+  "ftp" -> 21
+  else -> -1
+}
+
+// What follows "scheme:" (or a relative reference, where `relative`).
+fun __parseAfterScheme(scheme : string, rest : string, text : string, relative : bool = false) : Url {
+  var r = rest
+  var fragment : string? = null
+  val hash = r.indexOf('#')
+  if (hash >= 0) {
+    fragment = r[hash + 1..]
+    r = r[0..<hash]
+  }
+  var query : string? = null
+  val q = r.indexOf('?')
+  if (q >= 0) {
+    query = r[q + 1..]
+    r = r[0..<q]
+  }
+  var userInfo : string? = null
+  var host = ""
+  var port : int? = null
+  var path = r
+  if (r.startsWith("//")) {
+    var slash = r.indexOf('/', 2)
+    if (slash < 0) { slash = r.size }
+    var authority = r[2..<slash]
+    path = r[slash..]
+    val at = authority.lastIndexOf('@')
+    if (at >= 0) {
+      userInfo = authority[0..<at]
+      authority = authority[at + 1..]
+    }
+    if (authority.startsWith("[")) {
+      val close = authority.indexOf(']')
+      if (close < 0) { throw IllegalArgumentException("not a URL (an IPv6 address with no ']'): '$text'") }
+      host = authority[1..<close]
+      if (IpAddress.parse(host) == null) { throw IllegalArgumentException("not a URL ('$host' is not an IPv6 address): '$text'") }
+      host = IpAddress(host).toString()
+      authority = authority[close + 1..]
+      if (authority.isNotEmpty() and !authority.startsWith(":")) { throw IllegalArgumentException("not a URL (something after the IPv6 address): '$text'") }
+      if (authority.startsWith(":")) { port = __port(authority[1..], text) }
+    } else {
+      val colon = authority.lastIndexOf(':')
+      if (colon >= 0) {
+        port = __port(authority[colon + 1..], text)
+        authority = authority[0..<colon]
+      }
+      host = UrlEncoding.decode(authority).lower()
+      for (c in host) {
+        if (c.code > 0x7E) { throw IllegalArgumentException("not a URL here (the host '$host' is not ASCII: write it as its xn-- form): '$text'") }
+        if (!(c.isLetterOrDigit() or c == '-' or c == '.' or c == '_' or c == '~' or c == '!' or c == '$' or c == '&' or c == '\'' or c == '(' or c == ')' or c == '*' or c == '+' or c == ',' or c == ';' or c == '=')) {
+          throw IllegalArgumentException("not a URL (the host holds '$c'): '$text'")
+        }
+      }
+    }
+    if (host.isEmpty() and (scheme == "http" or scheme == "https" or scheme == "ws" or scheme == "wss")) {
+      throw IllegalArgumentException("not a URL (an $scheme URL with no host): '$text'")
+    }
+  } else if (!relative and (scheme == "http" or scheme == "https" or scheme == "ws" or scheme == "wss")) {
+    throw IllegalArgumentException("not a URL (an $scheme URL with no host): '$text'")
+  }
+  return Url(scheme, userInfo, host, port, path, query, fragment)
+}
+
+fun __port(text : string, whole : string) : int? {
+  if (text.isEmpty()) { return null }
+  val n = text.toIntOrNull()
+  if (n == null or n!! < 0 or n!! > 65535 or !text.all { it.isDigit() }) { throw IllegalArgumentException("not a URL (the port '$text' is not 0 to 65535): '$whole'") }
+  return n
+}
+
+// RFC 3986 5.2.4: "." and ".." segments taken out.
+fun __removeDots(path : string) : string {
+  if (!path.contains('.')) { return path }
+  val out : open List<string> = []
+  val segments = path.split('/')
+  for (i in 0..<segments.size) {
+    val s = segments[i]
+    val last = i == segments.size - 1
+    if (s == ".") {
+      if (last) { out.add("") }
+    } else if (s == "..") {
+      if (out.size > 1 or (out.size == 1 and out[0] != "")) { out.removeLast() }
+      if (last) { out.add("") }
+    } else {
+      out.add(s)
+    }
+  }
+  val joined = out.join("/")
+  return path.startsWith("/") and !joined.startsWith("/") ? "/" + joined : joined
+}
+
+// Percent-encoding (RFC 3986), and forms as browsers send them (application/x-www-form-urlencoded).
+object UrlEncoding {
+  // `text` with every byte of its UTF-8 percent-encoded but letters, digits and "-._~" (and
+  // those in `keep`).
+  fun encode(text : string, keep : string = "") : string {
+    val out = StringBuilder()
+    for (b in text.toBytes().toList()) {
+      val v = b.toInt()
+      val c = v.char
+      if ((v >= 0x30 and v <= 0x39) or (v >= 0x41 and v <= 0x5A) or (v >= 0x61 and v <= 0x7A) or c == '-' or c == '.' or c == '_' or c == '~' or (v < 0x80 and keep.contains(c))) {
+        out.append(c)
+      } else {
+        out.append('%').append(__hexDigits[v >> 4]).append(__hexDigits[v & 15])
+      }
+    }
+    return out.toString()
+  }
+  // A path, its "/" kept.
+  fun encodePath(text : string) : string => encode(text, "/!$&'()*+,;=:@")
+
+  // Percent-escapes made the bytes they stand for, read as UTF-8; '+' a space where `plus`
+  // (forms). An escape that is not one is kept as it is.
+  fun decode(text : string, plus : bool = false) : string {
+    if (!text.contains('%') and !(plus and text.contains('+'))) { return text }
+    val bytes = text.toBytes()
+    val out = Bytes(bytes.size)
+    var n = 0
+    var i = 0
+    while (i < bytes.size) {
+      val v = bytes[i].toInt()
+      if (v == 0x25 and i + 2 < bytes.size + 0 and __hexValue(bytes[i + 1].toInt()) >= 0 and __hexValue(bytes[i + 2].toInt()) >= 0) {
+        out[n] = (__hexValue(bytes[i + 1].toInt()) * 16 + __hexValue(bytes[i + 2].toInt())).toByteWrapped()
+        i += 3
+      } else {
+        out[n] = (plus and v == 0x2B ? 0x20 : v).toByteWrapped()
+        i += 1
+      }
+      n++
+    }
+    return out[0..<n].decodeToString()
+  }
+
+  // name=value pairs as a form sends them: each encoded, spaces as '+', joined with '&'.
+  fun form(parameters : List<Pair<string, string>>) : string =>
+    parameters.map { encode(it.first).replace("%20", "+") + "=" + encode(it.second).replace("%20", "+") }.join("&")
+  // The pairs of a form or query, decoded, in order; a name with no '=' has the value "".
+  fun parseForm(text : string) : List<Pair<string, string>> {
+    val out : open List<Pair<string, string>> = []
+    if (text.isEmpty()) { return out }
+    for (part in text.split('&')) {
+      if (part.isEmpty()) { continue }
+      val eq = part.indexOf('=')
+      out.add(eq < 0 ? Pair(decode(part, true), "") : Pair(decode(part[0..<eq], true), decode(part[eq + 1..], true)))
+    }
+    return out
+  }
+}
+
+val __hexDigits = "0123456789ABCDEF"
+
+fun __hexValue(c : int) : int {
+  if (c >= 0x30 and c <= 0x39) { return c - 0x30 }
+  if (c >= 0x41 and c <= 0x46) { return c - 0x41 + 10 }
+  if (c >= 0x61 and c <= 0x66) { return c - 0x61 + 10 }
+  return -1
+}

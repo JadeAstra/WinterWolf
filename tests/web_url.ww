@@ -1,0 +1,121 @@
+// import Web's URLs, encodings, headers, cookies and dates (networking plan, part 6): RFC 3986 5.4's
+// examples of resolving references, normal and abnormal; URLs read and refused with a reason;
+// percent-encoding and forms; headers that would break a message refused; a cookie jar's rules
+// (RFC 6265: domains, paths, expiry, Secure); HTTP's three forms of date.
+import Web.*
+
+// ---- RFC 3986 5.4 ----
+val base = Url.parse("http://a/b/c/d;p?q")
+val examples = [
+  "g:h", "g:h", "g", "http://a/b/c/g", "./g", "http://a/b/c/g", "g/", "http://a/b/c/g/", "/g", "http://a/g", "//g", "http://g",
+  "?y", "http://a/b/c/d;p?y", "g?y", "http://a/b/c/g?y", "#s", "http://a/b/c/d;p?q#s", "g#s", "http://a/b/c/g#s",
+  "g?y#s", "http://a/b/c/g?y#s", ";x", "http://a/b/c/;x", "g;x", "http://a/b/c/g;x", "g;x?y#s", "http://a/b/c/g;x?y#s",
+  "", "http://a/b/c/d;p?q", ".", "http://a/b/c/", "./", "http://a/b/c/", "..", "http://a/b/", "../", "http://a/b/",
+  "../g", "http://a/b/g", "../..", "http://a/", "../../", "http://a/", "../../g", "http://a/g",
+  // Abnormal.
+  "../../../g", "http://a/g", "../../../../g", "http://a/g", "/./g", "http://a/g", "/../g", "http://a/g", "g.", "http://a/b/c/g.",
+  ".g", "http://a/b/c/.g", "g..", "http://a/b/c/g..", "..g", "http://a/b/c/..g", "./../g", "http://a/b/g", "./g/.", "http://a/b/c/g/",
+  "g/./h", "http://a/b/c/g/h", "g/../h", "http://a/b/c/h", "g;x=1/./y", "http://a/b/c/g;x=1/y", "g;x=1/../y", "http://a/b/c/y",
+  "g?y/./x", "http://a/b/c/g?y/./x", "g?y/../x", "http://a/b/c/g?y/../x", "g#s/./x", "http://a/b/c/g#s/./x", "g#s/../x", "http://a/b/c/g#s/../x"]
+var wrong = 0
+for (i in 0..<examples.size / 2) {
+  val got = base.resolve(examples[2 * i]).toString()
+  if (got != examples[2 * i + 1]) {
+    wrong++
+    print("'${examples[2 * i]}' resolved to $got, not ${examples[2 * i + 1]}")
+  }
+}
+print("RFC 3986 examples: ${examples.size / 2}, wrong: $wrong")
+// expect: RFC 3986 examples: 41, wrong: 0
+
+// ---- Reading URLs ----
+val u = Url.parse("HTTPS://Ann:secret@Example.COM:8443/a%20b/c?x=1&y=two+words&x=3#frag")
+print(u.scheme, u.userInfo, u.host, u.port, u.effectivePort, u.path, u.decodedPath, u.query, u.fragment)
+// expect: https Ann:secret example.com 8443 8443 /a%20b/c /a b/c x=1&y=two+words&x=3 frag
+print(u.queryParameter("y"), u.queryParameters("x"), u.authority, u.origin, u.requestTarget, u.isSecure)
+// expect: two words ["1", "3"] example.com:8443 https://example.com:8443 /a%20b/c?x=1&y=two+words&x=3 true
+val v6 = Url.parse("http://[2001:DB8::1]:8080")
+print(v6.host, v6.hostText, v6.authority, v6.requestTarget, v6, Url.parse("http://example.com:80/").authority)
+// expect: 2001:db8::1 [2001:db8::1] [2001:db8::1]:8080 / http://[2001:db8::1]:8080 example.com
+print(Url.parse("mailto:ann@example.com").path, Url.parse("file:///C:/x/y.txt").path, Url.parse("ws://h/chat").effectivePort)
+// expect: ann@example.com /C:/x/y.txt 80
+print(u.withQueryParameter("x", "new value").withFragment(null), Url.parse("http://h/p").withPath("/a b/ü"))
+// expect: https://Ann:secret@example.com:8443/a%20b/c?y=two+words&x=new+value http://h/a%20b/%C3%BC
+for (bad in ["example.com/no-scheme", "http://", "http:///x", "https://h:99999/", "http://ex ample.com/", "http://bücher.de/",
+             "http://[::1/", "http://h/<script>", "1http://h/"]) {
+  try {
+    Url.parse(bad)
+    print("read: $bad")
+  } catch (e : IllegalArgumentException) {
+    print(e.message)
+  }
+}
+// expect: not a URL (no scheme): 'example.com/no-scheme'
+// expect: not a URL (an http URL with no host): 'http://'
+// expect: not a URL (an http URL with no host): 'http:///x'
+// expect: not a URL (the port '99999' is not 0 to 65535): 'https://h:99999/'
+// expect: not a URL (it holds '\u{20}', which must be percent-encoded): 'http://ex ample.com/'
+// expect: not a URL (it holds 'ü', which must be percent-encoded): 'http://bücher.de/'
+// expect: not a URL (an IPv6 address with no ']'): 'http://[::1/'
+// expect: not a URL (it holds '<', which must be percent-encoded): 'http://h/<script>'
+// expect: not a URL (the scheme '1http' is not one): '1http://h/'
+print(Url.parseOrNull("nope"), Url.parse("http://a/b") == Url.parse("http://a/b"))
+// expect: null true
+
+// ---- Encodings ----
+print(UrlEncoding.encode("a b&c=d/é~"), UrlEncoding.encodePath("/a b/c"), UrlEncoding.decode("a%20b%2Fc%zz%C3%A9"), UrlEncoding.decode("a+b", true))
+// expect: a%20b%26c%3Dd%2F%C3%A9~ /a%20b/c a b/c%zzé a b
+print(UrlEncoding.form([Pair("q", "wolf pack"), Pair("n", "1&2")]), UrlEncoding.parseForm("q=wolf+pack&n=1%262&empty&=x"))
+// expect: q=wolf+pack&n=1%262 [Pair(first="q", second="wolf pack"), Pair(first="n", second="1&2"), Pair(first="empty", second=""), Pair(first="", second="x")]
+
+// ---- Headers ----
+val h = Headers().add("Set-Cookie", "a=1").add("set-cookie", "b=2").add("Connection", "keep-alive, Upgrade")
+print(h["SET-COOKIE"], h.getAll("Set-Cookie"), h.hasToken("connection", "upgrade"), h.contains("connection"), h.size)
+// expect: a=1 ["a=1", "b=2"] true true 3
+h.set("Set-Cookie", "c=3")
+print(h.getAll("set-cookie"), h.size)
+// expect: ["c=3"] 2
+for (bad in [{ Headers().add("X", "a\r\nInjected: yes") }, { Headers().add("Bad Name", "x") }, { Headers().add("", "x") }]) {
+  try { bad() } catch (e : IllegalArgumentException) { print(e.message) }
+}
+// expect: the value of X holds a line end
+// expect: 'Bad Name' is not a header name
+// expect: '' is not a header name
+
+// ---- Cookies ----
+val now = Instant.parse("2027-01-01T00:00:00Z")
+val jar = CookieJar()
+val site = Url.parse("https://www.example.com/cart")   // cookies with no Path take "/" (RFC 6265 5.1.4)
+jar.store(site, ["id=1; Path=/", "pref=dark; Domain=example.com", "cart=3", "tld=x; Domain=com", "other=x; Domain=other.org",
+                 "short=1; Max-Age=60", "gone=1; Max-Age=0", "old=1; Expires=Thu, 01 Jan 2026 00:00:00 GMT",
+                 "safe=1; Secure; HttpOnly; SameSite=Strict"], now)
+print(jar.cookies.map { it.name }.sorted())
+// expect: ["cart", "id", "pref", "safe", "short"]
+print(jar.headerFor(Url.parse("https://www.example.com/shop/cart/item"), now))
+print(jar.headerFor(Url.parse("https://www.example.com/"), now))
+print(jar.headerFor(Url.parse("http://www.example.com/"), now))
+print(jar.headerFor(Url.parse("https://shop.example.com/"), now))
+print(jar.headerFor(Url.parse("https://example.org/"), now))
+print(jar.headerFor(Url.parse("https://www.example.com/"), now + 120.seconds))
+// expect: id=1; pref=dark; cart=3; short=1; safe=1
+// expect: id=1; pref=dark; cart=3; short=1; safe=1
+// expect: id=1; pref=dark; cart=3; short=1
+// expect: pref=dark
+// expect: null
+// expect: id=1; pref=dark; cart=3; safe=1
+print(Cookie("s", "v", path = "/", maxAge = 3600, secure = true, httpOnly = true, sameSite = SameSite.lax).toSetCookie())
+print(Cookie("e", "1", expires = Instant.parse("2030-06-15T12:00:00Z")).toSetCookie())
+print(Cookie.parseRequest(["a=1; b=\"two\"", "a=9; c=3"]))
+// expect: s=v; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax
+// expect: e=1; Expires=Sat, 15 Jun 2030 12:00:00 GMT
+// expect: {"a": "1", "b": "two", "c": "3"}
+try { Cookie("x", "a;b") } catch (e : IllegalArgumentException) { print(e.message) }
+// expect: a cookie value holding ';' (encode it: UrlEncoding.encode)
+
+// ---- Dates ----
+val d = Instant.parse("1994-11-06T08:49:37Z")
+print(HttpDate.format(d), HttpDate.parse("Sun, 06 Nov 1994 08:49:37 GMT") == d, HttpDate.parse("Sunday, 06-Nov-94 08:49:37 GMT") == d,
+      HttpDate.parse("Sun Nov  6 08:49:37 1994") == d, HttpDate.parse("yesterday"))
+// expect: Sun, 06 Nov 1994 08:49:37 GMT true true true null
+print(HttpDate.format(Instant.parse("1970-01-01T00:00:00Z")), HttpDate.format(Instant.parse("2000-02-29T23:59:59Z")))
+// expect: Thu, 01 Jan 1970 00:00:00 GMT Tue, 29 Feb 2000 23:59:59 GMT

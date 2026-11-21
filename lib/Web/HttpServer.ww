@@ -1,0 +1,339 @@
+import Crypto.*
+
+// ---- The HTTP server and its router (networking plan, part 6) ----
+//
+//   val router = HttpRouter()
+//     .get("/") { HttpResponse.html("<h1>hello</h1>") }
+//     .get("/users/{id}") { request -> HttpResponse.json(findUser(request.pathParameter("id")!!)) }
+//     .post("/users") { request -> HttpResponse.json(addUser(request.json()), 201) }
+//     .files("/static", FilePath("static"))
+//     .webSocket("/chat") { socket, request -> for (m in socket) { socket.send(m.text!!) } }
+//   val server = HttpServer(8080, router).start()                       // http://localhost:8080
+//   val secure = HttpServer(8443, router, tls = TlsServerOptions(identity)).start()
+//
+// HTTP/1.1 (and 1.0 clients), each connection served on a thread of a pool of `threads`, kept
+// open between requests (keep-alive) until it is idle for `idleTimeout`. Bodies of requests
+// read by length or chunks, up to `maxBody`; responses sent with their length, or in chunks
+// where they are streamed (HttpResponse.stream), gzipped where `compress` and the client takes
+// it. A client that answers "Expect: 100-continue" is told to go on. What a handler throws
+// becomes 500 (an HttpException, its own status), and the request goes on to the next; what is
+// malformed is answered 400 (or 413, 414, 431, 501, 505) and the connection closed.
+class HttpServer {
+  private val router : HttpRouter?
+  private val function : ((HttpRequest) -> HttpResponse throws Exception)?
+  val tls : TlsServerOptions?
+  private val bindAddress : (string | IpAddress)?
+  private val requestedPort : int
+  private val threads : int
+  val maxBody : int
+  val idleTimeout : Duration
+  val compress : bool
+  // What is told of a handler that threw (not an HttpException): by default a line on
+  // Program.errors.
+  val onError : (HttpRequest, Exception) -> unit
+  private var listener : ServerSocket? = null
+  private var pool : ThreadPool? = null
+  private var running = false
+
+  fun init(port : int = 0, handler : HttpRouter | ((HttpRequest) -> HttpResponse throws Exception), tls : TlsServerOptions? = null,
+           bindAddress : (string | IpAddress)? = null, threads : int = 16, maxBody : int = 16777216, idleTimeout : Duration = 15.seconds,
+           compress : bool = true, onError : ((HttpRequest, Exception) -> unit)? = null) {
+    this.onError = onError ?: { r, e ->
+      try { Program.errors.println("HttpServer: ${r.method} ${r.url.requestTarget} failed: $e") } catch (x : IOException) { }
+    }
+    this.requestedPort = port
+    this.router = handler is HttpRouter ? handler as HttpRouter : null
+    this.function = handler is HttpRouter ? null : handler as ((HttpRequest) -> HttpResponse throws Exception)
+    this.tls = tls
+    this.bindAddress = bindAddress
+    this.threads = threads
+    this.maxBody = maxBody
+    this.idleTimeout = idleTimeout
+    this.compress = compress
+  }
+
+  // Starts listening, and gives the server back: HttpServer(8080, router).start().
+  fun start() : HttpServer throws IOException {
+    if (running) { return this }
+    val l = ServerSocket(requestedPort, bindAddress = bindAddress)
+    listener = l
+    val p = ThreadPool(threads, "http", true)
+    pool = p
+    running = true
+    thread(name = "http-accept", daemon = true) {
+      while (running) {
+        try {
+          val socket = l.accept()
+          p.submit { serve(socket) }
+        } catch (e : IOException) {
+          if (!running) { break }
+        }
+      }
+    }
+    return this
+  }
+
+  // The port it listens on (the one the system chose, where it was given 0).
+  val port : int
+    get() => listener?.localPort ?: requestedPort
+  val isRunning : bool
+    get() => running
+
+  // Stops taking connections, and closes the pool once the requests being served are done.
+  fun stop() {
+    running = false
+    listener?.close()
+    pool?.close()
+  }
+
+  private fun serve(socket : Socket) {
+    socket.readTimeout = idleTimeout
+    var connection : __HttpConnection? = null
+    try {
+      connection = tls == null ? __HttpConnection(socket) : __HttpConnection(socket, TlsSocket.server(socket, tls!!))
+      val c = connection!!
+      val limits = __HttpLimits(8192, 65536, 100, maxBody)
+      while (true) {
+        if (!serveOne(c, limits)) { break }
+      }
+    } catch (e : IOException) {
+      // A client gone, a timeout between requests, a TLS handshake refused: the connection ends.
+    } finally {
+      if (connection != null) { connection!!.lingerClose() } else { socket.close() }
+    }
+  }
+
+  // One request and its response; false where the connection ends after it.
+  private fun serveOne(c : __HttpConnection, limits : __HttpLimits) : bool throws IOException {
+    var request : HttpRequest? = null
+    try {
+      var line = c.input.readLine(limits.line, 414)
+      // An empty line or two before a request is passed over (RFC 9112 2.2).
+      var blanks = 0
+      while (line != null and line!!.isEmpty() and blanks < 4) {
+        line = c.input.readLine(limits.line, 414)
+        blanks++
+      }
+      if (line == null) { return false }
+      request = readRequest(c, line!!, limits)
+    } catch (e : HttpException) {
+      val r = HttpResponse.status(e.status, "${e.status} ${__statusText(e.status)}: ${e.message}")
+      r.headers.set("Connection", "close")
+      writeResponse(c, null, r, false)
+      return false
+    }
+    val req = request!!
+    val response = respond(req)
+    val takeover = response.takeover
+    if (takeover != null) {
+      writeResponse(c, req, response, true)
+      takeover!!(c)
+      return false
+    }
+    val keep = (req.version == "HTTP/1.1" ? !req.headers.hasToken("Connection", "close") : req.headers.hasToken("Connection", "keep-alive")) and
+               !response.headers.hasToken("Connection", "close") and running
+    writeResponse(c, req, response, keep)
+    return keep
+  }
+
+  // The handler's response; what it throws made 500 (an HttpException, its own status).
+  private fun respond(req : HttpRequest) : HttpResponse {
+    try {
+      return router != null ? router!!.handle(req) : function!!(req)
+    } catch (e : HttpException) {
+      return HttpResponse.status(e.status, "${e.status} ${__statusText(e.status)}: ${e.message}")
+    } catch (e : Exception) {
+      onError(req, e)
+      return HttpResponse.status(500)
+    }
+  }
+
+  private fun readRequest(c : __HttpConnection, line : string, limits : __HttpLimits) : HttpRequest throws IOException {
+    val parts = line.split(' ')
+    if (parts.size != 3 or parts[0].isEmpty() or !parts[0].all { __isTokenChar(it) }) { throw HttpException("not a request line: '${line.take(80)}'") }
+    val version = parts[2]
+    if (version != "HTTP/1.1" and version != "HTTP/1.0") { throw HttpException("version '${version.take(20)}', not HTTP/1.1 or 1.0", 505) }
+    val headers = __readHeaders(c.input, limits)
+    val hosts = headers.getAll("Host")
+    if (hosts.size > 1 or (version == "HTTP/1.1" and hosts.isEmpty())) { throw HttpException("an HTTP/1.1 request needs one Host header") }
+    val target = parts[1]
+    val scheme = tls == null ? "http" : "https"
+    val host = hosts.isEmpty() ? "localhost" : hosts[0]
+    val url = __requestUrl(target.startsWith("/") ? "$scheme://$host$target" : target == "*" ? "$scheme://$host/" : target)
+    val length = __contentLength(headers)
+    val chunked = headers.contains("Transfer-Encoding")
+    if (length != null and length!! > limits.body) { throw HttpException("a body of $length bytes, more than the limit of ${limits.body}", 413) }
+    // A client waiting to hear it may send its body.
+    if ((chunked or (length ?: 0) > 0) and (headers.get("Expect") ?: "").equals("100-continue", true) and version == "HTTP/1.1") {
+      c.writer.write("HTTP/1.1 100 Continue\r\n\r\n".toBytes())
+    }
+    val body = __readBody(c.input, headers, limits, false)
+    val request = HttpRequest(parts[0], url, headers, body.size > 0 ? HttpBody(body, null) : null)
+    request.version = version
+    request.remoteAddress = c.socket.remoteAddress
+    return request
+  }
+
+  private fun writeResponse(c : __HttpConnection, request : HttpRequest?, response : HttpResponse, keep : bool) throws IOException {
+    val headers = response.headers.copy()
+    if (!headers.contains("Date")) { headers.set("Date", HttpDate.format(Instant.now())) }
+    if (!keep and response.takeover == null) { headers.set("Connection", "close") }
+    var body = response.body
+    val noBody = response.status < 200 or response.status == 204 or response.status == 304
+    val head = request != null and request!!.method == "HEAD"
+    // gzip where it is worth it and the client takes it.
+    val type = headers.get("Content-Type") ?: ""
+    if (compress and request != null and response.producer == null and body.size >= 1024 and !headers.contains("Content-Encoding") and
+        ContentTypes.isCompressible(type) and __acceptsGzip(request!!.headers.get("Accept-Encoding"))) {
+      body = Gzip.compress(body, 6)
+      headers.set("Content-Encoding", "gzip")
+      headers.add("Vary", "Accept-Encoding")
+    }
+    val streamed = response.producer != null and !noBody and !head
+    if (!noBody and response.producer == null) {
+      headers.set("Content-Length", "${body.size}")
+    }
+    if (streamed) {
+      headers.remove("Content-Length")
+      headers.set("Transfer-Encoding", "chunked")
+    }
+    val reason = response.reason.isEmpty() ? __statusText(response.status) : response.reason
+    __writeHead(c.writer, "HTTP/1.1 ${response.status} $reason", headers)
+    if (streamed) {
+      val out = Writer(__ChunkedChannel(c.writer))
+      response.producer!!(out)
+      out.close()
+    } else if (!noBody and !head and body.size > 0) {
+      c.writer.write(body)
+    }
+  }
+}
+
+// A request's URL; 400 where it is not one.
+fun __requestUrl(text : string) : Url throws HttpException {
+  try {
+    return Url.parse(text)
+  } catch (e : IllegalArgumentException) {
+    throw HttpException("a request target that is not one: ${e.message}")
+  }
+}
+
+// Whether an Accept-Encoding takes gzip (and not with q=0).
+fun __acceptsGzip(accept : string?) : bool {
+  if (accept == null) { return false }
+  for (part in accept!!.split(',')) {
+    val name = part.substringBefore(";").trim().lower()
+    if (name == "gzip" or name == "*") {
+      val q = __parameter(part, "q")
+      return q == null or (q!!.toFloatOrNull() ?: 1.0) > 0.0
+    }
+  }
+  return false
+}
+
+// Routes requests to handlers by method and path: "/users/{id}" takes any one segment as the
+// parameter id; "/files/*" takes the rest of the path as the parameter "*". The first route that
+// fits is taken. A path no route fits is 404; one that fits only with another method is 405,
+// with Allow; HEAD goes to GET's route where there is no HEAD route.
+class HttpRouter {
+  private val routes : open List<__Route> = []
+  // What answers a request no route fits (404 unless set).
+  var notFound : (HttpRequest) -> HttpResponse throws Exception = { r -> HttpResponse.notFound() }
+
+  fun get(pattern : string, handler : (HttpRequest) -> HttpResponse throws Exception) : HttpRouter => route("GET", pattern, handler)
+  fun post(pattern : string, handler : (HttpRequest) -> HttpResponse throws Exception) : HttpRouter => route("POST", pattern, handler)
+  fun put(pattern : string, handler : (HttpRequest) -> HttpResponse throws Exception) : HttpRouter => route("PUT", pattern, handler)
+  fun delete(pattern : string, handler : (HttpRequest) -> HttpResponse throws Exception) : HttpRouter => route("DELETE", pattern, handler)
+  fun patch(pattern : string, handler : (HttpRequest) -> HttpResponse throws Exception) : HttpRouter => route("PATCH", pattern, handler)
+  // A route for `method` ("*" for any).
+  fun route(method : string, pattern : string, handler : (HttpRequest) -> HttpResponse throws Exception) : HttpRouter {
+    if (!pattern.startsWith("/")) { throw IllegalArgumentException("a route's pattern starts with '/': '$pattern'") }
+    routes.add(__Route(method.upper(), pattern, handler))
+    return this
+  }
+
+  // WebSocket connections at `pattern`: each upgraded and given to `handler` on its own thread
+  // of the server's pool, closed when the handler returns.
+  fun webSocket(pattern : string, protocols : List<string> = [], handler : (WebSocket, HttpRequest) -> unit throws Exception) : HttpRouter =>
+    route("GET", pattern) { request -> WebSocket.accept(request, protocols, handler) }
+
+  // The files of `folder` under `prefix` ("/static/css/site.css" is folder/css/site.css), with
+  // their content types, Last-Modified and 304 Not Modified for If-Modified-Since; a directory
+  // gives its index.html. Nothing outside the folder is reached: ".." and the like are 404.
+  fun files(prefix : string, folder : FilePath) : HttpRouter =>
+    route("GET", prefix.removeSuffix("/") + "/*") { request -> __serveFile(folder, request.pathParameter("*") ?: "", request) }
+
+  // The response the routes give `request`.
+  fun handle(request : HttpRequest) : HttpResponse throws Exception {
+    val segments = __segments(request.url.path)
+    val allowed : open List<string> = []
+    for (pass in 0..<2) {
+      for (r in routes) {
+        val params = r.match(segments)
+        if (params == null) { continue }
+        val fits = r.method == "*" or r.method == request.method or (pass == 1 and request.method == "HEAD" and r.method == "GET")
+        if (fits) {
+          request.parameters = params!!
+          return r.handler(request)
+        }
+        if (!allowed.contains(r.method)) { allowed.add(r.method) }
+      }
+      if (request.method != "HEAD") { break }
+    }
+    if (allowed.isNotEmpty()) {
+      val r = HttpResponse.status(405)
+      r.headers.set("Allow", allowed.join(", "))
+      return r
+    }
+    return notFound(request)
+  }
+}
+
+class __Route(val method : string, pattern : string, val handler : (HttpRequest) -> HttpResponse throws Exception) {
+  private val parts : List<string> = __segments(pattern)
+
+  // The parameters where the path's segments fit, or null.
+  fun match(segments : List<string>) : Map<string, string>? {
+    val params : open Map<string, string> = {:}
+    for (i in 0..<parts.size) {
+      val p = parts[i]
+      if (p == "*" and i == parts.size - 1) {
+        params["*"] = segments.drop(i).map { UrlEncoding.decode(it) }.join("/")
+        return params
+      }
+      if (i >= segments.size) { return null }
+      if (p.startsWith("{") and p.endsWith("}")) {
+        params[p[1..<p.size - 1]] = UrlEncoding.decode(segments[i])
+      } else if (p != segments[i]) {
+        return null
+      }
+    }
+    return segments.size == parts.size ? params : null
+  }
+}
+
+// A path's segments, as written (percent-encoded): "/a/b/" is ["a", "b", ""], "/" is [].
+fun __segments(path : string) : List<string> {
+  if (path.isEmpty() or path == "/") { return [] }
+  return path.removePrefix("/").split('/')
+}
+
+fun __serveFile(folder : FilePath, rest : string, request : HttpRequest) : HttpResponse throws IOException {
+  val names = rest.split('/').filter { it.isNotEmpty() }
+  for (n in names) {
+    if (n == "." or n == ".." or n.contains('\\') or n.contains(':') or n.any { it.code < 0x20 }) { return HttpResponse.notFound() }
+  }
+  var file = folder
+  for (n in names) { file = file.resolve(n) }
+  if (file.isDirectory()) { file = file.resolve("index.html") }
+  if (!file.isFile()) { return HttpResponse.notFound() }
+  val modified = file.lastModified()
+  val since = request.headers.get("If-Modified-Since")
+  if (modified != null and since != null) {
+    val s = HttpDate.parse(since!!)
+    if (s != null and modified!!.epochSeconds <= s!!.epochSeconds) { return HttpResponse(304) }
+  }
+  val r = HttpResponse.bytes(file.readBytes(), ContentTypes.of(file.name))
+  if (modified != null) { r.headers.set("Last-Modified", HttpDate.format(modified!!)) }
+  return r
+}

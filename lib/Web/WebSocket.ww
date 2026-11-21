@@ -1,0 +1,347 @@
+import Crypto.*
+
+// ---- WebSockets (RFC 6455; networking plan, part 6) ----
+//
+//   val socket = WebSocket.connect("wss://example.com/chat")
+//   socket.send("hello")
+//   for (message in socket) { print(message.text) }    // until the other side closes
+//   socket.close()                                     // or closeWith(code, reason)
+//
+//   router.webSocket("/echo") { socket, request ->
+//     for (message in socket) { socket.send(message.text ?: "") }
+//   }
+//
+// Messages of text (checked to be UTF-8) or bytes, in frames of any size, put together again
+// where the other side splits them; pings answered with pongs as they come; the closing
+// handshake both ways. No extensions (permessage-deflate is not offered). A client masks what it
+// sends and refuses masked frames; a server the other way round, as the RFC asks.
+
+// A message: text, or bytes.
+class WebSocketMessage(val text : string?, val data : Bytes?) {
+  val isText : bool
+    get() => text != null
+  override fun toString() : string => text ?: "<${data!!.size} bytes>"
+}
+
+// A WebSocket connection, a client's or a server's.
+class WebSocket : AutoCloseable {
+  internal val connection : __HttpConnection
+  private val isClient : bool
+  // The subprotocol agreed, or null.
+  val protocol : string?
+  // The largest message taken; a larger one closes the connection (1009).
+  var maxMessage : int = 16777216
+  private val writing = Lock()
+  private var sentClose = false
+  private var receivedClose = false
+  // The code and reason of the close the other side sent, once it has.
+  var closeCode : int? = null
+  var closeReason : string? = null
+
+  internal fun init(connection : __HttpConnection, isClient : bool, protocol : string?) {
+    this.connection = connection
+    this.isClient = isClient
+    this.protocol = protocol
+    connection.socket.readTimeout = null
+  }
+
+  static {
+    // Connects to a ws: or wss: URL (http: and https: are taken too) and makes the opening
+    // handshake, offering `protocols`. An IOException where the server does not take it.
+    fun connect(url : Url | string, protocols : List<string> = [], headers : Headers = Headers(), trust : TrustStore? = null,
+                tls : TlsClientOptions? = null, timeout : Duration = 30.seconds) : WebSocket throws IOException {
+      val u = url is Url ? url as Url : Url.parse(url as string)
+      if (u.scheme != "wss" and u.scheme != "https" and u.scheme != "ws" and u.scheme != "http") { throw IllegalArgumentException("not a WebSocket URL: $u") }
+      val scheme = u.scheme == "wss" or u.scheme == "https" ? "https" : "http"
+      val httpUrl = Url.parse("$scheme://${u.authority}${u.requestTarget}")
+      val key = Base64.encode(SecureRandom.bytes(16))
+      val h = headers.copy()
+      h.set("Upgrade", "websocket").set("Connection", "Upgrade").set("Sec-WebSocket-Key", key).set("Sec-WebSocket-Version", "13")
+      if (protocols.isNotEmpty()) { h.set("Sec-WebSocket-Protocol", protocols.join(", ")) }
+      val client = HttpClient(timeout = timeout, followRedirects = false, trust = trust, tls = tls)
+      val response = client.send(HttpRequest("GET", httpUrl, h))
+      if (response.status != 101) { throw HttpException("the server did not take the WebSocket: ${response.status} ${response.reason}", response.status) }
+      val c = response.connection!!
+      try {
+        if (!(response.headers.get("Upgrade") ?: "").equals("websocket", true) or !response.headers.hasToken("Connection", "upgrade")) {
+          throw HttpException("a 101 that is not an upgrade to WebSocket")
+        }
+        if (response.headers.get("Sec-WebSocket-Accept") != __acceptKey(key)) { throw HttpException("the server's Sec-WebSocket-Accept is not right") }
+        if (response.headers.contains("Sec-WebSocket-Extensions")) { throw HttpException("the server chose an extension, which was not offered") }
+        val chosen = response.headers.get("Sec-WebSocket-Protocol")
+        if (chosen != null and !protocols.contains(chosen!!)) { throw HttpException("the server chose subprotocol '$chosen', which was not offered") }
+        return WebSocket(c, true, chosen)
+      } catch (e : IOException) {
+        c.close()
+        throw e
+      }
+    }
+
+    // A server's answer to an upgrade request: 101, the connection then given to `handler` as a
+    // WebSocket (closed when it returns); 400 or 426 where the request is not a good upgrade.
+    // HttpRouter.webSocket calls it.
+    fun accept(request : HttpRequest, protocols : List<string>, handler : (WebSocket, HttpRequest) -> unit throws Exception) : HttpResponse {
+      val h = request.headers
+      if (request.method != "GET" or !(h.get("Upgrade") ?: "").equals("websocket", true) or !h.hasToken("Connection", "upgrade")) {
+        return HttpResponse.status(426, "426 Upgrade Required: this is a WebSocket").withHeader("Upgrade", "websocket")
+      }
+      if (h.get("Sec-WebSocket-Version") != "13") { return HttpResponse.status(426).withHeader("Sec-WebSocket-Version", "13") }
+      val key = h.get("Sec-WebSocket-Key")
+      if (key == null or __base64Size(key!!) != 16) { return HttpResponse.status(400, "400 Bad Request: no good Sec-WebSocket-Key") }
+      val offered = (h.get("Sec-WebSocket-Protocol") ?: "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+      val chosen = protocols.firstOrNull { offered.contains(it) }
+      val r = HttpResponse(101)
+      r.headers.set("Upgrade", "websocket").set("Connection", "Upgrade").set("Sec-WebSocket-Accept", __acceptKey(key!!))
+      if (chosen != null) { r.headers.set("Sec-WebSocket-Protocol", chosen!!) }
+      r.takeover = { c ->
+        val socket = WebSocket(c, false, chosen)
+        try {
+          handler(socket, request)
+        } catch (e : IOException) {
+          // The other side gone.
+        } catch (e : Exception) {
+          Program.errors.println("WebSocket ${request.url.requestTarget}: $e")
+          socket.closeWith(1011, "internal error")
+        } finally {
+          socket.close()
+        }
+      }
+      return r
+    }
+  }
+
+  // Sends a message: text (a string) or binary (Bytes).
+  fun send(message : string | Bytes) throws IOException {
+    if (sentClose) { throw IOException("the WebSocket is closed") }
+    if (message is string) { sendFrame(1, (message as string).toBytes()) } else { sendFrame(2, message as Bytes) }
+  }
+  // A ping, which the other side answers with a pong (125 bytes of data at most).
+  fun ping(data : Bytes = Bytes(0)) throws IOException {
+    if (data.size > 125) { throw IllegalArgumentException("a ping's data is 125 bytes at most") }
+    sendFrame(9, data)
+  }
+
+  // The next message, waiting for it; null once the other side has closed (closeCode then says
+  // how). Pings are answered as they come.
+  fun receive() : WebSocketMessage? throws IOException {
+    if (receivedClose) { return null }
+    var opcode = -1
+    val parts = __ByteJoin()
+    var size = 0
+    while (true) {
+      val f = readFrame()
+      if (f.opcode >= 8) {
+        // Control frames, which may come between the frames of a message.
+        if (f.opcode == 8) {
+          receivedClose = true
+          if (f.payload.size == 1) { failClose(1002, "a close frame of one byte") }
+          var code = 1005
+          if (f.payload.size >= 2) {
+            code = (f.payload[0].toInt() << 8) | f.payload[1].toInt()
+            if (code < 1000 or code == 1004 or code == 1005 or code == 1006 or (code > 1011 and code < 3000) or code > 4999) { failClose(1002, "close code $code") }
+            closeReason = __utf8OrNull(f.payload[2..])
+            if (closeReason == null) { failClose(1007, "a close reason not in UTF-8") }
+          }
+          closeCode = code
+          if (!sentClose) { sendClose(code == 1005 ? 1000 : code, "") }
+          connection.close()
+          return null
+        }
+        if (f.opcode == 9) { sendFrame(10, f.payload) }
+        continue
+      }
+      if (f.opcode == 0) {
+        if (opcode < 0) { failClose(1002, "a continuation with no message begun") }
+      } else {
+        if (opcode >= 0) { failClose(1002, "a new message inside another") }
+        opcode = f.opcode
+      }
+      size += f.payload.size
+      if (size > maxMessage) { failClose(1009, "a message of more than $maxMessage bytes") }
+      parts.bytes(f.payload)
+      if (f.fin) {
+        val bytes = parts.toBytes()
+        if (opcode == 1) {
+          val text = __utf8OrNull(bytes)
+          if (text == null) { failClose(1007, "a text message not in UTF-8") }
+          return WebSocketMessage(text, null)
+        }
+        return WebSocketMessage(null, bytes)
+      }
+    }
+  }
+
+  // For a for: each message until the other side closes.
+  fun iterator() : __WebSocketMessages => __WebSocketMessages(this)
+
+  // Closes normally (1000): closeWith(1000).
+  override fun close() {
+    closeWith(1000)
+  }
+
+  // Starts the closing handshake with `code` (1000 normal, 1001 going away, 1008 policy, 1011
+  // the server's own error, 3000 to 4999 the application's) and `reason`, waits a little for the
+  // other side's close, and closes the connection. Closing again does nothing.
+  fun closeWith(code : int, reason : string = "") {
+    if ((code < 1000 or code > 1011 or code == 1004 or code == 1005 or code == 1006) and (code < 3000 or code > 4999)) {
+      throw IllegalArgumentException("$code is not a close code to send (1000 to 1003, 1007 to 1011, 3000 to 4999)")
+    }
+    if (!sentClose) {
+      try {
+        sendClose(code, reason)
+        // The other side's close, read for up to five seconds; messages before it are dropped.
+        connection.socket.readTimeout = 5.seconds
+        while (!receivedClose) {
+          if (receive() == null) { break }
+        }
+      } catch (e : IOException) { }
+    }
+    connection.close()
+  }
+
+  // ---- Frames ----
+
+  private fun sendClose(code : int, reason : string) throws IOException {
+    val r = reason.toBytes()
+    val payload = Bytes(2 + Math.min(r.size, 123))
+    payload[0] = (code >> 8).toByteWrapped()
+    payload[1] = code.toByteWrapped()
+    payload.copyFrom(r, 0, 1, 2, 1, payload.size - 2)
+    sendFrame(8, payload)
+    sentClose = true
+  }
+
+  // Closes with `code` for something wrong the other side sent, and says so.
+  private fun failClose(code : int, why : string) : nothing throws IOException {
+    try {
+      if (!sentClose) { sendClose(code, why.take(100)) }
+    } catch (e : IOException) { }
+    connection.close()
+    throw IOException("WebSocket closed ($code): $why")
+  }
+
+  private fun sendFrame(opcode : int, payload : Bytes) throws IOException {
+    val n = payload.size
+    val header = Bytes(n < 126 ? 2 : n < 65536 ? 4 : 10)
+    header[0] = (0x80 | opcode).toByteWrapped()
+    if (n < 126) {
+      header[1] = n.toByteWrapped()
+    } else if (n < 65536) {
+      header[1] = 126.toByteWrapped()
+      header[2] = (n >> 8).toByteWrapped()
+      header[3] = n.toByteWrapped()
+    } else {
+      header[1] = 127.toByteWrapped()
+      for (i in 0..<8) { header[2 + i] = (n >> (56 - 8 * i)).toByteWrapped() }
+    }
+    val out = __ByteJoin()
+    if (isClient) {
+      header[1] = (header[1].toInt() | 0x80).toByteWrapped()
+      val mask = SecureRandom.bytes(4)
+      val masked = Bytes(n)
+      for (i in 0..<n) { masked[i] = (payload[i].toInt() ^ mask[i & 3].toInt()).toByteWrapped() }
+      out.bytes(header).bytes(mask).bytes(masked)
+    } else {
+      out.bytes(header).bytes(payload)
+    }
+    writing.useKey { connection.writer.write(out.toBytes()) }
+  }
+
+  private fun readFrame() : __Frame throws IOException {
+    val input = connection.input
+    val h = input.readExactly(2)
+    val b0 = h[0].toInt()
+    val b1 = h[1].toInt()
+    val fin = (b0 & 0x80) != 0
+    val opcode = b0 & 0x0F
+    if ((b0 & 0x70) != 0) { failClose(1002, "reserved bits set (no extension was agreed)") }
+    if ((opcode > 2 and opcode < 8) or opcode > 10) { failClose(1002, "opcode $opcode, which is not one") }
+    val masked = (b1 & 0x80) != 0
+    if (masked == isClient) { failClose(1002, isClient ? "a masked frame from the server" : "an unmasked frame from the client") }
+    var n = b1 & 0x7F
+    if (n == 126) {
+      val e = input.readExactly(2)
+      n = (e[0].toInt() << 8) | e[1].toInt()
+      if (n < 126) { failClose(1002, "a length not in its fewest bytes") }
+    } else if (n == 127) {
+      val e = input.readExactly(8)
+      if (e[0].toInt() >= 0x80) { failClose(1002, "a length of 2^63 or more") }
+      n = 0
+      for (i in 0..<8) { n = (n << 8) | e[i].toInt() }
+      if (n < 65536) { failClose(1002, "a length not in its fewest bytes") }
+    }
+    if (opcode >= 8 and (n > 125 or !fin)) { failClose(1002, "a control frame of more than 125 bytes, or split") }
+    if (n > maxMessage) { failClose(1009, "a frame of $n bytes, more than $maxMessage") }
+    val mask = masked ? input.readExactly(4) : null
+    val payload = input.readExactly(n)
+    if (mask != null) {
+      for (i in 0..<n) { payload[i] = (payload[i].toInt() ^ mask!![i & 3].toInt()).toByteWrapped() }
+    }
+    return __Frame(fin, opcode, payload)
+  }
+}
+
+class __Frame(val fin : bool, val opcode : int, val payload : Bytes)
+
+class __WebSocketMessages(private val socket : WebSocket) {
+  private var waiting : WebSocketMessage? = null
+  fun hasNext() : bool throws IOException {
+    if (waiting == null) { waiting = socket.receive() }
+    return waiting != null
+  }
+  fun next() : WebSocketMessage {
+    val m = waiting
+    if (m == null) { throw NoSuchElementException("the WebSocket is closed") }
+    waiting = null
+    return m!!
+  }
+}
+
+// Sec-WebSocket-Accept: base64 of SHA-1 of the key and RFC 6455's GUID.
+fun __acceptKey(key : string) : string => Base64.encode(__crypto.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toBytes()))
+
+fun __base64Size(text : string) : int {
+  try {
+    return Base64.decode(text).size
+  } catch (e : RuntimeException) {
+    return -1
+  }
+}
+
+// The bytes as UTF-8 text, or null where they are not strict UTF-8 (RFC 3629: no overlong forms,
+// no surrogates, nothing past U+10FFFF), as RFC 6455 8.1 asks of text messages.
+fun __utf8OrNull(b : Bytes) : string? {
+  var i = 0
+  val n = b.size
+  while (i < n) {
+    val c = b[i].toInt()
+    if (c < 0x80) {
+      i += 1
+      continue
+    }
+    var need = 0
+    var min = 0
+    if (c >= 0xC2 and c <= 0xDF) {
+      need = 1
+      min = 0x80
+    } else if (c >= 0xE0 and c <= 0xEF) {
+      need = 2
+      min = 0x800
+    } else if (c >= 0xF0 and c <= 0xF4) {
+      need = 3
+      min = 0x10000
+    } else {
+      return null
+    }
+    if (i + need >= n) { return null }
+    var v = c & (need == 1 ? 0x1F : need == 2 ? 0x0F : 0x07)
+    for (k in 1..need) {
+      val x = b[i + k].toInt()
+      if ((x & 0xC0) != 0x80) { return null }
+      v = (v << 6) | (x & 0x3F)
+    }
+    if (v < min or v > 0x10FFFF or (v >= 0xD800 and v <= 0xDFFF)) { return null }
+    i += need + 1
+  }
+  return b.decodeToString()
+}

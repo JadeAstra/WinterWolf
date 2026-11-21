@@ -1,0 +1,40 @@
+// import Web's server and client in one program over the loopback (networking plan, part 6):
+// small requests a second on a kept connection and on a new one each, over HTTP and HTTPS; a
+// large body a second. Run from the repository's root:  ww bench/http_speed.ww
+import Web.*
+import Crypto.*
+
+val identity = TlsIdentity.of(Pkcs12.read(FilePath("tests/data/certs/tls/ec.p12").readBytes(), "pw")[0])
+val roots = TrustStore.fromPem(FilePath("tests/data/certs/tls/root.pem").readText())
+val payload = Bytes(16777216)
+val router = HttpRouter()
+  .get("/hello") { r -> HttpResponse.text("hello") }
+  .get("/big") { r -> HttpResponse.bytes(payload) }
+val plain = HttpServer(0, router, bindAddress = "127.0.0.1").start()
+val secure = HttpServer(0, router, bindAddress = "127.0.0.1", tls = TlsServerOptions(identity)).start()
+
+fun rate(base : string, n : int, kept : bool) : int {
+  val client = HttpClient(trust = roots)
+  val headers = kept ? Headers() : Headers().add("Connection", "close")
+  client.get("$base/hello", headers)
+  val t = clock()
+  for (i in 0..<n) { client.get("$base/hello", headers) }
+  val r = (n / (clock() - t)).toInt()
+  client.close()
+  return r
+}
+fun bulk(base : string) : int {
+  val client = HttpClient(trust = roots)
+  val t = clock()
+  val r = client.get("$base/big")
+  val mb = r.body.size / 1048576.0 / (clock() - t)
+  client.close()
+  return mb.toInt()
+}
+val http = "http://127.0.0.1:${plain.port}"
+val https = "https://127.0.0.1:${secure.port}"
+print("requests a second: HTTP kept ${rate(http, 3000, true)}, new each ${rate(http, 1000, false)}; " +
+      "HTTPS kept ${rate(https, 3000, true)}, new each (resumed) ${rate(https, 300, false)}")
+print("a 16 MB body: HTTP ${bulk(http)} MB/s, HTTPS ${bulk(https)} MB/s")
+plain.stop()
+secure.stop()

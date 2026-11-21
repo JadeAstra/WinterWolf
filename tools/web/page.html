@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WinterWolf HTTP check</title>
+<style>
+  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  li.ok::marker { content: "PASS  "; color: var(--ok); font-weight: 600; }
+  li.bad::marker { content: "FAIL  "; color: var(--bad); font-weight: 600; }
+  #summary { font-weight: 600; }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>WinterWolf's HTTP server, from a browser</h1>
+<p>Each check runs as the page loads: fetch, a form, a stream, gzip, cookies and a WebSocket, all
+from <code>tools/web/web_peer.ww</code>.</p>
+<ol id="results"></ol>
+<p id="summary">running…</p>
+<script>
+const results = document.getElementById("results");
+let passed = 0, failed = 0;
+function note(name, ok, detail) {
+  const li = document.createElement("li");
+  li.className = ok ? "ok" : "bad";
+  li.textContent = name + (detail ? ": " + detail : "");
+  results.appendChild(li);
+  ok ? passed++ : failed++;
+}
+async function check(name, run) {
+  try {
+    const detail = await run();
+    note(name, true, detail);
+  } catch (e) {
+    note(name, false, String(e));
+  }
+}
+function expect(cond, what) { if (!cond) throw new Error(what); }
+
+(async () => {
+  await check("GET /hello", async () => {
+    const r = await fetch("/hello");
+    const t = await r.text();
+    expect(r.status === 200 && t === "hello", "got " + r.status + " " + t);
+    return t;
+  });
+  await check("JSON with a path parameter and a query", async () => {
+    const j = await (await fetch("/users/42?q=wolf%20pack")).json();
+    expect(j.id === "42" && j.q === "wolf pack", JSON.stringify(j));
+    return JSON.stringify(j);
+  });
+  await check("POST bytes", async () => {
+    const body = new Uint8Array(100000).map((_, i) => i & 255);
+    const j = await (await fetch("/echo", { method: "POST", body, headers: { "Content-Type": "application/octet-stream" } })).json();
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", body))).map(b => b.toString(16).padStart(2, "0")).join("");
+    expect(j.size === 100000 && j.sha256 === hash, JSON.stringify(j));
+    return j.size + " bytes, the same SHA-256";
+  });
+  await check("a multipart form with a file", async () => {
+    const form = new FormData();
+    form.append("name", "Ann Wolf");
+    form.append("file", new Blob(["file body"], { type: "text/plain" }), "a.txt");
+    const j = await (await fetch("/form", { method: "POST", body: form })).json();
+    expect(j.name === "Ann Wolf" && j.file === "file body", JSON.stringify(j));
+    return JSON.stringify(j);
+  });
+  await check("a urlencoded form", async () => {
+    const j = await (await fetch("/form", { method: "POST", body: new URLSearchParams({ a: "1 2", b: "ü&=" }) })).json();
+    expect(j.a === "1 2" && j.b === "ü&=", JSON.stringify(j));
+    return JSON.stringify(j);
+  });
+  await check("a chunked stream", async () => {
+    const t = await (await fetch("/stream")).text();
+    expect(t.split("\n").length === 11 && t.startsWith("line 0"), t);
+    return "10 lines";
+  });
+  await check("gzip", async () => {
+    const r = await fetch("/big");
+    const t = await r.text();
+    expect(t.length === 204800, "length " + t.length);
+    return t.length + " characters";
+  });
+  await check("a redirect", async () => {
+    const r = await fetch("/redirect");
+    expect(r.redirected && (await r.text()) === "hello", r.url);
+    return r.url;
+  });
+  await check("cookies", async () => {
+    await fetch("/cookie");
+    const j = await (await fetch("/cookies")).json();
+    expect(j.wolf === "pack" && document.cookie.includes("wolf=pack"), JSON.stringify(j) + " / " + document.cookie);
+    return JSON.stringify(j);
+  });
+  await check("a file", async () => {
+    const r = await fetch("/files/page.html");
+    expect(r.status === 200 && r.headers.get("Content-Type").startsWith("text/html"), r.status + " " + r.headers.get("Content-Type"));
+    return r.headers.get("Content-Type");
+  });
+  await check("404", async () => {
+    const r = await fetch("/nowhere");
+    expect(r.status === 404, "" + r.status);
+    return "404";
+  });
+  await check("a WebSocket: text, a large message, bytes", () => new Promise((resolve, reject) => {
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+    ws.binaryType = "arraybuffer";
+    const got = [];
+    const big = "w".repeat(200000);
+    ws.onopen = () => { ws.send("hello"); ws.send(big); ws.send(new Uint8Array([1, 2, 3])); };
+    ws.onmessage = e => {
+      got.push(e.data);
+      if (got.length === 3) {
+        const ok = got[0] === "echo: hello" && got[1] === "echo: " + big && new Uint8Array(got[2]).join() === "1,2,3";
+        ws.close(1000, "done");
+        ok ? resolve("3 messages echoed") : reject(new Error(JSON.stringify(got.map(g => typeof g === "string" ? g.slice(0, 20) : "bytes"))));
+      }
+    };
+    ws.onerror = () => reject(new Error("WebSocket error"));
+    setTimeout(() => reject(new Error("timeout")), 10000);
+  }));
+  document.getElementById("summary").textContent = `${passed} passed, ${failed} failed`;
+  document.title = `${passed} passed, ${failed} failed`;
+})();
+</script>
+</body>
+</html>

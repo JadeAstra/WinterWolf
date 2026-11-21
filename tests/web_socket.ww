@@ -1,0 +1,156 @@
+// import Web's WebSockets (RFC 6455; networking plan, part 6): the client against the server, every
+// size where a frame's length changes form (125, 126, 65535, 65536 bytes), subprotocols; a client of
+// bytes written by hand: a message in fragments with a ping between them, answered with a pong;
+// what must close the connection, with its code (an unmasked frame 1002, text not UTF-8 1007, a
+// control frame split 1002, a close code that is not one 1002); the closing handshake both ways;
+// upgrade requests that are not good ones (400, 426); a server whose Sec-WebSocket-Accept is wrong.
+import Web.*
+
+val router = HttpRouter()
+  .webSocket("/echo", ["chat", "superchat"]) { socket, request ->
+    for (m in socket) {
+      if (m.isText and m.text == "close please") {
+        socket.closeWith(4000, "asked")
+      } else if (m.isText) {
+        socket.send("echo: ${m.text!!}")
+      } else {
+        socket.send(m.data!!)
+      }
+    }
+  }
+val server = HttpServer(0, router, bindAddress = "127.0.0.1").start()
+val wsUrl = "ws://127.0.0.1:${server.port}/echo"
+
+// ---- Client against server ----
+val ws = WebSocket.connect(wsUrl, ["superchat", "other"])
+print(ws.protocol)
+// expect: superchat
+// Every size where the length changes form; and 300,000 bytes, but in quick mode (WW_TEST_QUICK=1,
+// under GC stress, where masking it a byte at a time takes minutes).
+val sizes = Program.environment["WW_TEST_QUICK"] == "1" ? [0, 1, 125, 126, 65535, 65536] : [0, 1, 125, 126, 65535, 65536, 300000]
+val wrongSizes : open List<int> = []
+for (size in sizes) {
+  val data = Bytes(size)
+  for (i in 0..<size) { data[i] = (i * 13).toByteWrapped() }
+  ws.send(data)
+  val back = ws.receive()
+  if (back!!.data!! != data) { wrongSizes.add(size) }
+}
+print("sizes echoed: ${wrongSizes.isEmpty() ? "all the same" : "not the same: $wrongSizes"}")
+// expect: sizes echoed: all the same
+ws.send("ünïcödé ✓")
+print(ws.receive())
+ws.send("close please")
+print(ws.receive(), ws.closeCode, ws.closeReason)
+// expect: echo: ünïcödé ✓
+// expect: null 4000 asked
+val plain = WebSocket.connect(wsUrl)
+print(plain.protocol)
+plain.close()
+// expect: null
+
+// ---- A client of bytes ----
+// Opens the WebSocket by hand; gives the socket after the 101.
+fun open() : Socket {
+  val s = Socket("127.0.0.1", server.port)
+  s.readTimeout = 5.seconds
+  s.writer.write("GET /echo HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n".toBytes())
+  var line = s.reader.readLine()
+  val status = line
+  var accept = ""
+  while (line != null and line != "") {
+    if (line!!.startsWith("Sec-WebSocket-Accept:")) { accept = line!!.substringAfter(": ") }
+    line = s.reader.readLine()
+  }
+  // RFC 6455 1.3's own example key and answer.
+  if (status != "HTTP/1.1 101 Switching Protocols" or accept != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") { print("bad handshake: $status $accept") }
+  return s
+}
+// A frame as a client writes one: masked (unless not), FIN (unless not).
+fun frame(opcode : int, payload : Bytes, fin : bool = true, masked : bool = true) : Bytes {
+  val head = Bytes(2)
+  head[0] = ((fin ? 0x80 : 0) | opcode).toByteWrapped()
+  head[1] = ((masked ? 0x80 : 0) | payload.size).toByteWrapped()
+  val out = Bytes(2 + (masked ? 4 : 0) + payload.size)
+  out.copyFrom(head, 0, 1, 0, 1, 2)
+  if (masked) {
+    val mask = Bytes([1, 2, 3, 4])
+    out.copyFrom(mask, 0, 1, 2, 1, 4)
+    for (i in 0..<payload.size) { out[6 + i] = (payload[i].toInt() ^ mask[i & 3].toInt()).toByteWrapped() }
+  } else {
+    out.copyFrom(payload, 0, 1, 2, 1, payload.size)
+  }
+  return out
+}
+// The frames the server sends until it closes: "op:text" each, the close as "close:code".
+fun frames(s : Socket) : List<string> {
+  val out : open List<string> = []
+  try {
+    while (true) {
+      val h = s.reader.read(2)
+      if (h == null or h!!.size < 2) { break }
+      val op = h!![0].toInt() & 15
+      val n = h!![1].toInt() & 127
+      val payload = n == 0 ? Bytes(0) : s.reader.read(n)!!
+      if (op == 8) {
+        out.add("close:${payload.size >= 2 ? ((payload[0].toInt() << 8) | payload[1].toInt()) : 0}")
+        break
+      }
+      out.add("$op:${payload.decodeToString()}")
+    }
+  } catch (e : IOException) { }
+  s.close()
+  return out
+}
+// A message in three fragments with a ping between them; then a close.
+val s1 = open()
+s1.writer.write(frame(1, "hel".toBytes(), false))
+s1.writer.write(frame(9, "are you there".toBytes()))
+s1.writer.write(frame(0, "lo ".toBytes(), false))
+s1.writer.write(frame(0, "there".toBytes()))
+s1.writer.write(frame(8, Bytes([3, 232])))
+print(frames(s1))
+// expect: ["10:are you there", "1:echo: hello there", "close:1000"]
+for (bad in [frame(1, "x".toBytes(), true, false), frame(1, Bytes([0xC3, 0x28])), frame(9, "p".toBytes(), false),
+             frame(8, Bytes([3, 237])), frame(0, "x".toBytes()), frame(3, "x".toBytes())]) {
+  val s = open()
+  s.writer.write(bad)
+  print(frames(s))
+}
+// expect: ["close:1002"]
+// expect: ["close:1007"]
+// expect: ["close:1002"]
+// expect: ["close:1002"]
+// expect: ["close:1002"]
+// expect: ["close:1002"]
+
+// ---- Upgrades that are not good ones ----
+val client = HttpClient()
+val bad = "http://127.0.0.1:${server.port}/echo"
+print(client.get(bad).status)
+print(client.get(bad, Headers().add("Upgrade", "websocket").add("Connection", "Upgrade").add("Sec-WebSocket-Version", "13")).status)
+val wrongVersion = client.get(bad, Headers().add("Upgrade", "websocket").add("Connection", "Upgrade").add("Sec-WebSocket-Version", "8").add("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="))
+print(wrongVersion.status, wrongVersion.header("Sec-WebSocket-Version"))
+// expect: 426
+// expect: 400
+// expect: 426 13
+
+// A server whose answer to the key is wrong.
+val liar = ServerSocket(0, bindAddress = "127.0.0.1")
+val liarJob = thread {
+  val s = liar.accept()
+  var line = s.reader.readLine()
+  while (line != null and line != "") { line = s.reader.readLine() }
+  s.writer.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong=\r\n\r\n".toBytes())
+  try { s.reader.read() } catch (e : IOException) { }
+  s.close()
+  liar.close()
+}
+try {
+  WebSocket.connect("ws://127.0.0.1:${liar.localPort}/")
+} catch (e : IOException) {
+  print(e.message)
+}
+liarJob.get()
+// expect: the server's Sec-WebSocket-Accept is not right
+server.stop()

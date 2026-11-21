@@ -10690,15 +10690,14 @@ struct Checker::Impl {
         }
         if (c.callee->kind != ExprKind::Member) return false;
         const auto& m = static_cast<const MemberExpr&>(*c.callee);
+        // Only copy() is a bundle's: any other name is called as usual (call() tells a bundle it
+        // has no such name). Asked first, so that the object is checked once: checked here
+        // quietly and then again by call(), each call of a chain doubled the work of those
+        // before it (2^n for a chain of n calls: a router of 18 routes took 0.5 s to check).
+        if (m.name != "copy") return false;
         const Type on = withNull(typeQuietly(*m.object), false);
         if (on.kind != Type::Bundle) return false;
         expr(*m.object);
-        if (m.name != "copy") {
-            for (const ExprPtr& a : c.args) expr(*a);
-            report(m, "a bundle has copy(name = value) and +, and is passed with ...: it has no '" + m.name + "'");
-            result = unknownType();
-            return true;
-        }
         result = on;
         for (size_t i = 0; i < c.args.size(); i++) {
             const Type t = expr(*c.args[i]);
@@ -10906,6 +10905,12 @@ struct Checker::Impl {
             noteAskedOf(m, obj);
             if (obj.unknown()) {
                 for (const ExprPtr& a : c.args) expr(*a);
+                return unknownType();
+            }
+            if (withNull(obj, false).kind == Type::Bundle) {
+                // copy() is bundleCall's; nothing else is a bundle's.
+                for (const ExprPtr& a : c.args) expr(*a);
+                report(m, "a bundle has copy(name = value) and +, and is passed with ...: it has no '" + m.name + "'");
                 return unknownType();
             }
             if (obj.kind == Type::Nothing) return obj;

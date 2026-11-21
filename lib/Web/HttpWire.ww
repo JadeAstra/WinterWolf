@@ -1,0 +1,244 @@
+import Crypto.*
+
+// ---- HTTP/1.1 on the wire: messages read and written with limits (networking plan, part 6) ----
+
+// One connection, a server's or a client's: plain, or TLS over the socket.
+class __HttpConnection {
+  val socket : Socket
+  val tls : TlsSocket?
+  val reader : Reader
+  val writer : Writer
+  val input : __HttpInput
+  var lastUsed : float = clock()
+
+  fun init(socket : Socket, tls : TlsSocket? = null) {
+    this.socket = socket
+    this.tls = tls
+    this.reader = tls == null ? socket.reader : tls!!.reader
+    this.writer = tls == null ? socket.writer : tls!!.writer
+    this.input = __HttpInput(reader)
+  }
+
+  fun close() {
+    if (tls != null) { tls!!.close() } else { socket.close() }
+  }
+
+  // A lingering close, as a server ends a connection: closing with what the client sent still
+  // unread (the rest of a body refused as too large, a request after one answered "close")
+  // resets the connection, and the reset can throw away the answer before the client reads it.
+  // So the end is sent, what comes is read and dropped until the client's end (a quarter of a
+  // second, 1 MB at most), and then the socket closed. TLS lingers so itself.
+  fun lingerClose() {
+    if (tls != null) {
+      tls!!.close()
+      return
+    }
+    try {
+      socket.shutdownOutput()
+      socket.readTimeout = 250.milliseconds
+      var drained = 0
+      while (drained < 1048576) {
+        val b = socket.reader.read()
+        if (b == null) { break }
+        drained += b!!.size
+      }
+    } catch (e : IOException) { }
+    socket.close()
+  }
+}
+
+// Bytes from a connection through a buffer of its own: lines with a limit on their length,
+// counts read whole, what is left after a message kept for the next.
+class __HttpInput(private val reader : Reader) {
+  private var held = Bytes(0)
+  private var at = 0
+
+  val buffered : int
+    get() => held.size - at
+
+  // More bytes into the buffer; false at the end.
+  private fun fill() : bool throws IOException {
+    val more = reader.read(65536)
+    if (more == null) { return false }
+    held = at < held.size ? __joined(held, at, more!!) : more!!
+    at = 0
+    return true
+  }
+
+  // The next line without its line end ("\r\n", or "\n" alone), as Latin-1; null at the end
+  // before any byte. An HttpException with `status` where it is longer than `max`.
+  fun readLine(max : int, status : int = 431) : string? throws IOException {
+    var searched = 0
+    while (true) {
+      val i = held.indexOf(10.toByte(), at + searched)
+      if (i >= 0) {
+        if (i - at > max) { throw HttpException("a line longer than $max bytes", status) }
+        var end = i
+        if (end > at and held[end - 1].toInt() == 13) { end-- }
+        val line = held[at..<end].decodeToString(Charset.latin1)
+        at = i + 1
+        return line
+      }
+      searched = held.size - at
+      if (searched > max) { throw HttpException("a line longer than $max bytes", status) }
+      if (!fill()) {
+        if (held.size == at) { return null }
+        throw HttpException("the connection ended inside a line")
+      }
+    }
+  }
+
+  // Exactly `n` bytes. An HttpException where the connection ends first.
+  fun readExactly(n : int) : Bytes throws IOException {
+    if (held.size - at >= n) {
+      val out = held[at..<at + n]
+      at += n
+      return out
+    }
+    // What is held, then the rest read straight into the bytes given back: each byte copied once.
+    val out = Bytes(n)
+    var got = held.size - at
+    out.copyFrom(held, at, 1, 0, 1, got)
+    held = Bytes(0)
+    at = 0
+    while (got < n) {
+      val more = reader.read(n - got)
+      if (more == null) { throw HttpException("the connection ended ${n - got} bytes before the body's end") }
+      out.copyFrom(more!!, 0, 1, got, 1, more!!.size)
+      got += more!!.size
+    }
+    return out
+  }
+
+  // Up to `max` bytes, waiting for some; null at the end.
+  fun readSome(max : int) : Bytes? throws IOException {
+    if (at == held.size and !fill()) { return null }
+    val n = Math.min(max, held.size - at)
+    val out = held[at..<at + n]
+    at += n
+    return out
+  }
+}
+
+// The limits a reader of messages holds to.
+class __HttpLimits(val line : int = 8192, val headerBytes : int = 65536, val headerFields : int = 100, val body : int = 16777216)
+
+// Header fields up to their empty line.
+fun __readHeaders(input : __HttpInput, limits : __HttpLimits) : Headers throws IOException {
+  val headers = Headers()
+  var total = 0
+  while (true) {
+    val line = input.readLine(limits.line, 431)
+    if (line == null) { throw HttpException("the connection ended inside the headers") }
+    if (line!!.isEmpty()) { return headers }
+    total += line!!.size + 2
+    if (total > limits.headerBytes or headers.size >= limits.headerFields) { throw HttpException("headers past the limit (${limits.headerBytes} bytes, ${limits.headerFields} fields)", 431) }
+    if (line!![0] == ' ' or line!![0] == '\t') { throw HttpException("a header folded over lines, which HTTP/1.1 no longer takes") }
+    val colon = line!!.indexOf(':')
+    if (colon <= 0) { throw HttpException("a header line with no name: '${line!!.take(60)}'") }
+    val name = line!![0..<colon]
+    if (!name.all { __isTokenChar(it) }) { throw HttpException("a header name that is not one: '$name'") }
+    val value = line!![colon + 1..].trim()
+    if (value.any { it.code == 0 }) { throw HttpException("a header value holding a NUL") }
+    headers.add(name, value)
+  }
+}
+
+// Content-Length, checked: digits alone; several values only where they are the same.
+fun __contentLength(headers : Headers) : int? throws HttpException {
+  val all = headers.getAll("Content-Length").flatMap { it.split(',') }.map { it.trim() }
+  if (all.isEmpty()) { return null }
+  val first = all[0]
+  if (first.isEmpty() or !first.all { it.isDigit() } or first.size > 15 or all.any { it != first }) {
+    throw HttpException("a Content-Length that is not one: '${headers.getAll("Content-Length").join(", ")}'")
+  }
+  return first.toInt()
+}
+
+// A message's body: by Content-Length, chunked, or to the connection's end where `toEnd` (a
+// response with neither). The framing checked as RFC 9112 6 asks, so that two readers cannot
+// see two messages differently (request smuggling): Transfer-Encoding and Content-Length both
+// refused, a Transfer-Encoding not ending in chunked refused.
+fun __readBody(input : __HttpInput, headers : Headers, limits : __HttpLimits, toEnd : bool) : Bytes throws IOException {
+  val te = headers.getAll("Transfer-Encoding")
+  if (te.isNotEmpty()) {
+    if (headers.contains("Content-Length")) { throw HttpException("both Transfer-Encoding and Content-Length") }
+    val codings = te.flatMap { it.split(',') }.map { it.trim().lower() }.filter { it.isNotEmpty() }
+    if (codings.isEmpty() or codings.last() != "chunked" or codings.dropLast(1).any { it == "chunked" }) {
+      throw HttpException("a Transfer-Encoding not ending in chunked: '${te.join(", ")}'", 501)
+    }
+    if (codings.size > 1) { throw HttpException("a Transfer-Encoding not taken here: '${te.join(", ")}'", 501) }
+    return __readChunked(input, headers, limits, null)
+  }
+  val length = __contentLength(headers)
+  if (length != null) {
+    if (length!! > limits.body) { throw HttpException("a body of $length bytes, more than the limit of ${limits.body}", 413) }
+    return input.readExactly(length!!)
+  }
+  if (!toEnd) { return Bytes(0) }
+  val out = __ByteJoin()
+  var size = 0
+  while (true) {
+    val part = input.readSome(65536)
+    if (part == null) { break }
+    size += part!!.size
+    if (size > limits.body) { throw HttpException("a body of more than the limit of ${limits.body} bytes", 413) }
+    out.bytes(part!!)
+  }
+  return out.toBytes()
+}
+
+// A chunked body; its chunks given to `sink` as they come where there is one (and then the
+// bytes given back are none).
+fun __readChunked(input : __HttpInput, headers : Headers, limits : __HttpLimits, sink : __FileSink?) : Bytes throws IOException {
+  val out = __ByteJoin()
+  var size = 0
+  while (true) {
+    val line = input.readLine(1024, 400)
+    if (line == null) { throw HttpException("the connection ended inside a chunked body") }
+    val hex = line!!.substringBefore(";").trim()
+    if (hex.isEmpty() or hex.size > 12 or !hex.all { __hexValue(it.code) >= 0 }) { throw HttpException("a chunk size that is not one: '${line!!.take(40)}'") }
+    var n = 0
+    for (c in hex) { n = n * 16 + __hexValue(c.code) }
+    if (n == 0) {
+      // Trailer fields, taken into the headers.
+      val trailers = __readHeaders(input, limits)
+      for (p in trailers.pairs) { headers.add(p.first, p.second) }
+      return out.toBytes()
+    }
+    size += n
+    if (size > limits.body) { throw HttpException("a body of more than the limit of ${limits.body} bytes", 413) }
+    val chunk = input.readExactly(n)
+    if (sink != null) { sink!!.take(chunk) } else { out.bytes(chunk) }
+    val end = input.readLine(2, 400)
+    if (end != "") { throw HttpException("a chunk not followed by its line end") }
+  }
+}
+
+// The start line and headers, written as one piece.
+fun __writeHead(writer : Writer, startLine : string, headers : Headers) throws IOException {
+  val out = StringBuilder()
+  out.append(startLine).append("\r\n")
+  for (p in headers.pairs) { out.append(p.first).append(": ").append(p.second).append("\r\n") }
+  out.append("\r\n")
+  writer.write(out.toString().toBytes(Charset.latin1))
+}
+
+// What a Writer over it writes goes out as chunks; closing it ends the body.
+class __ChunkedChannel(private val writer : Writer) : ByteChannel {
+  private var open = true
+  override fun receive(count : int) : Bytes? => null
+  override fun send(data : Bytes) throws IOException {
+    if (data.size == 0) { return }
+    writer.write("${data.size.toString(16)}\r\n".toBytes())
+    writer.write(data)
+    writer.write("\r\n".toBytes())
+  }
+  override fun closeChannel() {
+    if (!open) { return }
+    open = false
+    try { writer.write("0\r\n\r\n".toBytes()) } catch (e : IOException) { }
+  }
+  override val isChannelOpen : bool
+    get() => open
+}

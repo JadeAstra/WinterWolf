@@ -400,6 +400,22 @@ void registerBits(VM& vm) {
         if (!codec::inflate(data.data(), data.size(), out, static_cast<size_t>(limit), error, args[1].truthy())) return vm.str(error);
         return bytesValue(vm, std::move(out));
     });
+    // inflateCounting(bytes, offset, limit): raw deflate data from `offset` expanded, and where
+    // it ended, as [Bytes, end]; or the error as text. For gzip, whose members follow one another.
+    def("inflateCounting", 3, 3, [](VM& vm, int, Value* args) -> Value {
+        const std::vector<uint8_t>& data = bytesOf(vm, args[0]);
+        const int64_t offset = vm.toInt(args[1], "offset");
+        int64_t limit = vm.toInt(args[2], "limit");
+        if (offset < 0 || offset > static_cast<int64_t>(data.size())) throw vm.runtimeError(Thrown::IndexOutOfBoundsException, "offset " + std::to_string(offset) + " out of the bytes");
+        if (limit < 0) limit = INT64_MAX;
+        std::vector<uint8_t> out;
+        std::string error;
+        size_t used = 0;
+        if (!codec::inflate(data.data() + offset, data.size() - static_cast<size_t>(offset), out, static_cast<size_t>(limit), error, true, &used)) return vm.str(error);
+        Value made = bytesValue(vm, std::move(out));
+        TempRoot keep(vm, made);
+        return Value::object(newList(vm, {made, Value::integer(offset + static_cast<int64_t>(used))}));
+    });
     def("deflate", 3, 3, [](VM& vm, int, Value* args) -> Value {
         const std::vector<uint8_t>& data = bytesOf(vm, args[0]);
         const int64_t level = vm.toInt(args[1], "level");

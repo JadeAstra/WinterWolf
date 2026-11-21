@@ -111,6 +111,75 @@ fun Bytes.deflate(level : int = 6, raw : bool = false) : Bytes => __bits.deflate
 // The CRC-32 of the bytes, as PNG, ZIP and gzip have it, carried on from `crc` for data in parts.
 fun Bytes.crc32(crc : int = 0) : int => __bits.crc32(this, crc)
 
+// gzip (RFC 1952): what .gz files and HTTP's "Content-Encoding: gzip" hold, deflate with a
+// header and a CRC-32 after it.
+//
+//   val packed = Gzip.compress(FilePath("log.txt").readBytes())
+//   FilePath("log.txt.gz").writeBytes(packed)
+//   val back = Gzip.decompress(packed)
+object Gzip {
+  // The bytes as one gzip member, deflated at `level` (0 to 9, as Bytes.deflate).
+  fun compress(data : Bytes, level : int = 6) : Bytes {
+    val packed = data.deflate(level, true)
+    val out = Bytes(10 + packed.size + 8)
+    out[0] = 0x1f.toByte()
+    out[1] = 0x8b.toByte()
+    out[2] = 8.toByte()      // deflate
+    out[9] = 255.toByte()    // the system it was made on: unknown
+    out.copyFrom(packed, 0, 1, 10, 1, packed.size)
+    out.putUint32(10 + packed.size, data.crc32() & 0xFFFFFFFF, false)
+    out.putUint32(14 + packed.size, data.size & 0xFFFFFFFF, false)
+    return out
+  }
+
+  // What gzip data holds: one member, or several one after another (as `cat a.gz b.gz` makes),
+  // joined; its header's name, comment and extra fields passed over. No more than `limit` bytes.
+  // A DataFormatException where it is not gzip, is damaged (its CRC-32 or size not right), or
+  // expands past the limit.
+  fun decompress(data : Bytes, limit : int? = null) : Bytes throws DataFormatException {
+    val parts : open List<Bytes> = []
+    var at = 0
+    var total = 0
+    while (at < data.size) {
+      if (data.size - at < 18 or data[at].toInt() != 0x1f or data[at + 1].toInt() != 0x8b) { throw DataFormatException("not gzip data (no 1f 8b at $at)") }
+      if (data[at + 2].toInt() != 8) { throw DataFormatException("gzip of a method not deflate (${data[at + 2].toInt()})") }
+      val flags = data[at + 3].toInt()
+      var p = at + 10
+      if ((flags & 4) != 0) {
+        if (p + 2 > data.size) { throw DataFormatException("gzip cut short in its header") }
+        p += 2 + (data[p].toInt() | (data[p + 1].toInt() << 8))
+      }
+      for (bit in [8, 16]) {
+        if ((flags & bit) != 0) {
+          while (p < data.size and data[p].toInt() != 0) { p++ }
+          p++
+        }
+      }
+      if ((flags & 2) != 0) { p += 2 }
+      if (p > data.size) { throw DataFormatException("gzip cut short in its header") }
+      // The deflate data, and where it ends: the member's CRC-32 and size follow it.
+      val reader = __bits.inflateCounting(data, p, limit == null ? -1 : limit!! - total)
+      if (reader is string) { throw DataFormatException(reader as string) }
+      val made = (reader as List<any>)[0] as Bytes
+      val end = (reader as List<any>)[1] as int
+      if (end + 8 > data.size) { throw DataFormatException("gzip cut short in its trailer") }
+      if (data.uint32(end, false) != (made.crc32() & 0xFFFFFFFF)) { throw DataFormatException("gzip data whose CRC-32 is not right (damaged)") }
+      if (data.uint32(end + 4, false) != (made.size & 0xFFFFFFFF)) { throw DataFormatException("gzip data whose size is not right (damaged)") }
+      parts.add(made)
+      total += made.size
+      at = end + 8
+    }
+    if (parts.size == 1) { return parts[0] }
+    val out = Bytes(total)
+    var w = 0
+    for (part in parts) {
+      out.copyFrom(part, 0, 1, w, 1, part.size)
+      w += part.size
+    }
+    return out
+  }
+}
+
 // The Adler-32 of the bytes, as zlib has it, carried on from `adler` for data in parts.
 fun Bytes.adler32(adler : int = 1) : int => __bits.adler32(this, adler)
 
@@ -119,6 +188,7 @@ external object __bits {
   fun huffman(lengths : List<int>, symbols : List<int>?) : any
   fun decode(table : any, bytes : Bytes, position : int, msbFirst : bool) : int
   fun inflate(bytes : Bytes, raw : bool, limit : int) : any
+  fun inflateCounting(bytes : Bytes, offset : int, limit : int) : any
   fun deflate(bytes : Bytes, level : int, raw : bool) : Bytes
   fun crc32(bytes : Bytes, crc : int) : int
   fun adler32(bytes : Bytes, adler : int) : int
