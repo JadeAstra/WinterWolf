@@ -5,7 +5,7 @@ import Crypto.*
 //   val socket = WebSocket.connect("wss://example.com/chat")
 //   socket.send("hello")
 //   for (message in socket) { print(message.text) }    // until the other side closes
-//   socket.close()                                     // or closeWith(code, reason)
+//   socket.close()                                     // or close(code, reason)
 //
 //   router.webSocket("/echo") { socket, request ->
 //     for (message in socket) { socket.send(message.text ?: "") }
@@ -101,7 +101,7 @@ class WebSocket : AutoCloseable {
           // The other side gone.
         } catch (e : Exception) {
           Program.errors.println("WebSocket ${request.url.requestTarget}: $e")
-          socket.closeWith(1011, "internal error")
+          socket.close(1011, "internal error")
         } finally {
           socket.close()
         }
@@ -174,15 +174,15 @@ class WebSocket : AutoCloseable {
   // For a for: each message until the other side closes.
   fun iterator() : __WebSocketMessages => __WebSocketMessages(this)
 
-  // Closes normally (1000): closeWith(1000).
+  // Closes normally (1000): close(1000).
   override fun close() {
-    closeWith(1000)
+    close(1000)
   }
 
   // Starts the closing handshake with `code` (1000 normal, 1001 going away, 1008 policy, 1011
   // the server's own error, 3000 to 4999 the application's) and `reason`, waits a little for the
   // other side's close, and closes the connection. Closing again does nothing.
-  fun closeWith(code : int, reason : string = "") {
+  fun close(code : int, reason : string = "") {
     if ((code < 1000 or code > 1011 or code == 1004 or code == 1005 or code == 1006) and (code < 3000 or code > 4999)) {
       throw IllegalArgumentException("$code is not a close code to send (1000 to 1003, 1007 to 1011, 3000 to 4999)")
     }

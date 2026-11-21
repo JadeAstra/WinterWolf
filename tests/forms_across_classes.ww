@@ -1,0 +1,57 @@
+// A method whose name has several forms (D56) in one class and one form in the class above it:
+// the form above keeps its name, so classes compiled with the class above, in the standard
+// library or in another library, agree with every program, whatever forms it adds below
+// (o-forms-across-units). Errors when a class leaves out a form an interface asks for are in
+// error_form_left_out.ww.
+
+// AutoCloseable (compiled with the standard library) has close() alone; one class adds a form.
+class Plain : AutoCloseable { override fun close() { print("plain closed") } }
+class WithArgs : AutoCloseable {
+  override fun close() { close(1000) }
+  fun close(code : int, reason : string = "") { print("closed with $code '$reason'") }
+}
+Plain().close()                                       // expect: plain closed
+WithArgs().close()                                    // expect: closed with 1000 ''
+WithArgs().close(1001, "bye")                         // expect: closed with 1001 'bye'
+val things : List<AutoCloseable> = [Plain(), WithArgs()]
+for (t in things) { t.close() }
+// expect: plain closed
+// expect: closed with 1000 ''
+val anything : any = WithArgs()
+(anything as WithArgs).close(5)                       // expect: closed with 5 ''
+WithArgs().use { print("in use") }
+// expect: in use
+// expect: closed with 1000 ''
+
+// Through a type parameter: called by the name alone, the form chosen as the program runs.
+fun <T : AutoCloseable> closeIt(x : T) { x.close() }
+closeIt(Plain())                                      // expect: plain closed
+closeIt(WithArgs())                                   // expect: closed with 1000 ''
+
+// A class above with one form, one below adding a form, one further down overriding the first.
+class A { fun f() : string => "A.f()" }
+class B : A { fun f(x : int) : string => "B.f($x)" }
+class C : B { override fun f() : string => "C.f()" }
+val a : A = C()
+val b : B = B()
+val c = C()
+print(a.f(), b.f(), b.f(2), c.f(), c.f(3))            // expect: C.f() A.f() B.f(2) C.f() B.f(3)
+
+// Two interfaces, each with one form of a name, and a class with both.
+interface I1 { fun g() : string }
+interface I2 { fun g(x : int) : string }
+class D : I1, I2 {
+  override fun g() : string => "g()"
+  override fun g(x : int) : string => "g($x)"
+}
+val i1 : I1 = D()
+val i2 : I2 = D()
+print(i1.g(), i2.g(7), D().g(), D().g(8))             // expect: g() g(7) g() g(8)
+
+// Two interfaces asking for the same form: one form, under the name alone.
+interface Named { fun name() : string }
+interface Titled { fun name() : string }
+class Book : Named, Titled { override fun name() : string => "book" }
+val named : Named = Book()
+val titled : Titled = Book()
+print(named.name(), titled.name())                    // expect: book book

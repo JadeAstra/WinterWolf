@@ -24,6 +24,7 @@
 
 #include "builtins.h"
 #include "charset.h"
+#include "fmath.h"
 #include "host.h"
 #include "vm.h"
 
@@ -869,7 +870,7 @@ void registerNumberMethods(VM& vm) {
 
     vm.defineMethod(T, "pow", 1, 1, [](VM& vm, Value self, int, Value* args) -> Value {
         if (self.isInt() && args[0].isInt() && args[0].as.i >= 0) return Value::integer(integerPower(vm, self.as.i, args[0].as.i));
-        return Value::number(std::pow(self.toDouble(), vm.toNumber(args[0], "exponent")));
+        return Value::number(fmath::pow(self.toDouble(), vm.toNumber(args[0], "exponent")));
     });
 
     // The remainder that is never negative for a positive divisor: (-1).mod(5) is 4.

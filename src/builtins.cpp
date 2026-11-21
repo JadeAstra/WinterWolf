@@ -37,6 +37,7 @@ extern char** environ;
 
 #include "builtins.h"
 #include "charset.h"
+#include "fmath.h"
 #include "run.h"
 #include "sandbox.h"
 #include "vm.h"
@@ -614,36 +615,32 @@ void registerMath(VM& vm) {
         return Value::number(FN(vm.toNumber(args[0], "Math." NAME "() argument"))); \
     })
     WW_MATH_UNARY("sqrt", std::sqrt);
-    WW_MATH_UNARY("sin", std::sin);
-    WW_MATH_UNARY("cos", std::cos);
-    WW_MATH_UNARY("tan", std::tan);
-    WW_MATH_UNARY("ln", std::log);
-    WW_MATH_UNARY("exp", std::exp);
-    WW_MATH_UNARY("log10", std::log10);
-    WW_MATH_UNARY("log2", std::log2);
-    WW_MATH_UNARY("asin", std::asin);
-    WW_MATH_UNARY("acos", std::acos);
-    WW_MATH_UNARY("atan", std::atan);
+    WW_MATH_UNARY("sin", fmath::sin);
+    WW_MATH_UNARY("cos", fmath::cos);
+    WW_MATH_UNARY("tan", fmath::tan);
+    WW_MATH_UNARY("ln", fmath::log);
+    WW_MATH_UNARY("exp", fmath::exp);
+    WW_MATH_UNARY("log10", fmath::log10);
+    WW_MATH_UNARY("log2", fmath::log2);
+    WW_MATH_UNARY("asin", fmath::asin);
+    WW_MATH_UNARY("acos", fmath::acos);
+    WW_MATH_UNARY("atan", fmath::atan);
     WW_MATH_UNARY("trunc", std::trunc);
-    WW_MATH_UNARY("sinh", std::sinh);
-    WW_MATH_UNARY("cosh", std::cosh);
-    WW_MATH_UNARY("tanh", std::tanh);
-    WW_MATH_UNARY("asinh", std::asinh);
-    WW_MATH_UNARY("acosh", std::acosh);
-    WW_MATH_UNARY("atanh", std::atanh);
-    WW_MATH_UNARY("expm1", std::expm1);
-    WW_MATH_UNARY("log1p", std::log1p);
+    WW_MATH_UNARY("sinh", fmath::sinh);
+    WW_MATH_UNARY("cosh", fmath::cosh);
+    WW_MATH_UNARY("tanh", fmath::tanh);
+    WW_MATH_UNARY("asinh", fmath::asinh);
+    WW_MATH_UNARY("acosh", fmath::acosh);
+    WW_MATH_UNARY("atanh", fmath::atanh);
+    WW_MATH_UNARY("expm1", fmath::expm1);
+    WW_MATH_UNARY("log1p", fmath::log1p);
 #undef WW_MATH_UNARY
 
     // The logarithm in a base given, as Kotlin's log(x, base): NaN for a base of 1 or not above 0.
     // Bases 2 and 10 by their own functions, which are exact at their powers: log(1000, 10) is 3.0.
     def("log", 2, 2, [](VM& vm, int, Value* args) -> Value {
         const double x = vm.toNumber(args[0], "Math.log() argument");
-        const double base = vm.toNumber(args[1], "Math.log() base");
-        if (base <= 0.0 || base == 1.0) return Value::number(std::nan(""));
-        if (base == 2.0) return Value::number(std::log2(x));
-        if (base == 10.0) return Value::number(std::log10(x));
-        return Value::number(std::log(x) / std::log(base));
+        return Value::number(fmath::logBase(x, vm.toNumber(args[1], "Math.log() base")));
     });
 
     def("abs", 1, 1, [](VM& vm, int, Value* args) -> Value {
@@ -696,7 +693,7 @@ void registerMath(VM& vm) {
         args[1] = asWideInt(args[1]);
         if (args[0].isInt() && args[1].isInt() && args[1].as.i >= 0)
             return Value::integer(integerPower(vm, args[0].as.i, args[1].as.i));
-        return Value::number(std::pow(vm.toNumber(args[0], "Math.pow() base"), vm.toNumber(args[1], "Math.pow() exponent")));
+        return Value::number(fmath::pow(vm.toNumber(args[0], "Math.pow() base"), vm.toNumber(args[1], "Math.pow() exponent")));
     });
 
     // In a sandbox, its own randomness, from a fixed seed (M6.6.2).
@@ -734,10 +731,10 @@ void registerMath(VM& vm) {
     });
 
     def("atan2", 2, 2, [](VM& vm, int, Value* args) -> Value {
-        return Value::number(std::atan2(vm.toNumber(args[0], "Math.atan2() argument"), vm.toNumber(args[1], "Math.atan2() argument")));
+        return Value::number(fmath::atan2(vm.toNumber(args[0], "Math.atan2() argument"), vm.toNumber(args[1], "Math.atan2() argument")));
     });
     def("hypot", 2, 2, [](VM& vm, int, Value* args) -> Value {
-        return Value::number(std::hypot(vm.toNumber(args[0], "Math.hypot() argument"), vm.toNumber(args[1], "Math.hypot() argument")));
+        return Value::number(fmath::hypot(vm.toNumber(args[0], "Math.hypot() argument"), vm.toNumber(args[1], "Math.hypot() argument")));
     });
     def("sign", 1, 1, [](VM& vm, int, Value* args) -> Value {
         args[0] = asWideInt(args[0]);   // a byte is an int here

@@ -664,6 +664,8 @@ external fun Number.isFinite() : bool
 // -- Math --
 
 // The mathematical functions. `pi` and `e` are constants, written in place of each read.
+// The functions of floats are WinterWolf's own, not the system's: the same bits on every system
+// and processor, each within an ulp of the true value and almost always the nearest float.
 external object Math {
   // The ratio of a circle's circumference to its diameter.
   const pi = 3.141592653589793

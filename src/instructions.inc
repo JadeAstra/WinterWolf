@@ -1782,6 +1782,11 @@ CASE(MethodForms) {
             }
             if (method == nullptr || !method->isObjType(ObjType::Closure)) {
                 if (cls->isAbstract) continue;  // one left to the classes below
+                // A form an interface or abstract class asks for: said as the class's own check says it.
+                for (const auto& [wanted, by] : cls->required)
+                    if (wanted == name || wanted == methodName)
+                        throw runtimeError(Thrown::IllegalStateException, "class " + cls->name->utf8() + " must have '" + name->utf8() +
+                                           "', which " + (by->isInterface ? "interface " : "abstract class ") + by->name->utf8() + " requires");
                 throw runtimeError(Thrown::UnsupportedOperationException, "class " + cls->name->utf8() + " has no form " + name->utf8());
             }
             forms.push_back(asClosure(*method));
@@ -2467,14 +2472,9 @@ CASE(CheckOverride) {
     // What the class gets from above under this name: a method for a method,
     // a field or property for a field or property; or something an interface
     // or an abstract class asks for, which either kind supplies.
+    // (A form of a name with several, D56, is looked for by the name the class
+    // declaring it first gives it: the name alone where that class has the one form.)
     auto has = [&](const ObjClass* from) {
-        if (!property && from->methods.find(name) == nullptr && name->utf8().find('(') != std::string::npos) {
-            // A form of a name with several (D56): the one above may have been
-            // compiled where the name had one form, under the name alone.
-            const Value* plain = from->methods.find(intern(name->utf8().substr(0, name->utf8().find('('))));
-            return plain != nullptr && plain->isObjType(ObjType::Closure) && !asClosure(*plain)->proto->chooser &&
-                   asClosure(*plain)->proto->signature.empty();
-        }
         if (!property) return from->methods.find(name) != nullptr;
         return from->getters.find(name) != nullptr || from->setters.find(name) != nullptr ||
                from->declaredIndex.find(name) != nullptr;

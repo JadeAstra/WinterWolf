@@ -10,7 +10,7 @@ val router = HttpRouter()
   .webSocket("/echo", ["chat", "superchat"]) { socket, request ->
     for (m in socket) {
       if (m.isText and m.text == "close please") {
-        socket.closeWith(4000, "asked")
+        socket.close(4000, "asked")
       } else if (m.isText) {
         socket.send("echo: ${m.text!!}")
       } else {

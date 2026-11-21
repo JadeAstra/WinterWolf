@@ -1,6 +1,7 @@
 // Turning an outline into a picture: see raster.h.
 
 #include "raster.h"
+#include "../fmath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -182,7 +183,7 @@ void flatten(const Path& path, float fineness, Line&& line) {
                 break;
             case Path::Quad: {
                 const float cx = pt[0], cy = pt[1], ex = pt[2], ey = pt[3];
-                const float bend = std::hypot(x - 2 * cx + ex, y - 2 * cy + ey);
+                const float bend = static_cast<float>(fmath::hypot(x - 2 * cx + ex, y - 2 * cy + ey));
                 const int pieces = std::clamp(static_cast<int>(std::ceil(std::sqrt(bend * 3.0f * fineness))), 1, static_cast<int>(32 * most));
                 float px = x, py = y;
                 for (int i = 1; i <= pieces; i++) {
@@ -200,7 +201,7 @@ void flatten(const Path& path, float fineness, Line&& line) {
             }
             case Path::Cubic: {
                 const float ax = pt[0], ay = pt[1], bx = pt[2], by = pt[3], ex = pt[4], ey = pt[5];
-                const float bend = std::max(std::hypot(x - 2 * ax + bx, y - 2 * ay + by), std::hypot(ax - 2 * bx + ex, ay - 2 * by + ey));
+                const float bend = static_cast<float>(std::max(fmath::hypot(x - 2 * ax + bx, y - 2 * ay + by), fmath::hypot(ax - 2 * bx + ex, ay - 2 * by + ey)));
                 const int pieces = std::clamp(static_cast<int>(std::ceil(std::sqrt(bend * 4.5f * fineness))), 1, static_cast<int>(48 * most));
                 float px = x, py = y;
                 for (int i = 1; i <= pieces; i++) {

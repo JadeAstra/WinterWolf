@@ -184,10 +184,16 @@ public:
     // parent's, which it starts with; 0 for any other class.
     size_t inheritedDataFields(const ClassStmt& cls);
 
-    // For a method whose name has several forms among the classes it is related to: the
-    // declaration, as high up as it goes, of the form it is (the one it overrides, or itself),
-    // whose signature it is known by when the program runs. Null where the name has one form.
+    // For a method whose name has several forms in the class declaring it (its own and those it
+    // inherits): the declaration, as high up as it goes, of the form it is (the one it
+    // overrides, or itself), whose signature it is known by there when the program runs. Null
+    // where that class has the one form. What is below the class never changes it, so every
+    // unit compiled with the class names it the same (o-forms-across-units).
     const FunctionDecl* formRoot(const FunctionDecl& method);
+
+    // The declaration, as high up as it goes, of the form a method is, whatever the classes
+    // have: for a call the checker chose a form for, on a receiver with several.
+    const FunctionDecl* calledRoot(const FunctionDecl& method);
 
     // The forms of a method name a class has, its own and those it inherits, by their roots;
     // empty where the name has one form.

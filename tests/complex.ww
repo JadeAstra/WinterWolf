@@ -21,7 +21,7 @@ print(z.pow(0.5), z.pow(Complex.of(1, 1)), Complex.zero.pow(Complex.of(2)), Comp
 
 // ---- Functions ----
 print(z.sqrt(), z.exp(), z.log())   // expect: 2.0+1.0i -13.128783081462158-15.200784463067954i 1.6094379124341003+0.9272952180016122i
-print(z.sin(), z.tan(), z.atanh())   // expect: 3.853738037919377-27.016813258003936i -0.00018734620462947845+0.9993559873814731i 0.1175009073114339+1.4099210495965755i
+print(z.sin(), z.tan(), z.atanh())   // expect: 3.853738037919377-27.016813258003936i -0.00018734620462947845+0.9993559873814731i 0.11750090731143388+1.4099210495965755i
 // The cuts: the sign of a zero imaginary part says which side.
 print(Complex.of(-4).sqrt(), Complex(-4.0, -0.0).sqrt(), Complex.of(-1).log(), Complex(-1.0, -0.0).log())   // expect: 0.0+2.0i 0.0-2.0i 0.0+3.141592653589793i 0.0-3.141592653589793i
 print(Complex.of(2).asin(), Complex(2.0, -0.0).asin(), Complex.of(2).acos())   // expect: 1.5707963267948966+1.3169578969248166i 1.5707963267948966-1.3169578969248166i 0.0-1.3169578969248166i

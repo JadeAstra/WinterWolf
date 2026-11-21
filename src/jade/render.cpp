@@ -1,6 +1,7 @@
 // Drawing with the graphics card: see render.h.
 
 #include "render.h"
+#include "../fmath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -557,7 +558,7 @@ void Renderer::line(float x1, float y1, float x2, float y2, float width, uint32_
     y1 += 0.5f;
     x2 += 0.5f;
     y2 += 0.5f;
-    const float dx = x2 - x1, dy = y2 - y1, length = std::hypot(dx, dy);
+    const float dx = x2 - x1, dy = y2 - y1, length = static_cast<float>(fmath::hypot(dx, dy));
     const float half = std::max(width, 1.0f) / 2;
     push((x1 + x2) / 2, (y1 + y2) / 2, length / 2 + half, half, 1, 0, 0, 1, rgba);
     Instance& made = batch_.back();

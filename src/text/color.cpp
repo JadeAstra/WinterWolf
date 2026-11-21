@@ -1,6 +1,7 @@
 // Colour glyphs: see color.h.
 
 #include "color.h"
+#include "../fmath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -372,7 +373,7 @@ struct ColorTables::Painter {
                     }
                     if (r0 + tValue * dr < 0) continue;
                 } else {
-                    float angle = std::atan2(fy - y0, fx - x0) / kPi;  // in half turns, anticlockwise from the right
+                    float angle = static_cast<float>(fmath::atan2(fy - y0, fx - x0)) / kPi;  // in half turns, anticlockwise from the right
                     if (angle < 0) angle += 2;
                     if (endAngle == startAngle) continue;
                     tValue = (angle - startAngle) / (endAngle - startAngle);
@@ -444,14 +445,15 @@ struct ColorTables::Painter {
             }
             case 24: case 25: case 26: case 27: {  // turned
                 const float angle = r().f2dot14(at + 4) * kPi;
-                Affine local{std::cos(angle), std::sin(angle), -std::sin(angle), std::cos(angle), 0, 0};
+                const float cosA = static_cast<float>(fmath::cos(angle)), sinA = static_cast<float>(fmath::sin(angle));
+                Affine local{cosA, sinA, -sinA, cosA, 0, 0};
                 if (format >= 26) local = local.around(r().i16(at + 6), r().i16(at + 8));
                 paint(child(1), transform.after(local), target);
                 return;
             }
             case 28: case 29: case 30: case 31: {  // slanted
                 const float xAngle = r().f2dot14(at + 4) * kPi, yAngle = r().f2dot14(at + 6) * kPi;
-                Affine local{1, std::tan(yAngle), -std::tan(xAngle), 1, 0, 0};
+                Affine local{1, static_cast<float>(fmath::tan(yAngle)), -static_cast<float>(fmath::tan(xAngle)), 1, 0, 0};
                 if (format >= 30) local = local.around(r().i16(at + 8), r().i16(at + 10));
                 paint(child(1), transform.after(local), target);
                 return;

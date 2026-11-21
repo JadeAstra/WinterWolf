@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "builtins.h"
+#include "fmath.h"
 #include "vm.h"
 
 namespace ww {
@@ -512,14 +513,14 @@ bool quickUnary(VM& vm, int op, const View& a, const View& out, double p, double
         case 0: WW_UNARY(-x)
         case 1: WW_UNARY(std::fabs(x))
         case 2: WW_UNARY(std::sqrt(x))
-        case 3: WW_UNARY(std::exp(x))
-        case 4: WW_UNARY(std::log(x))
-        case 5: WW_UNARY(std::log(x) / std::log(p))
-        case 6: WW_UNARY(std::log10(x))
-        case 7: WW_UNARY(std::pow(x, p))
-        case 8: WW_UNARY(std::sin(x))
-        case 9: WW_UNARY(std::cos(x))
-        case 10: WW_UNARY(std::tan(x))
+        case 3: WW_UNARY(fmath::exp(x))
+        case 4: WW_UNARY(fmath::log(x))
+        case 5: WW_UNARY(fmath::logBase(x, p))
+        case 6: WW_UNARY(fmath::log10(x))
+        case 7: WW_UNARY(fmath::pow(x, p))
+        case 8: WW_UNARY(fmath::sin(x))
+        case 9: WW_UNARY(fmath::cos(x))
+        case 10: WW_UNARY(fmath::tan(x))
         case 11: WW_UNARY(std::floor(x))
         case 12: WW_UNARY(std::ceil(x))
         case 13: WW_UNARY(std::round(x))
@@ -683,14 +684,14 @@ void registerTensor(VM& vm) {
                 case 0: z = -x; break;
                 case 1: z = std::fabs(x); break;
                 case 2: z = std::sqrt(x); break;
-                case 3: z = std::exp(x); break;
-                case 4: z = std::log(x); break;
-                case 5: z = std::log(x) / std::log(p); break;
-                case 6: z = std::log10(x); break;
-                case 7: z = std::pow(x, p); break;
-                case 8: z = std::sin(x); break;
-                case 9: z = std::cos(x); break;
-                case 10: z = std::tan(x); break;
+                case 3: z = fmath::exp(x); break;
+                case 4: z = fmath::log(x); break;
+                case 5: z = fmath::logBase(x, p); break;
+                case 6: z = fmath::log10(x); break;
+                case 7: z = fmath::pow(x, p); break;
+                case 8: z = fmath::sin(x); break;
+                case 9: z = fmath::cos(x); break;
+                case 10: z = fmath::tan(x); break;
                 case 11: z = std::floor(x); break;
                 case 12: z = std::ceil(x); break;
                 case 13: z = std::round(x); break;

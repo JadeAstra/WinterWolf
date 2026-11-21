@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "builtins.h"
+#include "fmath.h"
 #include "vm.h"
 #include "vp8_tables.h"
 
@@ -1327,7 +1328,7 @@ private:
         static const auto basis = [] {
             std::array<double, 16> c{};
             for (int k = 0; k < 4; k++)
-                for (int n = 0; n < 4; n++) c[static_cast<size_t>(k * 4 + n)] = (k == 0 ? 0.5 : std::sqrt(0.5)) * std::cos((2 * n + 1) * k * 3.14159265358979323846 / 8);
+                for (int n = 0; n < 4; n++) c[static_cast<size_t>(k * 4 + n)] = (k == 0 ? 0.5 : std::sqrt(0.5)) * fmath::cos((2 * n + 1) * k * 3.14159265358979323846 / 8);
             return c;
         }();
         double tmp[16];

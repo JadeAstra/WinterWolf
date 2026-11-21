@@ -1,0 +1,48 @@
+// WinterWolf's own math functions (src/fmath.cpp, o-complex-linux): the same bits on every system,
+// each result here the double nearest the true value (worked out by tools/fmath/check.py's
+// decimal arithmetic). tools/fmath/check.py measures them over many more inputs.
+
+print(Math.sin(1.0), Math.sin(0.5), Math.sin(3.0), Math.sin(100.0), Math.sin(1e+22), Math.sin(1e+300), Math.sin(-2.5), Math.sin(1e-10))
+// expect: 0.8414709848078965 0.479425538604203 0.1411200080598672 -0.5063656411097588 -0.8522008497671888 -0.8178819121159085 -0.5984721441039565 1e-10
+print(Math.cos(1.0), Math.cos(0.5), Math.cos(3.0), Math.cos(100.0), Math.cos(1e+22), Math.cos(1e+300), Math.cos(-2.5))
+// expect: 0.5403023058681398 0.8775825618903728 -0.9899924966004454 0.8623188722876839 0.523214785395139 -0.5753861119575491 -0.8011436155469337
+print(Math.tan(1.0), Math.tan(0.5), Math.tan(1.5707963267948966), Math.tan(100.0), Math.tan(1e+22), Math.tan(-2.5))
+// expect: 1.5574077246549023 0.5463024898437905 16331239353195370.0 -0.5872139151569291 -1.6287782256068988 0.7470222972386603
+print(Math.asin(0.5), Math.asin(0.9999), Math.asin(-0.3), Math.asin(1e-09))
+// expect: 0.5235987755982989 1.5566540733173846 -0.3046926540153975 1e-09
+print(Math.acos(0.5), Math.acos(0.9999), Math.acos(-0.3), Math.acos(-0.99))
+// expect: 1.0471975511965979 0.014142253477512098 1.8754889808102941 3.000053180265366
+print(Math.atan(0.5), Math.atan(2.0), Math.atan(-100.0), Math.atan(10000000000.0))
+// expect: 0.4636476090008061 1.1071487177940904 -1.5607966601082315 1.5707963266948965
+print(Math.exp(1.0), Math.exp(-1.0), Math.exp(0.5), Math.exp(10.0), Math.exp(700.0), Math.exp(-700.0), Math.exp(1e-05))
+// expect: 2.718281828459045 0.36787944117144233 1.6487212707001282 22026.465794806718 1.0142320547350045e+304 9.85967654375977e-305 1.00001000005
+print(Math.expm1(1e-05), Math.expm1(-0.5), Math.expm1(2.0))
+// expect: 1.0000050000166668e-05 -0.3934693402873666 6.38905609893065
+print(Math.ln(2.0), Math.ln(10.0), Math.ln(0.1), Math.ln(1e+300), Math.ln(1.0000001), Math.ln(7e-310))
+// expect: 0.6931471805599453 2.302585092994046 -2.3025850929940455 690.7755278982137 9.999999505838704e-08 -711.8554686790989
+print(Math.log2(3.0), Math.log2(1e+100), Math.log2(0.75))
+// expect: 1.584962500721156 332.19280948873626 -0.4150374992788438
+print(Math.log10(2.0), Math.log10(1e-05), Math.log10(12345.678))
+// expect: 0.3010299956639812 -5.0 4.091514945509202
+print(Math.log1p(1e-08), Math.log1p(0.5), Math.log1p(-0.5))
+// expect: 9.999999950000001e-09 0.4054651081081644 -0.6931471805599453
+print(Math.sinh(0.5), Math.sinh(1.0), Math.sinh(5.0), Math.sinh(-20.0))
+// expect: 0.5210953054937474 1.1752011936438014 74.20321057778875 -242582597.70489514
+print(Math.cosh(0.5), Math.cosh(1.0), Math.cosh(5.0), Math.cosh(-20.0))
+// expect: 1.1276259652063807 1.5430806348152437 74.20994852478785 242582597.70489514
+print(Math.tanh(0.5), Math.tanh(1.0), Math.tanh(-3.0), Math.tanh(0.001))
+// expect: 0.46211715726000974 0.7615941559557649 -0.9950547536867305 0.0009999996666668
+print(Math.asinh(0.5), Math.asinh(2.0), Math.asinh(-100000.0))
+// expect: 0.48121182505960347 1.4436354751788103 -12.206072645555174
+print(Math.acosh(1.5), Math.acosh(2.0), Math.acosh(100000.0))
+// expect: 0.9624236501192069 1.3169578969248168 12.206072645505174
+print(Math.atanh(0.5), Math.atanh(-0.9), Math.atanh(0.001))
+// expect: 0.5493061443340549 -1.4722194895832204 0.0010000003333335333
+print(Math.pow(2.0, 0.5), Math.pow(10.0, -3.0), Math.pow(1.0001, 10000.0), Math.pow(3.7, 2.9), Math.pow(0.5, 100.5), Math.pow(-2.0, 3.0))
+// expect: 1.4142135623730951 0.001 2.7181459268249255 44.44112044491851 5.578088954947358e-31 -8.0
+print(Math.atan2(1.0, 2.0), Math.atan2(-1.0, -2.0), Math.atan2(3.0, -0.5), Math.atan2(1e-05, 100000.0))
+// expect: 0.4636476090008061 -2.677945044588987 1.7359450042095235 1e-10
+print(Math.hypot(3.0, 4.0), Math.hypot(1e+200, 1e+200), Math.hypot(1.5, 2.5))
+// expect: 5.0 1.414213562373095e+200 2.9154759474226504
+print(Math.log(100.0, 3.0), Math.log(10000000000.0, 7.0), Math.log(2.0, 0.5))
+// expect: 4.191806548578769 11.832946624549383 -1.0

@@ -17,6 +17,7 @@
 #include <memory>
 
 #include "../builtins.h"
+#include "../fmath.h"
 #include "../sandbox.h"
 #include "../vm.h"
 #include "platform.h"
@@ -788,7 +789,7 @@ void registerJade(VM& vm) {
             int64_t tx, ty, tw, th, depth;
             tile(t, tx, ty, tw, th, depth);
             if (tw <= 0 || th <= 0) continue;
-            const double bump = kHeight * std::pow(kScaleDown, static_cast<double>(depth));
+            const double bump = kHeight * fmath::pow(kScaleDown, static_cast<double>(depth));
             // d/dv of 4h (v - lo)(hi - v) / (hi - lo), in the running sums, along each axis.
             const double slopeX = 4.0 * bump / static_cast<double>(tw), slopeY = 4.0 * bump / static_cast<double>(th);
             const double ax = -slopeX, bx = slopeX * static_cast<double>(2 * tx + tw);

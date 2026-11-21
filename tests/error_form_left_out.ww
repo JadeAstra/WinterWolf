@@ -1,0 +1,7 @@
+// A class whose close has parameters, even all with defaults, does not have AutoCloseable's
+// close(): another form of the name (D56, o-forms-across-units).
+class Wrong : AutoCloseable {
+  fun close(code : int = 1000, reason : string = "") { print("closed", code) }
+}
+Wrong().close()
+// expect runtime error: class Wrong must have 'close()', which interface AutoCloseable requires

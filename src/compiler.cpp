@@ -2502,6 +2502,15 @@ private:
         return root != nullptr ? method.name + signatureText(*root) : method.name;
     }
 
+    // The name a method's form is known by in the class that first declares it, where an
+    // override looks for what it replaces: the name alone where that class has the one form,
+    // though the class below, with more, keeps it under the signature's name too.
+    std::string nameAbove(const FunctionDecl& method) {
+        const FunctionDecl* top = session_.checker->calledRoot(method);
+        if (top == nullptr) return method.name;
+        return session_.checker->formRoot(*top) != nullptr ? method.name + signatureText(*top) : method.name;
+    }
+
     // How many static methods of a name a class declares: its forms, statics being nobody else's.
     static int staticForms(const ClassStmt& cls, const std::string& name) {
         int count = 0;
@@ -2522,7 +2531,9 @@ private:
         if (const TypeAnnotation* receiver = session_.checker->extensionReceiver(*chosen))
             return name + "[" + annotationText(*receiver) + "]" + signatureText(*chosen) + kLibraryMark +
                    session_.checker->extensionLibraryKey(*chosen);
-        const FunctionDecl* root = session_.checker->formRoot(*chosen);
+        // Chosen among several forms the receiver has: every class it can be keeps each of them
+        // under the name with its signature.
+        const FunctionDecl* root = session_.checker->calledRoot(*chosen);
         return root != nullptr ? name + signatureText(*root) : name;
     }
 
@@ -5228,7 +5239,7 @@ private:
             const bool isAccessor = method->accessor != FunctionDecl::Accessor::None;
             if (!method->isStatic && !method->isAbstract && !method->generated && (isAccessor || method->name != "init")) {
                 line_ = method->line;
-                emitOverrideCheck(s, runtimeName, method->isOverride, isAccessor);
+                emitOverrideCheck(s, isAccessor ? runtimeName : nameAbove(*method), method->isOverride, isAccessor);
             }
             if (method->isAbstract) {
                 // No body: the class that implements the interface, or extends the abstract
@@ -8101,7 +8112,7 @@ private:
         const FunctionDecl* chosen = session_.checker->chosenOperator(at, several);
         if (chosen == nullptr) return "";
         if (!several) return op;
-        const FunctionDecl* root = session_.checker->formRoot(*chosen);
+        const FunctionDecl* root = session_.checker->calledRoot(*chosen);
         return root != nullptr ? op + signatureText(*root) : "";
     }
 

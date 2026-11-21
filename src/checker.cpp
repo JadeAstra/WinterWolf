@@ -2482,7 +2482,7 @@ struct Checker::Impl {
     // the parameters of what it overrides; anything else is another form (D56).
     bool takesPlaceOf(FuncInfo* f, FuncInfo* g) { return f == g || sameForm(f, g); }
 
-    // What formsAbove and familyForms found, by class and name; worked out again when more of
+    // What formsAbove and ownForms found, by class and name; worked out again when more of
     // the program is checked.
     std::map<std::pair<ClassInfo*, std::string>, std::vector<FuncInfo*>> formsAboveKnown, familyKnown;
 
@@ -2628,58 +2628,25 @@ struct Checker::Impl {
         return f->decl != nullptr && !f->isStatic && f->decl->accessor == FunctionDecl::Accessor::None && f->name != "init";
     }
 
-    // The classes above a class, the nearest first: its superclass and interfaces, theirs, ...
-    std::vector<ClassInfo*> above(ClassInfo* k) {
-        std::unordered_set<ClassInfo*> visited{k};
-        std::vector<ClassInfo*> order{k};
-        for (size_t i = 0; i < order.size(); i++) {
-            ClassInfo* c = order[i];
-            resolveSupers(c);
-            std::vector<ClassInfo*> supers = c->interfaces;
-            if (c->superclass != nullptr) supers.insert(supers.begin(), c->superclass);
-            for (ClassInfo* s : supers)
-                if (visited.insert(s).second) order.push_back(s);
-        }
-        order.erase(order.begin());
-        return order;
-    }
-
-    // The forms a method name has among the classes a class is related to: every class below
-    // the highest ones that declare it, above the class or the class itself. One of each.
-    std::vector<FuncInfo*> familyForms(ClassInfo* k, const std::string& name) {
+    // The forms of a method name a class has: its own and those it inherits, one of each (an
+    // override is the form it replaces). They are known as the class is compiled, whatever is
+    // below it, so every unit compiled with the class sees the same (o-forms-across-units).
+    std::vector<FuncInfo*> ownForms(ClassInfo* k, const std::string& name) {
         auto known = familyKnown.find({k, name});
         if (known != familyKnown.end()) return known->second;
-        countBelow();
-        std::vector<ClassInfo*> tops;
-        std::vector<ClassInfo*> chain = above(k);
-        chain.insert(chain.begin(), k);
-        for (ClassInfo* c : chain) {
-            if (!c->methods.count(name)) continue;
-            bool higher = false;
-            for (ClassInfo* a : above(c)) higher = higher || a->methods.count(name) != 0;
-            if (!higher) tops.push_back(c);
+        Member m;
+        addInheritedForms(selfType(k), name, m);
+        std::vector<FuncInfo*> roots;
+        for (FuncInfo* f : m.methods) {
+            if (!isPlainMethod(f)) continue;
+            // One of each form: two interfaces may each ask for the same one.
+            FuncInfo* root = rootOf(f);
+            bool known = false;
+            for (FuncInfo* r : roots) known = known || takesPlaceOf(root, r);
+            if (!known) roots.push_back(root);
         }
-        std::vector<FuncInfo*> forms;
-        std::vector<FuncInfo*> seenMethods;
-        std::unordered_set<ClassInfo*> visited;
-        std::function<void(ClassInfo*)> walk = [&](ClassInfo* c) {
-            if (!visited.insert(c).second) return;
-            if (auto ms = c->methods.find(name); ms != c->methods.end()) {
-                for (FuncInfo* f : ms->second) {
-                    if (!isPlainMethod(f)) continue;
-                    bool known = false;
-                    for (FuncInfo* g : seenMethods) known = known || takesPlaceOf(f, g);
-                    seenMethods.push_back(f);
-                    if (!known) forms.push_back(f);
-                }
-            }
-            auto b = below.find(c);
-            if (b != below.end())
-                for (ClassInfo* d : b->second) walk(d);
-        };
-        for (ClassInfo* t : tops) walk(t);
-        familyKnown[{k, name}] = forms;
-        return forms;
+        familyKnown[{k, name}] = roots;
+        return roots;
     }
 
     // The highest declaration of the form a method is: what it overrides, or itself.
@@ -2690,12 +2657,27 @@ struct Checker::Impl {
         return f;
     }
 
+    // The form a method is, where the class declaring it has several forms of its name: what
+    // names it there as the program runs (the name with that form's signature). Null where the
+    // class has the one form, which goes by the name alone: in that class, and in every class
+    // below it that has the one form too. A class below with more keeps it under the signature's
+    // name as well, the name alone holding its set of forms.
     const FunctionDecl* formRoot(const FunctionDecl& method) {
         auto found = funcOf.find(&method);
         if (found == funcOf.end()) return nullptr;
         FuncInfo* f = found->second;
         if (f->owner == nullptr || !isPlainMethod(f)) return nullptr;
-        if (familyForms(f->owner, f->name).size() < 2) return nullptr;
+        if (ownForms(f->owner, f->name).size() < 2) return nullptr;
+        return rootOf(f)->decl;
+    }
+
+    // The highest declaration of the form a method is, whatever the classes have: a call the
+    // checker chose a form for, on a receiver with several, names it so.
+    const FunctionDecl* calledRoot(const FunctionDecl& method) {
+        auto found = funcOf.find(&method);
+        if (found == funcOf.end()) return nullptr;
+        FuncInfo* f = found->second;
+        if (f->owner == nullptr || !isPlainMethod(f)) return nullptr;
         return rootOf(f)->decl;
     }
 
@@ -2703,15 +2685,9 @@ struct Checker::Impl {
         std::vector<const FunctionDecl*> roots;
         auto found = classOf.find(&cls);
         if (found == classOf.end()) return roots;
-        ClassInfo* k = found->second;
-        if (familyForms(k, name).size() < 2) return roots;
-        Member m;
-        addInheritedForms(selfType(k), name, m);
-        for (FuncInfo* f : m.methods) {
-            if (!isPlainMethod(f)) continue;
-            const FunctionDecl* root = rootOf(f)->decl;
-            if (std::find(roots.begin(), roots.end(), root) == roots.end()) roots.push_back(root);
-        }
+        const std::vector<FuncInfo*> forms = ownForms(found->second, name);
+        if (forms.size() < 2) return roots;
+        for (FuncInfo* f : forms) roots.push_back(f->decl);
         return roots;
     }
 
@@ -12454,6 +12430,7 @@ void Checker::addImport(const std::string& fileKey, const std::string& alias, bo
 }
 
 const FunctionDecl* Checker::formRoot(const FunctionDecl& method) { return impl_->formRoot(method); }
+const FunctionDecl* Checker::calledRoot(const FunctionDecl& method) { return impl_->calledRoot(method); }
 
 const FunctionDecl* Checker::extendForm(const FunctionDecl& fun) const {
     auto found = impl_->extendForms.find(&fun);

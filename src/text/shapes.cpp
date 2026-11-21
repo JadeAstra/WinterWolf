@@ -1,6 +1,7 @@
 // Outlines of arcs, wedges and wide lines: see shapes.h.
 
 #include "shapes.h"
+#include "../fmath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,21 +46,21 @@ void addPiece(Path& p, Points pts, bool hole = false) {
 // close enough together that no straight piece strays far from the curve.
 void arcPoints(Points& out, double cx, double cy, double rx, double ry, double start, double extent) {
     const double radius = std::max(std::max(rx, ry), 0.0);
-    double step = radius > kTolerance ? 2 * std::acos(std::max(-1.0, 1 - kTolerance / radius)) : kPi / 2;
+    double step = radius > kTolerance ? 2 * fmath::acos(std::max(-1.0, 1 - kTolerance / radius)) : kPi / 2;
     step = std::clamp(step, kPi / 720, kPi / 8);
     const double sweep = extent * kPi / 180;
     const int pieces = std::max(1, static_cast<int>(std::ceil(std::fabs(sweep) / step)));
     const double a0 = start * kPi / 180;
     for (int k = 0; k <= pieces; k++) {
         const double a = a0 + sweep * k / pieces;
-        out.push_back(cx + rx * std::cos(a));
-        out.push_back(cy - ry * std::sin(a));
+        out.push_back(cx + rx * fmath::cos(a));
+        out.push_back(cy - ry * fmath::sin(a));
     }
 }
 
 // A band `width` across along the line from a to b, its ends carried on by `extend`.
 Points band(double ax, double ay, double bx, double by, double width, double extend) {
-    const double dx = bx - ax, dy = by - ay, length = std::hypot(dx, dy);
+    const double dx = bx - ax, dy = by - ay, length = fmath::hypot(dx, dy);
     if (length == 0) {
         const double h = width / 2;
         return {ax - h, ay - h, ax + h, ay - h, ax + h, ay + h, ax - h, ay + h};
@@ -133,8 +134,8 @@ void arcStroke(Path& p, double l, double t, double r, double b, double start, do
     }
     addPiece(p, curve);
     const double a0 = start * kPi / 180, a1 = (start + extent) * kPi / 180;
-    const double sx = cx + rx * std::cos(a0), sy = cy - ry * std::sin(a0);
-    const double ex = cx + rx * std::cos(a1), ey = cy - ry * std::sin(a1);
+    const double sx = cx + rx * fmath::cos(a0), sy = cy - ry * fmath::sin(a0);
+    const double ex = cx + rx * fmath::cos(a1), ey = cy - ry * fmath::sin(a1);
     if (kind == kArcChord) {
         addPiece(p, band(sx, sy, ex, ey, width, h));
     } else if (kind == kArcPie) {

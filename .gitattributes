@@ -1,0 +1,17 @@
+# Every checkout has the bytes the tests were written against: text with "\n" on every system,
+# whatever core.autocrlf says (o-crlf-checkout).
+* text=auto eol=lf
+
+# Test data is kept byte for byte as it was committed, never converted.
+tests/data/** -text
+
+# Binary everywhere.
+*.p12 binary
+*.der binary
+*.png binary
+*.gif binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.zip binary
+*.gz binary
