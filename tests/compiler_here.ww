@@ -1,0 +1,45 @@
+// Code compiled into the program as it runs (Compiler.compile, asked 2026-11-21): in this VM,
+// with the program's own classes and objects, not copies; the names of the program's folder its
+// own; what its last expression gives; errors as an IllegalArgumentException; from another thread.
+// Run from bytecode or built, the program is compiled again from the sources it carries.
+import compiler.shapes.*
+
+class Doubler(val by : int)
+interface Step {
+  fun run(t : Tally, times : int)
+}
+val tally = Tally()
+
+// An interface of an imported file, implemented; an object of the program's, changed in place.
+val square = Compiler.compile("import compiler.shapes.*\nobject : Shape { override fun area() : float { tally.n += 1; return 4.0 } }",
+  name = "square.ww") as Shape
+print(square.area(), tally.n)                 // expect: 4.0 1
+print(square is Shape)                        // expect: true
+
+// The program's own classes, by their names in its folder: the same class, not a copy.
+val made = Compiler.compile("Doubler(3)")
+print(made is Doubler, (made as Doubler).by)  // expect: true 3
+
+// A function, and a compile that declares names of its own.
+val twice = Compiler.compile("fun doubled(x : int) : int => x * 2\nval f = { x : int -> doubled(x) + 1 }\nf", name = "twice.ww") as (int) -> int
+print(twice(20))                              // expect: 41
+
+// No value: null.
+print(Compiler.compile("val unused = 1", name = "none.ww"))   // expect: null
+
+// What does not compile: the compiler's errors, with their file, line and column.
+try {
+  Compiler.compile("val x : int = \"text\"", name = "wrong.ww")
+} catch (e : IllegalArgumentException) {
+  print(e.message!!.startsWith("wrong.ww:1:"))  // expect: true
+}
+
+// From another thread, which runs the code it compiled.
+val worker = Thread {
+  val step = Compiler.compile("import compiler.shapes.*\nobject : Step { override fun run(t : Tally, times : int) { var i = 0\n while i < times { t.n += 1; i += 1 } } }",
+    name = "step.ww") as Step
+  step.run(tally, 1000)
+}
+worker.start()
+worker.join()
+print(tally.n)                                // expect: 1001

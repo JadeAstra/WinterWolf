@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -529,8 +530,33 @@ bool copyingReads() {
     return copying;
 }
 
+// The files a program carries, for its compiler's view to be made again (compileAgain): read
+// from here, by their keys, in place of the disk, and the folders they are in listed from here.
+// Set while one is made again, by one thread at a time (sourcesLock); read by its helpers.
+namespace {
+struct CarriedSources {
+    std::unordered_map<std::string, std::string> files;              // key -> text
+    std::unordered_map<std::string, std::set<std::string>> folders;  // folder -> the names in it
+};
+const CarriedSources* carried = nullptr;
+std::mutex sourcesLock;
+
+const std::string* carriedFile(const std::string& path) {
+    if (carried == nullptr) return nullptr;
+    auto found = carried->files.find(fs::path(path).lexically_normal().string());
+    return found == carried->files.end() ? nullptr : &found->second;
+}
+bool carriedFolder(const std::string& path) {
+    return carried != nullptr && carried->folders.count(fs::path(path).lexically_normal().string()) != 0;
+}
+}  // namespace
+
 bool readFile(const std::string& path, std::string& out) {
-    if (!readWholeFile(fs::path(path), out)) return false;
+    if (const std::string* text = carriedFile(path)) {
+        out = *text;
+    } else if (!readWholeFile(fs::path(path), out)) {
+        return false;
+    }
     if (out.compare(0, 3, "\xEF\xBB\xBF") == 0) out.erase(0, 3);
     return true;
 }
@@ -8399,6 +8425,18 @@ static bool plainName(const fs::path::string_type& name) {
 static const Listing* listingOf(const fs::path& folder) {
     PathFacts& facts = pathFacts();
     auto listed = facts.listings.find(folder.native());
+    if (listed == facts.listings.end() && carriedFolder(folder.string())) {
+        // A folder of the sources a program carries: what they hold of it.
+        Listing listing;
+        listing.read = true;
+        const std::string at = folder.lexically_normal().string();
+        for (const std::string& name : carried->folders.at(at)) {
+            const fs::path entry = fs::path(name);
+            const int kind = carriedFile((folder / entry).string()) != nullptr ? 1 : 2;
+            listing.entries.emplace(foldedName(entry.native()), std::make_pair(entry.native(), kind));
+        }
+        listed = facts.listings.emplace(folder.native(), std::move(listing)).first;
+    }
     if (listed == facts.listings.end()) {
         Listing listing;
         std::error_code ec;
@@ -8438,6 +8476,10 @@ static const Listing* listingFor(const fs::path& path) {
 }
 
 static fs::path canonicalPath(const fs::path& path, std::error_code& ec) {
+    if (carried != nullptr && path.is_absolute() && (carriedFile(path.string()) != nullptr || carriedFolder(path.string()))) {
+        ec.clear();
+        return path.lexically_normal();  // a key already
+    }
     auto found = pathFacts().canonical.find(path.native());
     if (found == pathFacts().canonical.end()) {
         std::error_code asked;
@@ -8462,6 +8504,10 @@ static fs::path canonicalPath(const fs::path& path, std::error_code& ec) {
 }
 
 static int pathKind(const fs::path& path) {
+    if (carried != nullptr && path.is_absolute()) {
+        if (carriedFile(path.string()) != nullptr) return 1;
+        if (carriedFolder(path.string())) return 2;
+    }
     auto found = pathFacts().kind.find(path.native());
     if (found != pathFacts().kind.end()) return found->second;
     int kind = -1;
@@ -8636,9 +8682,52 @@ std::vector<FolderRead> CompilerSession::foldersRead() const {
     return all;
 }
 
+void CompilerSession::keepSourcesIn(Program& into) const {
+    into.compiledFrom = rawSources_;
+    into.compiledMain = mainKey_;
+    into.compiledLibraries = libraryPaths;
+}
+
+// While it lives, the files read are the carried ones where they are among them (and what the
+// thread found of paths before or meanwhile is forgotten).
+namespace {
+struct UsingCarried {
+    std::unique_lock<std::mutex> one;
+    explicit UsingCarried(const std::shared_ptr<void>& sources) {
+        if (sources == nullptr) return;
+        one = std::unique_lock<std::mutex>(sourcesLock);
+        carried = static_cast<const CarriedSources*>(sources.get());
+        forgetPaths();
+    }
+    ~UsingCarried() {
+        if (!one.owns_lock()) return;
+        carried = nullptr;
+        forgetPaths();
+    }
+};
+}  // namespace
+
+void CompilerSession::compileAgain(const Program& from) {
+    auto made = std::make_shared<CarriedSources>();
+    CarriedSources& sources = *made;
+    for (const Program::Source& source : from.compiledFrom) {
+        const fs::path key = fs::path(source.key).lexically_normal();
+        sources.files[key.string()] = source.text;
+        // Each folder up from it holds the next name down, so imports of a folder and of a
+        // path through folders are found as they were.
+        for (fs::path at = key; at.has_parent_path() && at.parent_path() != at; at = at.parent_path())
+            if (!at.filename().empty()) sources.folders[at.parent_path().string()].insert(at.filename().string());
+    }
+    libraryPaths = from.compiledLibraries;
+    reusingUnits_ = false;
+    carried_ = made;
+    UsingCarried using_(carried_);
+    compileFile(from.compiledMain);
+}
+
 int CompilerSession::compileFile(const std::string& path) {
     forgetPaths();
-    keepingUnits_ = stopAtTypeErrors;  // `ww check` lists mistakes, and keeps nothing
+    keepingUnits_ = stopAtTypeErrors && reusingUnits_;  // `ww check` lists mistakes, and keeps nothing
     try {
         // The whole program is parsed and checked first, then compiled.
         const std::string key = fileKeyOf(fs::path(path));
@@ -9234,6 +9323,7 @@ bool CompilerSession::usePrelude(const std::string& prelude, const std::string& 
 
 int CompilerSession::compileSource(const std::string& source, const std::string& name,
                                    const std::string& baseDirectory, bool shell) {
+    UsingCarried using_(carried_);
     forgetPaths();
     try {
         FunctionProto* proto = compileUnit(source, name, baseDirectory, name, shell);
@@ -9375,6 +9465,7 @@ std::vector<StmtPtr>* CompilerSession::parseFile(const std::string& key, const s
         Prefetched done = std::move(ahead->second);
         prefetched_.erase(ahead);
         if (!done.read) return nullptr;
+        rawSources_.push_back({key, done.source});
         SourceRead read{path, textHash(done.source), done.size, done.time};
         textHashes_[key] = read.hash;
         skeletons_[key] = done.skeleton;
@@ -9386,6 +9477,7 @@ std::vector<StmtPtr>* CompilerSession::parseFile(const std::string& key, const s
     }
     std::string source;
     if (!readFile(path, source)) return nullptr;
+    rawSources_.push_back({key, source});
     SourceRead read{path, textHash(source)};
     // Snippy is made into WinterWolf first; its units are kept by what it was made into, so
     // that a new translator never puts back units of an old one's.

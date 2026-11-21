@@ -1032,6 +1032,13 @@ public:
     std::ostream* errorOutput;  // printError's, and Program.errors'
     std::istream* input;
     std::vector<std::string> scriptArgs;
+    // The compiler session the program was compiled by, kept for Compiler.compile (null where
+    // the program was read from a bytecode file or built into an executable, until its first
+    // Compiler.compile makes one again from the sources it carries, which ownedSession keeps).
+    void* liveSession = nullptr;
+    std::shared_ptr<void> ownedSession;
+    // The program it runs (load's).
+    Program* currentProgram() const { return program_; }
     int mainModule_ = -1;  // the program's own file's module (Program.name)
     // That file's name without its folder and .ww: "bank" for bank.ww; "program" if none.
     std::string mainFileName() const;

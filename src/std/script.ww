@@ -318,3 +318,36 @@ fun __scriptCompile(vm : any?, source : string, name : string, folder : FilePath
   }
   return Script(made, name, api, gives)
 }
+
+// ---- Code compiled into the program itself ----
+// Source compiled while the program runs into the program itself (asked 2026-11-21, for an
+// emulator that translates the code it runs into WinterWolf): in the program's own VM, on the
+// calling thread, trusted, with nothing copied. Unlike a Script, it is the program's own code:
+// its imports are the program's files and their classes, the same ones, and the names of the
+// program's main file are its own, so what it makes is an object like any (a class of the
+// program's extended, an interface of the program's implemented, a function) and runs as fast
+// as the program's own code.
+//
+//   // shape.ww, imported by the program
+//   interface Shape { fun area() : float }
+//
+//   val made = Compiler.compile("import \"shape.ww\".*\nobject : Shape { override fun area() : float => 2.5 }") as Shape
+//   print(made.area())   // 2.5
+//
+// Each compile is one more file in `folder` (by default the folder of the program's own file),
+// which its imports are looked for from: the names of that folder's files are its own, as for any
+// file there, and what it declares at its top level joins them (a name the program already
+// declares cannot be declared again). The compile needs the compiler's view of the program. Run
+// from its source (ww program.ww), the program is compiled from it each time it starts (the units
+// ww kept are put back, so that is quick), never read back whole from what ww kept, and that view
+// is kept. Built (ww build, to a bytecode file or an executable), it carries the sources it was
+// compiled from and keeps all of its code; its first compile compiles it again from those, not
+// from the disk (once, taking about as long as compiling it did), so it works where they are not.
+object Compiler {
+  // `source` compiled into the program, as the file `name` in `folder`, and run: what its last
+  // expression gives (null where it ends with none). An IllegalArgumentException with the
+  // compiler's errors, each with its line and column, where it does not compile; an
+  // IllegalStateException in a program built without its sources (by a ww before 0.9.5050).
+  fun compile(source : string, name : string = "code.ww", folder : FilePath? = null) : any? =>
+    __compileHere(source, name, folder?.text ?: "")
+}

@@ -130,6 +130,7 @@ VM::VM(bool worker)
 }
 
 VM::~VM() {
+    ownedSession.reset();  // before the VM's objects, as a run from source drops its session first
     profile::detach(*this);
     dropWaitingBuilds();  // what this VM asked the builder for, which reads its objects
     parallelPool_.reset();  // its cores first: they work on this VM's objects

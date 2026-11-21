@@ -1,0 +1,7 @@
+// What tests/compiler_here.ww and the code it compiles both import.
+interface Shape {
+  fun area() : float
+}
+class Tally {
+  var n = 0
+}

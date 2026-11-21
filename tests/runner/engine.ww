@@ -11,6 +11,8 @@
 //   // windows only: <why>             passed over elsewhere, and counted apart
 //   // needs windows: <why>            passed over where no window can open (Linux with no
 //                                      Wayland display), and counted apart
+//   // from source only: <why>         run only the ways that compile it from its source
+//                                      (script, cached, units), not as bytecode or a program
 //
 // Besides the tests/*.ww files: tests/check (`ww check`), tests/testing (`ww test`),
 // tests/shell (the shell), the cache's scenarios, the standard library and the examples checked
@@ -432,7 +434,8 @@ class Suite(val options : Options) {
     for (f in t.list().filter { it.isDirectory() and it.name !in ["check", "testing", "shell", "runner"] }) {
       if (text.contains("\"${f.name}/")) { copyTree(f, FilePath(dir, f.name)) }
     }
-    val ways = options.ways
+    // `// from source only: <why>`: run only the ways that compile it from its source.
+    val ways = marker(text, "// from source only: ") != "" ? options.ways.filter { it in [Way.script, Way.cached, Way.units] } : options.ways
     val bytecode = FilePath(dir, "$name.wwc")
     val compileError = marker(text, "// expect compile error: ")
     fun way(w : Way, check : () -> string throws IOException) throws IOException {
@@ -640,7 +643,9 @@ class Suite(val options : Options) {
     program.mkdir()
     // Every test that compiles (not those that test an error of the compiler's) and every
     // example, each with what it imports from beside it: a folder of the tests', or another example.
-    val sources : open List<FilePath> = wwFiles(t).filter { !it.name.startsWith("error_") and !it.readText().contains("// expect compile error") }.toOpenList()
+    // Not those that compile code into themselves (Compiler.compile): such a program is never kept,
+    // so it would time the second run without the kept program.
+    val sources : open List<FilePath> = wwFiles(t).filter { !it.name.startsWith("error_") and !it.readText().contains("// expect compile error") and !it.readText().contains("Compiler.compile") }.toOpenList()
     val examples = wwFiles(FilePath(t, "../examples"))
     sources.addAll(examples.filter { !it.name.startsWith("bounce_worker") })
     val folders = t.list().filter { it.isDirectory() and it.name !in ["check", "testing", "shell", "runner"] }

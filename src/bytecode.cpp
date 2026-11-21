@@ -1611,7 +1611,7 @@ void FunctionProto::noteLibrary() {
 namespace {
 
 const char kMagic[4] = {'A', 'S', 'T', 'R'};
-const uint8_t kFormatVersion = 34;  // 34: private names (2026-11-20); 33: JumpIfNotClass (2026-11-13)
+const uint8_t kFormatVersion = 35;  // 35: a program's sources for Compiler.compile (2026-11-21); 34: private names (2026-11-20); 33: JumpIfNotClass (2026-11-13)
 const int kMaxProtoNesting = 200;
 
 enum ConstantTag : uint8_t { TagInt = 0, TagFloat = 1, TagString = 2, TagChar = 3, TagByte = 4, TagPrivateName = 5 };
@@ -2201,6 +2201,15 @@ void writeProgram(const Program& program, std::ostream& out) {
     w.u32(static_cast<uint32_t>(program.modules.size()));
     for (const FunctionProto* module : program.modules) w.proto(*module);
     w.u32(static_cast<uint32_t>(program.entry));
+
+    w.u32(static_cast<uint32_t>(program.compiledFrom.size()));
+    for (const Program::Source& source : program.compiledFrom) {
+        w.str(source.key);
+        w.str(source.text);
+    }
+    w.str(program.compiledMain);
+    w.u32(static_cast<uint32_t>(program.compiledLibraries.size()));
+    for (const std::string& library : program.compiledLibraries) w.str(library);
 }
 
 bool looksLikeBytecode(const std::string& data) {
@@ -2229,6 +2238,17 @@ void readProgram(Program& program, VM& vm, const std::string& data, bool trusted
     uint32_t entry = r.u32();
     if (entry >= moduleCount) r.corrupt();
     program.entry = static_cast<int>(entry);
+
+    const uint32_t sources = r.count(8);
+    for (uint32_t i = 0; i < sources; i++) {
+        Program::Source source;
+        source.key = r.str();
+        source.text = r.str();
+        program.compiledFrom.push_back(std::move(source));
+    }
+    program.compiledMain = r.str();
+    const uint32_t libraries = r.count(4);
+    for (uint32_t i = 0; i < libraries; i++) program.compiledLibraries.push_back(r.str());
 
     for (FunctionProto* module : program.modules) {
         if (module->arity != 0 || !module->upvalues.empty())
@@ -2748,14 +2768,17 @@ const std::string* memberNameAt(const FunctionProto& f, size_t at) {
     return &asString(f.constants[static_cast<size_t>(a)])->utf8();
 }
 
-bool namesGlobal(const Program& program, const std::vector<std::string>& names) {
+// With outsideStd, only the program's own modules are looked at, not the standard library's.
+bool namesGlobal(const Program& program, const std::vector<std::string>& names, bool outsideStd) {
     std::vector<char> wanted(program.globalNames.size(), 0);
     bool any = false;
     for (size_t slot = 0; slot < program.globalNames.size(); slot++)
         for (const std::string& name : names)
             if (program.globalNames[slot] == name) wanted[slot] = any = 1;
     if (!any) return false;
-    std::vector<const FunctionProto*> work(program.modules.begin(), program.modules.end());
+    std::vector<const FunctionProto*> work;
+    for (const FunctionProto* m : program.modules)
+        if (!outsideStd || (m != nullptr && m->source != "<std>")) work.push_back(m);
     while (!work.empty()) {
         const FunctionProto* f = work.back();
         work.pop_back();

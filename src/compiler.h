@@ -143,6 +143,17 @@ public:
 
     // Compiles a file and everything it imports. Returns the entry module index.
     int compileFile(const std::string& path);
+    // The file compileFile compiled, as its key (its whole path), or empty.
+    const std::string& mainFile() const { return mainKey_; }
+
+    // What compileFile compiled the program from, put in `into` (Program::compiledFrom), for a
+    // program that compiles code into itself as it runs (Compiler.compile) to be written as
+    // bytecode or built and still have the compiler's view of itself made again.
+    void keepSourcesIn(Program& into) const;
+    // A session made again for such a program (Compiler.compile's first call): its sources are
+    // read from what the program carries, not from the disk, and no unit is put back or kept,
+    // so that it is compiled exactly as it was. Throws CompileError.
+    void compileAgain(const Program& from);
 
     // For `ww test` (D153): a compiled file's statements, and the global a name at its top
     // level is kept in; null and -1 where there is none.
@@ -216,6 +227,10 @@ private:
     std::unordered_map<std::string, std::unique_ptr<std::vector<StmtPtr>>> parsed_;
     std::vector<std::unique_ptr<std::vector<StmtPtr>>> sources_;
     std::vector<SourceRead> sourcesRead_;
+    std::vector<Program::Source> rawSources_;  // each file's text as read, for keepSourcesIn
+    bool reusingUnits_ = true;                 // false in compileAgain
+    // compileAgain's: the sources the program carries, which its later compiles read too.
+    std::shared_ptr<void> carried_;
     std::map<std::string, FolderRead> foldersRead_;
     void noteFolder(const std::string& folder, const std::vector<std::filesystem::path>& files);
     std::unordered_set<std::string> gathered_;  // files handed to the checker

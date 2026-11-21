@@ -726,14 +726,21 @@ int loadProgram(const std::string& path, VM& vm, CompilerSession*& session, Prog
             // Nothing it was made from has changed since it was kept: it starts at once (D145).
             program = programOwner.get();
             session = nullptr;
-        } else {
+        }
+        if (program != nullptr && session == nullptr && !looksLikeBytecode(data) && namesGlobal(*program, {"Compiler"}, true)) {
+            // It compiles code into itself as it runs (Compiler.compile), which needs the compiler's
+            // session that made it: compiled from its source again, the units kept put back.
+            programOwner.reset();
+            program = nullptr;
+        }
+        if (program == nullptr) {
             sessionOwner = std::make_unique<CompilerSession>(vm);
             sessionOwner->libraryPaths = libraryPaths();
             sessionOwner->compileFile(path);
             session = sessionOwner.get();
             program = &sessionOwner->program;
             const Program* made = program;
-            keepProgram(path, session->sourcesRead(), session->foldersRead(), [made] {
+            if (!namesGlobal(*made, {"Compiler"}, true)) keepProgram(path, session->sourcesRead(), session->foldersRead(), [made] {
                 std::ostringstream image;
                 writeProgram(*made, image);
                 return image.str();
@@ -817,6 +824,7 @@ int runFile(const std::string& path, std::vector<std::string> scriptArgs) {
         vm.load(*program);
         compileTimes.load = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loading).count();
     }
+    vm.liveSession = session;
     showTimes("ready to run");
     // WW_TIMES=compile stops here: the budgets are timed on programs that are not run.
     if (const char* times = std::getenv("WW_TIMES"); times != nullptr && std::strcmp(times, "compile") == 0) {
@@ -885,11 +893,19 @@ int buildFile(const std::string& path, std::string outPath, bool asExecutable, b
     }
     showTimes("compiled");
 
-    // What the program can never reach is left out of it (M6.5 part 5).
-    const LeftOut leftOut = leaveOutUnreachable(session.program, VM::globalsFoundByName(), vm.membersFoundByName());
-    if (std::getenv("WW_TIMES") != nullptr)
-        std::cerr << "ww: left out " << leftOut.declarations << " declarations; the modules' own code "
-                  << leftOut.codeBefore << " bytes, now " << leftOut.codeAfter << "\n";
+    // A program that compiles code into itself as it runs (Compiler.compile) carries what it was
+    // compiled from, for the compiler's view of it to be made again, and keeps all of itself:
+    // that code may name anything.
+    const bool compilesItself = namesGlobal(session.program, {"Compiler"}, true);
+    if (compilesItself) {
+        session.keepSourcesIn(session.program);
+    } else {
+        // What the program can never reach is left out of it (M6.5 part 5).
+        const LeftOut leftOut = leaveOutUnreachable(session.program, VM::globalsFoundByName(), vm.membersFoundByName());
+        if (std::getenv("WW_TIMES") != nullptr)
+            std::cerr << "ww: left out " << leftOut.declarations << " declarations; the modules' own code "
+                      << leftOut.codeBefore << " bytes, now " << leftOut.codeAfter << "\n";
+    }
 
     if (!asExecutable) {
         std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
@@ -919,7 +935,7 @@ int buildFile(const std::string& path, std::string outPath, bool asExecutable, b
     // names them (M6.5 part 5, D161). A program that compiles scripts as it runs (Script) keeps
     // all of it, and the compiled standard library its scripts are compiled against (the
     // scripting plan, part 1): a script may use anything.
-    const bool scripts = namesGlobal(session.program, {"__script"});
+    const bool scripts = namesGlobal(session.program, {"__script"}) || compilesItself;
     if (!scripts) stripPrelude(image);  // the program carries its own compiled copy of what it uses
     std::vector<std::string> unneeded;
     if (!scripts) unneeded = {".wwc", ".wws"};
@@ -1458,6 +1474,7 @@ int testFilesCommand(const std::vector<std::string>& given) {
             continue;
         }
         vm.load(session.program);
+        vm.liveSession = &session;  // Compiler.compile, as in a run from source
         // A worker a test starts loads its own copy of the program from these bytes, as in a run.
         Program& program = session.program;
         vm.programImage = [&program] {
