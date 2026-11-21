@@ -1,0 +1,432 @@
+import Snippy.Text.*
+// string and operator (the Snippy plan, part 5.3, step 2), in WinterWolf, and what the
+// library's modules use to make Python classes of their own.
+
+// ---- Classes of the library's modules ----
+
+// A Python class a module of this library makes (part 5.3): `bases` its bases, its members
+// methods (pyLibMethod), class methods, static methods, properties or plain values, as a class
+// statement would give them, so that a program may subclass it and look into it as any class.
+fun pyLibClass(name : string, module : string, bases : List<PyType>, members : Map<string, any?>) : PyType {
+  val ns = PyDict()
+  ns.set("__module__", module)
+  ns.set("__qualname__", name)
+  for (k, v) in members { ns.set(k, v) }
+  return pyNewClass(pyTypeType, name, bases, ns, [], [])
+}
+
+// A method of such a class: given the object it is called on, then the call's arguments.
+fun pyLibMethod(owner : string, name : string, code : (any?, PyArgs) -> any?) : PyBuiltin {
+  val b = PyBuiltin(name, { args, kw ->
+    if (args.isEmpty()) { throw pyTypeError("unbound method $owner.$name() needs an argument") }
+    code(args[0], PyArgs(args[1..], kw, "$name()"))
+  })
+  b.owner = owner
+  return b
+}
+
+// A class method of such a class: given the class first.
+fun pyLibClassMethod(owner : string, name : string, code : (any?, PyArgs) -> any?) : PyClassMethod =>
+  PyClassMethod(PyBuiltin(name, { args, kw -> code(args[0], PyArgs(args[1..], kw, "$name()")) }))
+
+// An attribute of an object made by such a class, or `otherwise`.
+fun pyAttrOr(o : any?, name : string, otherwise : any?) : any? => pyGetAttrOr(o, name, otherwise)
+
+// ---- string ----
+
+internal val __pyWhitespace = " \t\n\r\u{B}\u{C}"
+internal val __pyPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
+// Template.substitute and safe_substitute: $name, ${name}, $$, as CPython's pattern reads them,
+// with the class's (or the object's) own delimiter and identifier rules.
+internal fun __pyTemplateSub(self : any?, mapping : any?, kw : Map<string, any?>, safe : bool) : string {
+  val template = pyGetAttr(self, "template") as string
+  val delimiter = pyGetAttr(self, "delimiter") as string
+  fun lookup(name : string) : any? {
+    if (name in kw.keys) { return kw[name] }
+    if (mapping == null) { throw pyKeyError(name) }
+    return pyGetItem(mapping, name)
+  }
+  fun identStart(c : char) : bool => (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'
+  fun identPart(c : char) : bool => identStart(c) or (c >= '0' and c <= '9')
+  val sb = StringBuilder()
+  var i = 0
+  while (i < template.size) {
+    if (!template[i..].startsWith(delimiter)) {
+      sb.append(template[i])
+      i += 1
+      continue
+    }
+    val at = i
+    var j = i + delimiter.size
+    if (template[j..].startsWith(delimiter)) {
+      sb.append(delimiter)
+      i = j + delimiter.size
+      continue
+    }
+    if (j < template.size and identStart(template[j])) {
+      var k = j
+      while (k < template.size and identPart(template[k])) { k += 1 }
+      val name = template[j..<k]
+      if (safe) {
+        try {
+          sb.append(pyStr(lookup(name)))
+        } catch (e : PyError) {
+          if (!e.exc.cls.isSubtype(pyKeyErrorType)) { throw e }
+          sb.append(template[at..<k])
+        }
+      } else {
+        sb.append(pyStr(lookup(name)))
+      }
+      i = k
+      continue
+    }
+    if (j < template.size and template[j] == '{') {
+      var k = j + 1
+      if (k < template.size and identStart(template[k])) {
+        while (k < template.size and identPart(template[k])) { k += 1 }
+        if (k < template.size and template[k] == '}') {
+          val name = template[(j + 1)..<k]
+          if (safe) {
+            try {
+              sb.append(pyStr(lookup(name)))
+            } catch (e : PyError) {
+              if (!e.exc.cls.isSubtype(pyKeyErrorType)) { throw e }
+              sb.append(template[at..(k)])
+            }
+          } else {
+            sb.append(pyStr(lookup(name)))
+          }
+          i = k + 1
+          continue
+        }
+      }
+    }
+    // Neither: an invalid placeholder, named by its line and column.
+    if (safe) {
+      sb.append(delimiter)
+      i = j
+      continue
+    }
+    val before = template[..<at]
+    val line = before.count { it == '\n' } + 1
+    val col = at - (before.lastIndexOf("\n") + 1) + 1
+    throw pyValueError("Invalid placeholder in string: line $line, col $col")
+  }
+  return sb.toString()
+}
+
+// string.Formatter's parse(): (literal, field name, spec, conversion) for each piece, as
+// CPython's _string.formatter_parser gives them.
+fun pyFormatterParse(s : string) : List<any?> {
+  val out : open List<any?> = []
+  val lit = StringBuilder()
+  var i = 0
+  while (i < s.size) {
+    val c = s[i]
+    if (c == '{' and i + 1 < s.size and s[i + 1] == '{') { lit.append('{'); i += 2; continue }
+    if (c == '}' and i + 1 < s.size and s[i + 1] == '}') { lit.append('}'); i += 2; continue }
+    if (c == '}') { throw pyValueError("Single '}' encountered in format string") }
+    if (c == '{') {
+      var depth = 1
+      var j = i + 1
+      while (j < s.size and depth > 0) {
+        if (s[j] == '{') { depth += 1 }
+        if (s[j] == '}') { depth -= 1 }
+        if (depth > 0) { j += 1 }
+      }
+      if (j >= s.size) { throw pyValueError(i + 1 >= s.size ? "Single '{' encountered in format string" : "expected '}' before end of string") }
+      val field = s[(i + 1)..<j]
+      var name = field
+      var conv : any? = null
+      var spec = ""
+      // The name ends at the first ! or : outside brackets.
+      var k = 0
+      var inBracket = false
+      while (k < field.size) {
+        if (field[k] == '[') { inBracket = true }
+        if (field[k] == ']') { inBracket = false }
+        if (!inBracket and (field[k] == '!' or field[k] == ':')) { break }
+        k += 1
+      }
+      name = field[..<k]
+      if (k < field.size and field[k] == '!') {
+        if (k + 1 >= field.size) { throw pyValueError("end of string while looking for conversion specifier") }
+        conv = field[k + 1].toString()
+        if (k + 2 < field.size and field[k + 2] != ':') { throw pyValueError("expected ':' after conversion specifier") }
+        spec = k + 2 < field.size ? field[(k + 3)..] : ""
+      } else if (k < field.size) {
+        spec = field[(k + 1)..]
+      }
+      out.add(PyTuple([lit.toString(), name, spec, conv]))
+      lit.clear()
+      i = j + 1
+      continue
+    }
+    lit.append(c)
+    i += 1
+  }
+  if (lit.isNotEmpty()) { out.add(PyTuple([lit.toString(), null, null, null])) }
+  return out
+}
+
+internal lazy val __pyTemplateType : PyType = pyLibClass("Template", "string", [pyObjectType], {
+  "delimiter": "\$",
+  "idpattern": "(?a:[_a-z][_a-z0-9]*)",
+  "braceidpattern": null,
+  "flags": 2,
+  "__init__": pyLibMethod("Template", "__init__") { self, a ->
+    pySetAttr(self, "template", a.pos.isNotEmpty() ? a.pos[0] : a.get("template", null))
+    null
+  },
+  "substitute": pyLibMethod("Template", "substitute") { self, a ->
+    __pyTemplateSub(self, a.pos.isNotEmpty() ? a.pos[0] : null, a.kw, false)
+  },
+  "safe_substitute": pyLibMethod("Template", "safe_substitute") { self, a ->
+    __pyTemplateSub(self, a.pos.isNotEmpty() ? a.pos[0] : null, a.kw, true)
+  },
+  "get_identifiers": pyLibMethod("Template", "get_identifiers") { self, a ->
+    val names : open List<any?> = []
+    val template = pyGetAttr(self, "template") as string
+    val delimiter = pyGetAttr(self, "delimiter") as string
+    var i = 0
+    while (i < template.size) {
+      if (template[i..].startsWith(delimiter + delimiter)) { i += delimiter.size * 2; continue }
+      if (template[i..].startsWith(delimiter)) {
+        var j = i + delimiter.size
+        val braced = j < template.size and template[j] == '{'
+        if (braced) { j += 1 }
+        var k = j
+        while (k < template.size and ((template[k] >= 'a' and template[k] <= 'z') or (template[k] >= 'A' and template[k] <= 'Z') or (template[k] >= '0' and template[k] <= '9') or template[k] == '_')) { k += 1 }
+        if (k > j and !(template[j] >= '0' and template[j] <= '9') and (!braced or (k < template.size and template[k] == '}'))) {
+          val name = template[j..<k]
+          if (!(name in names)) { names.add(name) }
+        }
+        i = k
+        continue
+      }
+      i += 1
+    }
+    pyNewList(names)
+  },
+  "is_valid": pyLibMethod("Template", "is_valid") { self, a ->
+    try {
+      __pyTemplateSub(self, null, {:}, true)
+      val template = pyGetAttr(self, "template") as string
+      val delimiter = pyGetAttr(self, "delimiter") as string
+      var ok = true
+      var i = 0
+      while (i < template.size) {
+        if (template[i..].startsWith(delimiter + delimiter)) { i += delimiter.size * 2; continue }
+        if (template[i..].startsWith(delimiter)) {
+          val j = i + delimiter.size
+          if (j >= template.size or !(template[j] == '{' or template[j] == '_' or ((template[j] >= 'a' and template[j] <= 'z') or (template[j] >= 'A' and template[j] <= 'Z')))) { ok = false }
+          i = j
+          continue
+        }
+        i += 1
+      }
+      ok
+    } catch (e : PyError) { false }
+  }
+})
+
+internal lazy val __pyFormatterType : PyType = pyLibClass("Formatter", "string", [pyObjectType], {
+  "format": pyLibMethod("Formatter", "format") { self, a ->
+    pyCallV(pyGetAttr(self, "vformat"), [a.pos[0], PyTuple(a.pos[1..]), pyDictOfMap(a.kw)], null)
+  },
+  "vformat": pyLibMethod("Formatter", "vformat") { self, a ->
+    val args = pyIterable(a.pos[1])
+    val kwargs : open Map<string, any?> = {:}
+    for k in pyIterable(a.pos[2]) { kwargs[k as string] = pyGetItem(a.pos[2], k) }
+    pyStrFormat(a.pos[0] as string, args, kwargs)
+  },
+  "parse": pyLibMethod("Formatter", "parse") { self, a -> PyListIter(pyFormatterParse(a.pos[0] as string)) },
+  "format_field": pyLibMethod("Formatter", "format_field") { self, a -> pyFormat(a.pos[0], a.pos[1] as string) },
+  "convert_field": pyLibMethod("Formatter", "convert_field") { self, a ->
+    val c = a.pos[1]
+    if (c == null) { a.pos[0] } else if (c == "s") { pyStr(a.pos[0]) } else if (c == "r") { pyRepr(a.pos[0]) } else if (c == "a") { pyAscii(a.pos[0]) } else {
+      throw pyValueError("Unknown conversion specifier ${c}")
+    }
+  },
+  "get_value": pyLibMethod("Formatter", "get_value") { self, a ->
+    pyIsInt(a.pos[0]) ? pyGetItem(a.pos[1], a.pos[0]) : pyGetItem(a.pos[2], a.pos[0])
+  }
+})
+
+fun pyDictOfMap(m : Map<string, any?>) : PyDict {
+  val d = PyDict()
+  for (k, v) in m { d.set(k, v) }
+  return d
+}
+
+fun pyStringModule() : PyModule {
+  val lower = "abcdefghijklmnopqrstuvwxyz"
+  val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  val m : open Map<string, any?> = {:}
+  m["ascii_lowercase"] = lower
+  m["ascii_uppercase"] = upper
+  m["ascii_letters"] = lower + upper
+  m["digits"] = "0123456789"
+  m["hexdigits"] = "0123456789abcdefABCDEF"
+  m["octdigits"] = "01234567"
+  m["punctuation"] = __pyPunctuation
+  m["whitespace"] = __pyWhitespace
+  m["printable"] = "0123456789" + lower + upper + __pyPunctuation + __pyWhitespace
+  m["capwords"] = __pyB("capwords") { a ->
+    val sep = a.pos.size > 1 ? a.pos[1] : a.get("sep", null)
+    val words = sep == null ? pySplitWhitespace(a.pos[0] as string, -1) : pyIterable(pyCallMethodV(a.pos[0], "split", [sep], null))
+    val joined = words.map { pyStrCapitalize(it as string) }.join(sep == null ? " " : sep as string)
+    joined
+  }
+  m["Template"] = __pyTemplateType
+  m["Formatter"] = __pyFormatterType
+  return pyNativeModule("string", m)
+}
+
+// ---- operator ----
+
+internal lazy val __pyItemGetterType : PyType = pyNativeType("itemgetter", "operator", ["__call__", "__repr__"], { t, args, kw ->
+  if (args.isEmpty()) { throw pyTypeError("itemgetter expected 1 argument, got 0") }
+  PyGetter(0, args)
+})
+internal lazy val __pyAttrGetterType : PyType = pyNativeType("attrgetter", "operator", ["__call__", "__repr__"], { t, args, kw ->
+  if (args.isEmpty()) { throw pyTypeError("attrgetter expected 1 argument, got 0") }
+  for a in args { if (!(a is string)) { throw pyTypeError("attribute name must be a string") } }
+  PyGetter(1, args)
+})
+internal lazy val __pyMethodCallerType : PyType = pyNativeType("methodcaller", "operator", ["__call__", "__repr__"], { t, args, kw ->
+  if (args.isEmpty()) { throw pyTypeError("methodcaller needs at least one argument, the method name") }
+  val n = kw == null ? 0 : kw!!.size
+  PyGetter(2, args[..<(args.size - n)], args[(args.size - n)..], kw ?: [])
+})
+
+// itemgetter (0), attrgetter (1) and methodcaller (2).
+class PyGetter(val kind : int, val items : List<any?>, val kwValues : List<any?> = [], val kwNames : List<string> = []) : PyNative() {
+  override fun pyType() : PyType => kind == 0 ? __pyItemGetterType : kind == 1 ? __pyAttrGetterType : __pyMethodCallerType
+  fun one(o : any?, item : any?) : any? {
+    if (kind == 0) { return pyGetItem(o, item) }
+    var v = o
+    for part in (item as string).split(".") { v = pyGetAttr(v, part) }
+    return v
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__call__" -> {
+        val o = a.pos[0]
+        if (kind == 2) {
+          val args : open List<any?> = items[1..].toOpenList()
+          args.addAll(kwValues)
+          pyCallV(pyGetAttr(o, items[0] as string), args, kwNames.isEmpty() ? null : kwNames)
+        } else if (items.size == 1) { one(o, items[0]) } else { PyTuple(items.map { one(o, it) }) }
+      }
+      "__repr__" -> {
+        val type = kind == 0 ? "itemgetter" : kind == 1 ? "attrgetter" : "methodcaller"
+        val parts : open List<string> = items.map { pyRepr(it) }.toOpenList()
+        for (i, k) in kwNames.withIndex() { parts.add("$k=${pyRepr(kwValues[i])}") }
+        "operator.$type(${parts.join(", ")})"
+      }
+      else -> throw pyAttributeError("'${pyType().name}' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+fun pyOperatorModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  fun two(names : List<string>, f : (any?, any?) -> any?) {
+    for n in names { m[n] = __pyB(n) { a -> f(a.pos[0], a.pos[1]) } }
+  }
+  fun one(names : List<string>, f : (any?) -> any?) {
+    for n in names { m[n] = __pyB(n) { a -> f(a.pos[0]) } }
+  }
+  two(["add", "__add__"], { x, y -> pyAdd(x, y) })
+  two(["sub", "__sub__"], { x, y -> pySub(x, y) })
+  two(["mul", "__mul__"], { x, y -> pyMul(x, y) })
+  two(["matmul", "__matmul__"], { x, y -> pyMatMul(x, y) })
+  two(["truediv", "__truediv__"], { x, y -> pyDiv(x, y) })
+  two(["floordiv", "__floordiv__"], { x, y -> pyFloorDiv(x, y) })
+  two(["mod", "__mod__"], { x, y -> pyMod(x, y) })
+  two(["pow", "__pow__"], { x, y -> pyPow(x, y) })
+  two(["lshift", "__lshift__"], { x, y -> pyLShift(x, y) })
+  two(["rshift", "__rshift__"], { x, y -> pyRShift(x, y) })
+  two(["and_", "__and__"], { x, y -> pyAnd(x, y) })
+  two(["or_", "__or__"], { x, y -> pyOr(x, y) })
+  two(["xor", "__xor__"], { x, y -> pyXor(x, y) })
+  two(["iadd", "__iadd__"], { x, y -> pyIAdd(x, y) })
+  two(["isub", "__isub__"], { x, y -> pyISub(x, y) })
+  two(["imul", "__imul__"], { x, y -> pyIMul(x, y) })
+  two(["imatmul", "__imatmul__"], { x, y -> pyIMatMul(x, y) })
+  two(["itruediv", "__itruediv__"], { x, y -> pyIDiv(x, y) })
+  two(["ifloordiv", "__ifloordiv__"], { x, y -> pyIFloorDiv(x, y) })
+  two(["imod", "__imod__"], { x, y -> pyIMod(x, y) })
+  two(["ipow", "__ipow__"], { x, y -> pyIPow(x, y) })
+  two(["ilshift", "__ilshift__"], { x, y -> pyILShift(x, y) })
+  two(["irshift", "__irshift__"], { x, y -> pyIRShift(x, y) })
+  two(["iand", "__iand__"], { x, y -> pyIAnd(x, y) })
+  two(["ior", "__ior__"], { x, y -> pyIOr(x, y) })
+  two(["ixor", "__ixor__"], { x, y -> pyIXor(x, y) })
+  two(["iconcat", "__iconcat__"], { x, y ->
+    if (!(x is List<any?> or x is PyObject and pyTypeOf(x).lookup("__getitem__") !== pyUnbound)) {
+      throw pyTypeError("'${pyTypeName(x)}' object can't be concatenated")
+    }
+    pyIAdd(x, y)
+  })
+  two(["concat", "__concat__"], { x, y ->
+    if (pyTypeOf(x).lookup("__getitem__") === pyUnbound) { throw pyTypeError("'${pyTypeName(x)}' object can't be concatenated") }
+    pyAdd(x, y)
+  })
+  two(["eq", "__eq__"], { x, y -> pyEq(x, y) })
+  two(["ne", "__ne__"], { x, y -> pyNe(x, y) })
+  two(["lt", "__lt__"], { x, y -> pyLt(x, y) })
+  two(["le", "__le__"], { x, y -> pyLe(x, y) })
+  two(["gt", "__gt__"], { x, y -> pyGt(x, y) })
+  two(["ge", "__ge__"], { x, y -> pyGe(x, y) })
+  two(["contains", "__contains__"], { x, y -> pyContains(x, y) })
+  two(["is_", "__is__"] , { x, y -> pyIs(x, y) })
+  two(["is_not"], { x, y -> !pyIs(x, y) })
+  two(["getitem", "__getitem__"], { x, y -> pyGetItem(x, y) })
+  two(["delitem", "__delitem__"], { x, y -> pyDelItem(x, y); null })
+  two(["countOf"], { x, y -> pyIterable(x).count { pyIs(it, y) or pyEqB(it, y) } })
+  two(["indexOf"], { x, y ->
+    val i = pyIterable(x).indexOfFirst { pyIs(it, y) or pyEqB(it, y) }
+    if (i < 0) { throw pyValueError("sequence.index(x): x not in sequence") }
+    i
+  })
+  m["setitem"] = __pyB("setitem") { a -> pySetItem(a.pos[0], a.pos[1], a.pos[2]); null }
+  m["__setitem__"] = m["setitem"]
+  one(["neg", "__neg__"], { x -> pyNeg(x) })
+  one(["pos", "__pos__"], { x -> pyPos(x) })
+  one(["abs", "__abs__"], { x -> pyAbs(x) })
+  one(["invert", "inv", "__invert__", "__inv__"], { x -> pyInvert(x) })
+  one(["not_", "__not__"], { x -> !pyTruth(x) })
+  one(["truth"], { x -> pyTruth(x) })
+  one(["is_none"], { x -> x == null })
+  one(["is_not_none"], { x -> x != null })
+  one(["index", "__index__"], { x -> pyIndexValue(x) })
+  m["length_hint"] = __pyB("length_hint") { a ->
+    val o = a.pos[0]
+    val otherwise = a.pos.size > 1 ? pyIndex(a.pos[1]) : 0
+    try {
+      pyLength(o)
+    } catch (e : PyError) {
+      if (!e.exc.cls.isSubtype(pyTypeErrorType)) { throw e }
+      val m2 = pyGetAttrOr(o, "__length_hint__", null)
+      if (o is PyIterator and (o as PyIterator).left() >= 0) { (o as PyIterator).left() } else if (m2 == null) { otherwise } else {
+        val r = pyCall0(m2)
+        r === pyNotImplemented ? otherwise : pyIndex(r)
+      }
+    }
+  }
+  m["call"] = __pyB("call") { a ->
+    val n = a.kw.size
+    val args : open List<any?> = a.pos[1..].toOpenList()
+    val names : open List<string> = []
+    for (k, v) in a.kw { args.add(v); names.add(k) }
+    pyCallV(a.pos[0], args, names.isEmpty() ? null : names)
+  }
+  m["__call__"] = m["call"]
+  m["itemgetter"] = __pyItemGetterType
+  m["attrgetter"] = __pyAttrGetterType
+  m["methodcaller"] = __pyMethodCallerType
+  return pyNativeModule("operator", m)
+}

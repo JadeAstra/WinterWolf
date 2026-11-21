@@ -164,6 +164,7 @@ abstract class PyFunction(val spec : PySpec, var defaults : List<any?>?, var kwd
   var doc : any? = null
   var attrs : PyDict? = null
   var annotations : any? = null
+  var annotate : (() -> any?)? = null  // what makes them, until asked for
 
   // Runs the body with its parameters bound, in order.
   abstract fun invoke(slots : List<any?>) : any?
@@ -222,6 +223,18 @@ class PyFunction6(val code : (any?, any?, any?, any?, any?, any?) -> any?, spec 
 }
 class PyFunctionN(val code : (List<any?>) -> any?, spec : PySpec, defaults : List<any?>?, kw : Map<string, any?>?) : PyFunction(spec, defaults, kw) {
   override fun invoke(slots : List<any?>) : any? => code(slots)
+}
+
+// A function's annotations: made by `annotate` the first time they are asked for (PEP 649), so
+// that a name defined after the def may be in them (part 5.3).
+fun pyAnnotate(f : any?, annotate : () -> any?) : any? {
+  if (f is PyFunction) { (f as PyFunction).annotate = annotate }
+  return f
+}
+fun pyAnnotationsOf(names : List<string>, values : List<any?>) : any? {
+  val d = PyDict()
+  for (i, n) in names.withIndex() { d.set(n, values[i]) }
+  return d
 }
 
 fun pyDef0(code : () -> any?, spec : PySpec, defaults : List<any?>?, kw : Map<string, any?>?) : any? => PyFunction0(code, spec, defaults, kw)
@@ -452,6 +465,10 @@ fun pyCallObject(f : any?, args : List<any?>, kwnames : List<string>?) : any? {
       all.addAll(args)
       return pyCallV(call, all, kwnames)
     }
+  }
+  // An object of the runtime's own with a __call__ (part 5.3: operator.itemgetter, functools.partial...).
+  if (f is PyNative and (f as PyNative).pyType().lookup("__call__") !== pyUnbound) {
+    return (f as PyNative).call("__call__", PyArgs(args, kwnames, "__call__()"))
   }
   throw pyTypeError("'${pyTypeName(f)}' object is not callable")
 }

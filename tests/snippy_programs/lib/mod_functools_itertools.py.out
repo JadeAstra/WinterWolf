@@ -1,0 +1,28 @@
+10 60 0
+TypeError reduce() of empty iterable with no initial value
+5 True () {'base': 2} functools.partial(<built-in function max>, 1) 32 8
+23416728348467685 CacheInfo(hits=78, misses=81, maxsize=None, currsize=81)
+CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+CacheInfo(hits=1, misses=4, maxsize=2, currsize=2) sq sq
+8 8 1
+6 documented It doubles. documented
+True True False True
+[3, 2, 1]
+thing 's' int 5 list of 2 int True
+computing
+42 42 True
+[5, 7, 9, 11] ['a', 'b', 'a', 'b', 'a'] ['x', 'x', 'x'] [0, 0]
+[1, 3, 6, 10] [1, 2, 6] [10, 11, 13] ['a', 'b', 1] [1, 2, 3]
+['a', 'c'] [4, 1] [1, 2] [0, '']
+[('a', ['a', 'a']), ('b', ['b', 'b', 'b']), ('c', ['c'])] [(1, 2), (0, 2)]
+['c', 'e', 'g'] [1, 4, 7] [('a', 'b'), ('b', 'c'), ('c', 'd')] [8, 9] [('a', 1), ('b', '-')]
+[1, 2, 3] [1, 2, 3] [('a', 'b', 'c'), ('d', 'e', 'f'), ('g',)] [(0, 1), (2, 3)]
+[('a', 'a'), ('a', 'b'), ('b', 'a'), ('b', 'b')] [(1, 'x'), (2, 'x')] [('a', 'b'), ('a', 'c'), ('b', 'a'), ('b', 'c'), ('c', 'a'), ('c', 'b')] 24
+[('a', 'b'), ('a', 'c'), ('a', 'd'), ('b', 'c'), ('b', 'd'), ('c', 'd')] [('a', 'a'), ('a', 'b'), ('b', 'b')] [()]
+ValueError n must be at least one
+ValueError Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize.
+ValueError batched(): incomplete batch
+0 1 count(2) repeat(1, 2) chain
+True True False
+True deque
+6 6 4 1

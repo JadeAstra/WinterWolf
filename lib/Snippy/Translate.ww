@@ -767,6 +767,8 @@ class PyTranslator(val tree : PyModule, val scopes : PyScopes, val path : string
     val outer = cx
     val inner = innerCtx(f)
     val doc = docstring(s.body)
+    // Its annotations, worked out when first asked for (PEP 649, Python 3.14), in the scope around it (part 5.3).
+    val annotate = annotationsOf(s)
     if (decorators.isEmpty()) {
       // A local function, named for the traceback: f12_name.
       val ww = (f.isGenerator or f.isCoroutine ? "m" : "f") + "${id}_${pyMangle(s.name)}"
@@ -778,6 +780,7 @@ class PyTranslator(val tree : PyModule, val scopes : PyScopes, val path : string
       cx = outer
       close()
       var made = "pyDef${many ? "N" : ps.size.toString()}($ww, $sp, $dflt)"
+      if (annotate != null) { made = "pyAnnotate($made, $annotate)" }
       if (doc != null) { made = "pyDoc($made, ${wwString(doc!!)})" }
       emit(store(s.name, made))
       return
@@ -792,6 +795,7 @@ class PyTranslator(val tree : PyModule, val scopes : PyScopes, val path : string
     var tail = whole[(cut + 1)..]
     for d in decorators { head += "pyCall1($d, "; tail = ")" + tail }
     if (doc != null) { head += "pyDoc("; tail = ", ${wwString(doc!!)})" + tail }
+    if (annotate != null) { head += "pyAnnotate("; tail = ", $annotate)" + tail }
     head += "pyDef${many ? "N" : ps.size.toString()}($label@ { "
     if (ps.isNotEmpty() or many) { head += paramText(f, ps, many) + " ->" }
     emit(head)
@@ -803,6 +807,30 @@ class PyTranslator(val tree : PyModule, val scopes : PyScopes, val path : string
     cx = outer
     out.append(" }, $sp, $dflt)" + tail)
     sep = true
+  }
+
+  // A def's annotations as a lambda making their dict, in the order CPython gives them (its
+  // parameters as written, then return), or null where it has none.
+  private fun annotationsOf(s : PyFunctionDef) : string? {
+    val names : open List<string> = []
+    val values : open List<string> = []
+    val a = s.args
+    val all : open List<PyArg> = (a.posonlyargs + a.args).toOpenList()
+    if (a.vararg != null) { all.add(a.vararg!!) }
+    all.addAll(a.kwonlyargs)
+    if (a.kwarg != null) { all.add(a.kwarg!!) }
+    for p in all {
+      if (p.annotation != null) {
+        names.add(wwString(p.arg))
+        values.add(ex(p.annotation!!))
+      }
+    }
+    if (s.returns != null) {
+      names.add(wwString("return"))
+      values.add(ex(s.returns!!))
+    }
+    if (names.isEmpty()) { return null }
+    return "{ -> pyAnnotationsOf([${names.join(", ")}], [${values.join(", ")}]) }"
   }
 
   private fun classDef(s : PyClassDef) {

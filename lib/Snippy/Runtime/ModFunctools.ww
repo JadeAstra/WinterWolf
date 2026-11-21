@@ -1,0 +1,400 @@
+import Snippy.Text.*
+// functools (the Snippy plan, part 5.3, step 2), in WinterWolf: partial, the lru_cache wrapper,
+// cmp_to_key's keys and singledispatch functions are objects of the runtime's own; cached_property
+// a Python class; total_ordering adds what CPython's adds, by the same rules.
+
+// ---- partial ----
+
+internal lazy val __pyPartialType : PyType = pyNativeType("partial", "functools", ["__call__", "__repr__"], { t, args, kw ->
+  if (args.isEmpty() or (kw != null and args.size == kw!!.size)) { throw pyTypeError("type 'partial' takes at least one argument") }
+  val n = kw == null ? 0 : kw!!.size
+  var func = args[0]
+  var pos : open List<any?> = args[1..<(args.size - n)].toOpenList()
+  val names : open List<string> = []
+  val values : open List<any?> = []
+  // A partial of a partial: one partial of the first's function, its arguments first.
+  if (func is PyPartial) {
+    val inner = func as PyPartial
+    pos = (inner.args + pos).toOpenList()
+    names.addAll(inner.kwNames)
+    values.addAll(inner.kwValues)
+    func = inner.func
+  }
+  if (!pyTruth(pyCallable(func))) { throw pyTypeError("the first argument must be callable") }
+  for i in 0..<n {
+    val k = kw!![i]
+    val v = args[args.size - n + i]
+    val at = names.indexOf(k)
+    if (at >= 0) { values[at] = v } else { names.add(k); values.add(v) }
+  }
+  PyPartial(func, pos, names, values)
+})
+
+class PyPartial(val func : any?, val args : List<any?>, val kwNames : List<string>, val kwValues : List<any?>) : PyNative() {
+  override fun pyType() : PyType => __pyPartialType
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "func" -> func
+      "args" -> PyTuple(args)
+      "keywords" -> {
+        val d = PyDict()
+        for (i, k) in kwNames.withIndex() { d.set(k, kwValues[i]) }
+        d
+      }
+      else -> pyUnbound
+    }
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__call__" -> {
+        val values : open List<any?> = (args + a.pos).toOpenList()
+        val names : open List<string> = kwNames.toOpenList()
+        val kvs : open List<any?> = kwValues.toOpenList()
+        for (k, v) in a.kw {
+          val at = names.indexOf(k)
+          if (at >= 0) { kvs[at] = v } else { names.add(k); kvs.add(v) }
+        }
+        values.addAll(kvs)
+        pyCallV(func, values, names.isEmpty() ? null : names)
+      }
+      "__repr__" -> {
+        val parts : open List<string> = [pyRepr(func)]
+        for x in args { parts.add(pyRepr(x)) }
+        for (i, k) in kwNames.withIndex() { parts.add("$k=${pyRepr(kwValues[i])}") }
+        "functools.partial(${parts.join(", ")})"
+      }
+      else -> throw pyAttributeError("'functools.partial' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- lru_cache ----
+
+internal lazy val __pyCacheInfoType : PyType = pyNamedTuple(PyArgs(["CacheInfo", pyNewList(["hits", "misses", "maxsize", "currsize"])], null, "namedtuple()"))
+internal lazy val __pyLruType : PyType = pyNativeType("_lru_cache_wrapper", "functools", ["__call__", "cache_info", "cache_clear",
+  "cache_parameters", "__get__", "__repr__"], null)
+internal val __pyKwMark = PyTuple([])
+
+class PyLruCache(val func : any?, val maxsize : int, val typed : bool) : PyNative() {
+  val cache = PyDict()
+  var hits = 0
+  var misses = 0
+  val attrs = PyDict()
+  override fun pyType() : PyType => __pyLruType
+  fun key(a : PyArgs) : any? {
+    if (a.kw.isEmpty() and a.pos.size == 1 and !typed and (a.pos[0] is int or a.pos[0] is string)) { return a.pos[0] }
+    val parts : open List<any?> = a.pos.toOpenList()
+    if (a.kw.isNotEmpty()) {
+      parts.add(__pyKwMark)
+      for (k, v) in a.kw { parts.add(k); parts.add(v) }
+    }
+    if (typed) {
+      for x in a.pos { parts.add(pyTypeOf(x)) }
+      for (k, v) in a.kw { parts.add(pyTypeOf(v)) }
+    }
+    return PyTuple(parts)
+  }
+  override fun attr(name : string) : any? {
+    if (name == "__wrapped__") { return func }
+    if (name == "__dict__") { return attrs }
+    val own = attrs.get(name, pyUnbound)
+    if (own !== pyUnbound) { return own }
+    if (name == "__name__" or name == "__qualname__" or name == "__doc__" or name == "__module__") { return pyGetAttrOr(func, name, null) }
+    return pyUnbound
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__call__" -> {
+        if (maxsize == 0) {
+          misses += 1
+          val names : open List<string> = []
+          val values : open List<any?> = a.pos.toOpenList()
+          for (k, v) in a.kw { names.add(k); values.add(v) }
+          pyCallV(func, values, names.isEmpty() ? null : names)
+        } else {
+          val k = key(a)
+          val had = cache.get(k, pyUnbound)
+          if (had !== pyUnbound) {
+            hits += 1
+            if (maxsize > 0) { cache.remove(k); cache.set(k, had) }
+            had
+          } else {
+            misses += 1
+            val names : open List<string> = []
+            val values : open List<any?> = a.pos.toOpenList()
+            for (kk, v) in a.kw { names.add(kk); values.add(v) }
+            val r = pyCallV(func, values, names.isEmpty() ? null : names)
+            // A call inside that cached the same key already: that one stays.
+            if (!cache.has(k)) {
+              cache.set(k, r)
+              if (maxsize > 0 and cache.count > maxsize) { cache.remove(cache.keyList()[0]) }
+            }
+            r
+          }
+        }
+      }
+      "cache_info" -> pyCallV(__pyCacheInfoType, [hits, misses, maxsize < 0 ? null : maxsize, cache.count], null)
+      "cache_clear" -> { cache.clear(); hits = 0; misses = 0; null }
+      "cache_parameters" -> {
+        val d = PyDict()
+        d.set("maxsize", maxsize < 0 ? null : maxsize)
+        d.set("typed", typed)
+        d
+      }
+      "__get__" -> a.pos[0] == null ? this : PyMethod(this, a.pos[0])
+      "__repr__" -> "<functools._lru_cache_wrapper object at ${pyHexId(this)}>"
+      else -> throw pyAttributeError("'functools._lru_cache_wrapper' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+internal fun __pyLruOf(func : any?, maxsize : any?, typed : bool) : any? {
+  if (!pyTruth(pyCallable(func))) { throw pyTypeError("the first argument must be callable") }
+  val n = maxsize == null ? -1 : Math.max(0, pyIndex(maxsize))
+  val w = PyLruCache(func, n, typed)
+  __pyUpdateWrapper(w, func)
+  return w
+}
+
+// ---- wraps, update_wrapper ----
+
+internal val __pyWrapperAssignments : List<string> = ["__module__", "__name__", "__qualname__", "__doc__", "__annotate__", "__type_params__"]
+
+internal fun __pyUpdateWrapper(wrapper : any?, wrapped : any?) : any? {
+  for name in __pyWrapperAssignments {
+    val v = pyGetAttrOr(wrapped, name, pyUnbound)
+    if (v === pyUnbound) { continue }
+    try { pySetAttr(wrapper, name, v) } catch (e : PyError) {}
+  }
+  val mine = pyGetAttrOr(wrapper, "__dict__", null)
+  val theirs = pyGetAttrOr(wrapped, "__dict__", null)
+  if (mine is PyDict and theirs is PyDict) { for k in (theirs as PyDict).keyList() { (mine as PyDict).set(k, (theirs as PyDict).get(k, null)) } }
+  try { pySetAttr(wrapper, "__wrapped__", wrapped) } catch (e : PyError) {
+    if (wrapper is PyLruCache) {} else { throw e }
+  }
+  return wrapper
+}
+
+// ---- total_ordering ----
+
+internal fun __pyDerived(name : string, root : string, combine : (any?, any?, any?) -> any?) : PyBuiltin {
+  val b = PyBuiltin(name, { args, kw ->
+    val self = args[0]
+    val other = args[1]
+    val r = pyCall2(pyGetAttr(pyTypeOf(self), root), self, other)
+    r === pyNotImplemented ? r : combine(r, self, other)
+  })
+  b.owner = "total_ordering"
+  return b
+}
+
+fun pyTotalOrdering(cls : any?) : any? {
+  val t = cls as PyType
+  val roots : open List<string> = []
+  for op in ["__lt__", "__le__", "__gt__", "__ge__"] {
+    val m = t.lookup(op)
+    val fromObject = m === pyUnbound or m == null or (m is PyMethodDescriptor and (m as PyMethodDescriptor).owner === pyObjectType)
+    if (!fromObject) { roots.add(op) }
+  }
+  if (roots.isEmpty()) { throw pyValueError("must define at least one ordering operation: < > <= >=") }
+  var root = roots[0]
+  for r in roots { if (r > root) { root = r } }
+  fun eq(s : any?, o : any?) : bool => pyEqB(s, o)
+  val made : List<Pair<string, PyBuiltin>> = when (root) {
+    "__lt__" -> [Pair("__gt__", __pyDerived("__gt__", root, { r, s, o -> !pyTruth(r) and !eq(s, o) })),
+                 Pair("__le__", __pyDerived("__le__", root, { r, s, o -> pyTruth(r) or eq(s, o) })),
+                 Pair("__ge__", __pyDerived("__ge__", root, { r, s, o -> !pyTruth(r) }))]
+    "__le__" -> [Pair("__ge__", __pyDerived("__ge__", root, { r, s, o -> !pyTruth(r) or eq(s, o) })),
+                 Pair("__lt__", __pyDerived("__lt__", root, { r, s, o -> pyTruth(r) and !eq(s, o) })),
+                 Pair("__gt__", __pyDerived("__gt__", root, { r, s, o -> !pyTruth(r) }))]
+    "__gt__" -> [Pair("__lt__", __pyDerived("__lt__", root, { r, s, o -> !pyTruth(r) and !eq(s, o) })),
+                 Pair("__ge__", __pyDerived("__ge__", root, { r, s, o -> pyTruth(r) or eq(s, o) })),
+                 Pair("__le__", __pyDerived("__le__", root, { r, s, o -> !pyTruth(r) }))]
+    else -> [Pair("__le__", __pyDerived("__le__", root, { r, s, o -> !pyTruth(r) or eq(s, o) })),
+             Pair("__gt__", __pyDerived("__gt__", root, { r, s, o -> pyTruth(r) and !eq(s, o) })),
+             Pair("__lt__", __pyDerived("__lt__", root, { r, s, o -> !pyTruth(r) }))]
+  }
+  for p in made { if (!(p.first in roots)) { pySetAttr(t, p.first, p.second) } }
+  return t
+}
+
+// ---- cmp_to_key ----
+
+internal lazy val __pyKeyWrapperType : PyType = pyNativeType("KeyWrapper", "functools", ["__lt__", "__le__", "__gt__", "__ge__",
+  "__eq__", "__ne__", "__hash__"], null)
+
+class PyCmpKey(val cmp : any?, val obj : any?) : PyNative() {
+  override fun pyType() : PyType => __pyKeyWrapperType
+  override fun attr(name : string) : any? => name == "obj" ? obj : pyUnbound
+  override fun call(name : string, a : PyArgs) : any? {
+    if (name == "__hash__") { throw pyTypeError("unhashable type: 'functools.KeyWrapper'") }
+    val other = a.pos[0]
+    if (!(other is PyCmpKey)) { throw pyTypeError("other argument must be K instance") }
+    val r = pyCall2(cmp, obj, (other as PyCmpKey).obj)
+    return when (name) {
+      "__lt__" -> pyTruth(pyLt(r, 0))
+      "__le__" -> pyTruth(pyLe(r, 0))
+      "__gt__" -> pyTruth(pyGt(r, 0))
+      "__ge__" -> pyTruth(pyGe(r, 0))
+      "__eq__" -> pyEqB(r, 0)
+      else -> !pyEqB(r, 0)
+    }
+  }
+}
+
+// ---- singledispatch ----
+
+internal lazy val __pyDispatchType : PyType = pyNativeType("function", "functools", ["__call__", "register", "dispatch", "__repr__"], null)
+
+class PySingleDispatch(val func : any?) : PyNative() {
+  val registry = PyDict()
+  val attrs = PyDict()
+  init { registry.set(pyObjectType, func) }
+  override fun pyType() : PyType => __pyDispatchType
+  fun dispatch(cls : PyType) : any? {
+    for t in cls.mro {
+      val f = registry.get(t, pyUnbound)
+      if (f !== pyUnbound) { return f }
+    }
+    return func
+  }
+  fun register(cls : any?, f : any?) : any? {
+    if (cls is PyType) {
+      if (f == null) { return __pyB("register") { a -> register(cls, a.pos[0]) } }
+      registry.set(cls, f)
+      return f
+    }
+    // Its first parameter's annotation names the class.
+    val fn = cls
+    val ann = pyGetAttrOr(fn, "__annotations__", null)
+    var target : any? = null
+    if (ann is PyDict) {
+      for k in (ann as PyDict).keyList() {
+        if (k != "return") { target = (ann as PyDict).get(k, null); break }
+      }
+    }
+    if (!(target is PyType)) {
+      throw pyTypeError("Invalid first argument to `register()`: ${pyRepr(fn)}. Use either `@register(some_class)` or plain `@register` on an annotated function.")
+    }
+    registry.set(target, fn)
+    return fn
+  }
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "registry" -> registry
+      "__wrapped__" -> func
+      "__dict__" -> attrs
+      "register" -> __pyB("register") { a -> register(a.pos[0], a.pos.size > 1 ? a.pos[1] : null) }
+      "dispatch" -> __pyB("dispatch") { a -> dispatch(a.pos[0] as PyType) }
+      "__name__", "__qualname__", "__doc__", "__module__" -> {
+        val own = attrs.get(name, pyUnbound)
+        own !== pyUnbound ? own : pyGetAttrOr(func, name, null)
+      }
+      else -> attrs.get(name, pyUnbound)
+    }
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__call__" -> {
+        if (a.pos.isEmpty()) { throw pyTypeError("${pyGetAttrOr(func, "__name__", "singledispatch function")} requires at least 1 positional argument") }
+        val f = dispatch(pyTypeOf(a.pos[0]))
+        val names : open List<string> = []
+        val values : open List<any?> = a.pos.toOpenList()
+        for (k, v) in a.kw { names.add(k); values.add(v) }
+        pyCallV(f, values, names.isEmpty() ? null : names)
+      }
+      "register" -> register(a.pos[0], a.pos.size > 1 ? a.pos[1] : null)
+      "dispatch" -> dispatch(a.pos[0] as PyType)
+      "__repr__" -> "<function ${pyGetAttrOr(func, "__qualname__", "?")} at ${pyHexId(this)}>"
+      else -> throw pyAttributeError("'function' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- cached_property ----
+
+internal lazy val __pyCachedPropertyType : PyType = pyLibClass("cached_property", "functools", [pyObjectType], {
+  "__init__": pyLibMethod("cached_property", "__init__") { self, a ->
+    pySetAttr(self, "func", a.pos[0])
+    pySetAttr(self, "attrname", null)
+    pySetAttr(self, "__doc__", pyGetAttrOr(a.pos[0], "__doc__", null))
+    pySetAttr(self, "__module__", pyGetAttrOr(a.pos[0], "__module__", null))
+    null
+  },
+  "__set_name__": pyLibMethod("cached_property", "__set_name__") { self, a ->
+    val had = pyGetAttr(self, "attrname")
+    if (had == null) { pySetAttr(self, "attrname", a.pos[1]) } else if (!pyEqB(had, a.pos[1])) {
+      throw pyTypeError("Cannot assign the same cached_property to two different names (${pyRepr(had)} and ${pyRepr(a.pos[1])}).")
+    }
+    null
+  },
+  "__get__": pyLibMethod("cached_property", "__get__") { self, a ->
+    val instance = a.pos[0]
+    if (instance == null) { self } else {
+      val name = pyGetAttr(self, "attrname")
+      if (name == null) { throw pyTypeError("Cannot use cached_property instance without calling __set_name__ on it.") }
+      val d = pyGetAttrOr(instance, "__dict__", null)
+      if (!(d is PyDict)) {
+        throw pyTypeError("No '__dict__' attribute on ${pyRepr(pyTypeOf(instance).name)} instance to cache ${pyRepr(name)} property.")
+      }
+      val had = (d as PyDict).get(name, pyUnbound)
+      if (had !== pyUnbound) { had } else {
+        val v = pyCall1(pyGetAttr(self, "func"), instance)
+        (d as PyDict).set(name, v)
+        v
+      }
+    }
+  }
+})
+
+fun pyFunctoolsModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["reduce"] = __pyB("reduce") { a ->
+    if (a.pos.size < 2) { throw pyTypeError("reduce expected at least 2 arguments, got ${a.pos.size}") }
+    val f = a.pos[0]
+    val it = pyIter(a.pos[1])
+    var acc : any? = pyUnbound
+    if (a.pos.size > 2) { acc = a.pos[2] } else {
+      val first = pyNext(it)
+      if (first === pyEnd) { throw pyTypeError("reduce() of empty iterable with no initial value") }
+      acc = first
+    }
+    while (true) {
+      val x = pyNext(it)
+      if (x === pyEnd) { break }
+      acc = pyCall2(f, acc, x)
+    }
+    acc
+  }
+  m["partial"] = __pyPartialType
+  m["lru_cache"] = __pyB("lru_cache") { a ->
+    a.only(["maxsize", "typed"])
+    val typed = pyTruth(a.get("typed", false))
+    val first = a.pos.isNotEmpty() ? a.pos[0] : a.get("maxsize", 128)
+    if (first != null and pyTruth(pyCallable(first)) and !pyIsInt(first)) {
+      __pyLruOf(first, 128, typed)
+    } else {
+      if (first != null and !pyIsInt(first)) { throw pyTypeError("Expected first argument to be an integer, a callable, or None") }
+      __pyB("decorating_function") { b -> __pyLruOf(b.pos[0], first, typed) }
+    }
+  }
+  m["cache"] = __pyB("cache") { a -> __pyLruOf(a.pos[0], null, false) }
+  m["wraps"] = __pyB("wraps") { a ->
+    val wrapped = a.pos[0]
+    __pyB("decorator") { b -> __pyUpdateWrapper(b.pos[0], wrapped) }
+  }
+  m["update_wrapper"] = __pyB("update_wrapper") { a -> __pyUpdateWrapper(a.pos[0], a.pos[1]) }
+  m["WRAPPER_ASSIGNMENTS"] = PyTuple(__pyWrapperAssignments)
+  m["WRAPPER_UPDATES"] = PyTuple(["__dict__"])
+  m["total_ordering"] = __pyB("total_ordering") { a -> pyTotalOrdering(a.pos[0]) }
+  m["cmp_to_key"] = __pyB("cmp_to_key") { a ->
+    val cmp = a.pos[0]
+    __pyB("K") { b -> PyCmpKey(cmp, b.pos[0]) }
+  }
+  m["singledispatch"] = __pyB("singledispatch") { a ->
+    val d = PySingleDispatch(a.pos[0])
+    d
+  }
+  m["cached_property"] = __pyCachedPropertyType
+  return pyNativeModule("functools", m)
+}

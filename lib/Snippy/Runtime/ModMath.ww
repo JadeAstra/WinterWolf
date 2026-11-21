@@ -1,0 +1,800 @@
+import Snippy.Text.*
+// math (the Snippy plan, part 5.3, step 2), in WinterWolf (the user, 2026-11-21): Python's
+// functions with CPython's results and messages. Where CPython rounds exactly (fsum, hypot,
+// dist, sumprod, fmod, remainder, fma, ldexp), the exact value is worked out with BigInts and
+// rounded once; gamma and lgamma follow the Lanczos approximation as CPython computes it; erf
+// and erfc are worked out to more bits than a float has, then rounded.
+
+// ---- Floats as exact numbers ----
+
+// A finite float as m * 2**e, m a BigInt (its sign the float's).
+fun pyFloatExact(x : float) : Pair<BigInt, int> {
+  val b = Bytes(8)
+  b.putFloat64(0, x)
+  val bits = b.int64(0)
+  val field = ((bits >>> 52) & 0x7FF).toInt()
+  var mant = bits & 0xFFFFFFFFFFFFF
+  var e = -1074
+  if (field != 0) {
+    mant = mant | (1 << 52)
+    e = field - 1075
+  }
+  val m = BigInt.of(mant)
+  return Pair(bits < 0 ? -m : m, e)
+}
+
+internal fun __pyTwoTo(k : int) : float {
+  // 2.0 ** k exactly, k from -1074 to 1023, in two steps where one would leave the range.
+  if (k < -1022) { return 2.0.pow(k + 60) / 2.0.pow(60) }
+  return 2.0.pow(k)
+}
+
+// m * 2**e as the nearest float, ties to even; infinity past the largest.
+fun pyExactToFloat(m0 : BigInt, e : int) : float {
+  if (m0.isZero) { return 0.0 }
+  val negative = m0 < 0
+  val m = m0.abs()
+  val top = m.bitLength + e
+  if (top > 1024) { return negative ? -pyInf : pyInf }
+  var lsb = top - 53
+  if (lsb < -1074) { lsb = -1074 }
+  val shift = lsb - e
+  var r = m
+  if (shift > 0) {
+    r = m >> shift
+    val rest = m - (r << shift)
+    val half = BigInt.of(1) << (shift - 1)
+    if (rest > half or (rest == half and r.testBit(0))) { r = r + 1 }
+  } else if (shift < 0) {
+    r = m << (-shift)
+  }
+  // r has 54 bits at most: exact as a float, and its product with a power of two exact.
+  var f = r.toFloat()
+  var k = lsb
+  if (k > 900) { f = f * __pyTwoTo(900); k -= 900 }
+  f = f * __pyTwoTo(k)
+  return negative ? -f : f
+}
+
+// Exact values added: a list of (m, e), as one (m, e).
+internal fun __pyExactSum(parts : List<Pair<BigInt, int>>) : Pair<BigInt, int> {
+  if (parts.isEmpty()) { return Pair(BigInt.of(0), 0) }
+  var low = parts[0].second
+  for p in parts { if (p.second < low) { low = p.second } }
+  var total = BigInt.of(0)
+  for p in parts { total = total + (p.first << (p.second - low)) }
+  return Pair(total, low)
+}
+
+// ---- Arguments ----
+
+// A real number as a float, as CPython's math functions take one.
+fun pyRealArg(x : any?) : float {
+  if (x is float) { return x as float }
+  if (x is int) { return (x as int).toFloat() }
+  if (x is bool) { return (x as bool) ? 1.0 : 0.0 }
+  if (x is BigInt) {
+    val f = (x as BigInt).toFloat()
+    if (f.isInfinite()) { throw pyOverflowError("int too large to convert to float") }
+    return f
+  }
+  if (x is PyObject) {
+    val cls = (x as PyObject).cls
+    if (cls.lookup("__float__") !== pyUnbound or cls.lookup("__index__") !== pyUnbound or cls.layout >= 5) {
+      return pyToFloat(pyFloatOf1(x))
+    }
+  }
+  throw pyTypeError("must be real number, not ${pyTypeName(x)}")
+}
+
+internal fun __pyRangeError() : PyError => pyOverflowError("math range error")
+internal fun __pyDomainError() : PyError => pyValueError("math domain error")
+internal fun __pyFloatText(x : float) : string => pyReprFloat(x)
+
+// A one-argument function of floats, as CPython's math_1: what it gives for a finite argument
+// that is past its range an OverflowError, a NaN from a number a ValueError (`domain` saying how).
+internal fun __pyMath1(x0 : any?, f : (float) -> float, canOverflow : bool, domain : ((float) -> string?)?) : any? {
+  val x = pyRealArg(x0)
+  if (domain != null) {
+    val why = domain!!(x)
+    if (why != null) { throw pyValueError(why!!) }
+  }
+  val r = f(x)
+  if (r.isNaN() and !x.isNaN()) { throw __pyDomainError() }
+  if (r.isInfinite() and !x.isInfinite() and canOverflow) { throw __pyRangeError() }
+  return r
+}
+
+// ---- log of ints of any size ----
+
+// x's natural log, or its log2 or log10 (`which` 0, 2, 10), for an int or a float, as CPython's
+// loghelper: an int too large for a float through its top 53 bits and a power of two.
+internal fun __pyLog(x : any?, which : int) : float {
+  fun one(v : float) : float => which == 0 ? Math.ln(v) : which == 2 ? Math.log2(v) : Math.log10(v)
+  if (pyIsInt(x)) {
+    val n = pyBig(pyIndexValue(x))
+    if (n <= 0) { throw pyValueError("expected a positive input") }
+    val bits = n.bitLength
+    if (bits <= 1000) { return one(n.toFloat()) }
+    // n = m * 2**e with m in [0.5, 1).
+    val m = pyExactToFloat(n, -bits)
+    return one(m) + (which == 2 ? bits.toFloat() : one(2.0) * bits.toFloat())
+  }
+  val v = pyRealArg(x)
+  if (v.isNaN()) { return v }
+  if (v <= 0.0) { throw pyValueError("expected a positive input") }
+  return one(v)
+}
+
+// ---- gamma and lgamma, after CPython's m_tgamma and m_lgamma (the Lanczos approximation) ----
+
+internal val __pyLanczosG = 6.024680040776729583740234375
+internal val __pyLanczosGMinusHalf = 5.524680040776729583740234375
+internal val __pyLanczosNum = [23531376880.410759688572007674451636754734846804940, 42919803642.649098768957899047001988850926355848959,
+  35711959237.355668049440185451547166705960488635843, 17921034426.037209699919755754458931112671403265390,
+  6039542586.3520280050642916443072979210699388420708, 1439720407.3117216736632230727949123939715485786772,
+  248874557.86205415651146038641322942321632125127801, 31426415.585400194380614231628318205362874684987640,
+  2876370.6289353724412254090516208496135991145378768, 186056.26539522349504029498971604569928220784236328,
+  8071.6720023658162106380029022722506138218516325024, 210.82427775157934587250973392071336271166969580291,
+  2.5066282746310002701649081771338373386264310793408]
+internal val __pyLanczosDen = [0.0, 39916800.0, 120543840.0, 150917976.0, 105258076.0, 45995730.0, 13339535.0, 2637558.0,
+  357423.0, 32670.0, 1925.0, 66.0, 1.0]
+internal val __pyGammaIntegral = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0, 3628800.0, 39916800.0,
+  479001600.0, 6227020800.0, 87178291200.0, 1307674368000.0, 20922789888000.0, 355687428096000.0, 6402373705728000.0,
+  121645100408832000.0, 2432902008176640000.0, 51090942171709440000.0, 1124000727777607680000.0]
+internal val __pyLogPi = 1.144729885849400174143427351353058711647
+
+internal fun __pyLanczosSum(x : float) : float {
+  var num = 0.0
+  var den = 0.0
+  if (x < 5.0) {
+    for i in 12 downTo 0 {
+      num = num * x + __pyLanczosNum[i]
+      den = den * x + __pyLanczosDen[i]
+    }
+  } else {
+    for i in 0..<13 {
+      num = num / x + __pyLanczosNum[i]
+      den = den / x + __pyLanczosDen[i]
+    }
+  }
+  return num / den
+}
+
+internal fun __pySinPi(x : float) : float {
+  val y = __pyFmodFloat(Math.abs(x), 2.0)
+  val n = Math.round(2.0 * y)
+  val r = when (n) {
+    0 -> Math.sin(Math.pi * y)
+    1 -> Math.cos(Math.pi * (y - 0.5))
+    2 -> Math.sin(Math.pi * (1.0 - y))
+    3 -> -Math.cos(Math.pi * (y - 1.5))
+    else -> Math.sin(Math.pi * (y - 2.0))
+  }
+  return pyCopySign(1.0, x) * r
+}
+
+fun pyGamma(x : float) : float {
+  if (x.isNaN() or (x.isInfinite() and x > 0.0)) { return x }
+  if (x.isInfinite() or (x == __pyFloorF(x) and x <= 0.0)) {
+    throw pyValueError("expected a noninteger or positive integer, got ${__pyFloatText(x)}")
+  }
+  if (x == __pyFloorF(x) and x <= 23.0) { return __pyGammaIntegral[x.toInt() - 1] }
+  val absx = Math.abs(x)
+  if (absx < 1e-20) {
+    val r = 1.0 / x
+    if (r.isInfinite()) { throw __pyRangeError() }
+    return r
+  }
+  if (absx > 200.0) {
+    if (x < 0.0) { return 0.0 / __pySinPi(x) }
+    throw __pyRangeError()
+  }
+  val y = absx + __pyLanczosGMinusHalf
+  var z = 0.0
+  if (absx > __pyLanczosGMinusHalf) {
+    val q = y - absx
+    z = q - __pyLanczosGMinusHalf
+  } else {
+    val q = y - __pyLanczosGMinusHalf
+    z = q - absx
+  }
+  z = z * __pyLanczosG / y
+  var r = 0.0
+  if (x < 0.0) {
+    r = -Math.pi / __pySinPi(absx) / absx * Math.exp(y) / __pyLanczosSum(absx)
+    r -= z * r
+    if (absx < 140.0) { r /= y.pow(absx - 0.5) } else {
+      val sqrtpow = y.pow(absx / 2.0 - 0.25)
+      r /= sqrtpow
+      r /= sqrtpow
+    }
+  } else {
+    r = __pyLanczosSum(absx) / Math.exp(y)
+    r += z * r
+    if (absx < 140.0) { r *= y.pow(absx - 0.5) } else {
+      val sqrtpow = y.pow(absx / 2.0 - 0.25)
+      r *= sqrtpow
+      r *= sqrtpow
+    }
+  }
+  if (r.isInfinite()) { throw __pyRangeError() }
+  return r
+}
+
+fun pyLgamma(x : float) : float {
+  if (x.isNaN()) { return x }
+  if (x.isInfinite()) { return pyInf }
+  if (x == __pyFloorF(x) and x <= 2.0) {
+    if (x <= 0.0) { throw pyValueError("expected a noninteger or positive integer, got ${__pyFloatText(x)}") }
+    return 0.0
+  }
+  val absx = Math.abs(x)
+  if (absx < 1e-20) { return -Math.ln(absx) }
+  var r = Math.ln(__pyLanczosSum(absx)) - __pyLanczosG
+  r += (absx - 0.5) * (Math.ln(absx + __pyLanczosG - 0.5) - 1.0)
+  if (x < 0.0) { r = __pyLogPi - Math.ln(Math.abs(__pySinPi(absx))) - Math.ln(absx) - r }
+  if (r.isInfinite()) { throw __pyRangeError() }
+  return r
+}
+
+// ---- erf and erfc, to 160 bits and rounded ----
+
+// erf(x) or erfc(x) for a finite x: the Taylor series of erf, or for x past 3 the continued
+// fraction of erfc, in fixed point of `bits` bits after the point, then rounded to a float.
+internal fun __pyErfExact(x : float, complement : bool) : float {
+  if (x == 0.0) { return complement ? 1.0 : x }
+  val negative = x < 0.0
+  val ax = Math.abs(x)
+  if (!complement and ax >= 6.0) { return negative ? -1.0 : 1.0 }
+  if (complement and x >= 27.3) { return 0.0 }
+  if (complement and x <= -6.0) { return 2.0 }
+  val bits = 200 + (ax * ax * 1.5).toInt()
+  val one = BigInt.of(1) << bits
+  val px = pyFloatExact(ax)
+  // x in fixed point.
+  val fx = px.second + bits >= 0 ? px.first << (px.second + bits) : px.first >> -(px.second + bits)
+  val x2 = (fx * fx) >> bits
+  // 2 / sqrt(pi) in fixed point, from pi worked out here.
+  val twoOverSqrtPi = __pyTwoOverSqrtPi(bits)
+  var erfc : BigInt? = null
+  var erf : BigInt? = null
+  if (ax < 3.0 or !complement) {
+    // erf(x) = 2/sqrt(pi) * sum (-1)^n x^(2n+1) / (n! (2n+1))
+    var term = fx
+    var sum = fx
+    var n = 0
+    while (true) {
+      n += 1
+      term = -((term * x2) >> bits) / n
+      val add = term / (2 * n + 1)
+      if (add.isZero) { break }
+      sum = sum + add
+    }
+    erf = (sum * twoOverSqrtPi) >> bits
+  } else {
+    // erfc(x) = exp(-x^2) / sqrt(pi) * 1 / (x + 1/2 / (x + 1 / (x + 3/2 / (x + ...)))), from the far end.
+    var depth = 400
+    var cf = fx
+    for k in depth downTo 1 {
+      val half = (BigInt.of(k) << bits) / 2
+      cf = fx + (half << bits) / cf
+    }
+    val expNeg = __pyExpFixed(-x2, bits)
+    erfc = (((expNeg * twoOverSqrtPi) >> bits) / 2 << bits) / cf
+  }
+  var value = complement ? (erfc != null ? erfc!! : one - erf!!) : (erf != null ? erf!! : one - erfc!!)
+  if (negative) { value = complement ? (one + one) - value : -value }
+  return pyExactToFloat(value, -bits)
+}
+
+// exp(v) for v in fixed point (v <= 0), by halving it until small, a Taylor series, and squaring back.
+internal fun __pyExpFixed(v : BigInt, bits : int) : BigInt {
+  val one = BigInt.of(1) << bits
+  var halvings = 0
+  var w = v
+  while (w.abs() > (one >> 4)) { w = w / 2; halvings += 1 }
+  var term = one
+  var sum = one
+  var n = 0
+  while (true) {
+    n += 1
+    term = ((term * w) >> bits) / n
+    if (term.isZero) { break }
+    sum = sum + term
+  }
+  for i in 0..<halvings { sum = (sum * sum) >> bits }
+  return sum
+}
+
+// 2 / sqrt(pi) in fixed point of `bits` bits: pi by Machin's formula, its square root, divided into 2.
+internal fun __pyTwoOverSqrtPi(bits : int) : BigInt {
+  val guard = bits + 20
+  val one = BigInt.of(1) << guard
+  fun arctanInverse(k : int) : BigInt {
+    var power = one / k
+    var sum = power
+    var n = 1
+    val k2 = k * k
+    while (!power.isZero) {
+      power = power / k2
+      val term = power / (2 * n + 1)
+      sum = n % 2 == 1 ? sum - term : sum + term
+      n += 1
+    }
+    return sum
+  }
+  val pi = (arctanInverse(5) * 16) - (arctanInverse(239) * 4)
+  val sqrtPi = (pi << guard).sqrt()
+  return ((one << guard) * 2 / sqrtPi) >> 20
+}
+
+// ---- Exact float operations ----
+
+fun pyCopySign(x : float, y : float) : float {
+  val b = Bytes(8)
+  b.putFloat64(0, x)
+  val xb = b.int64(0)
+  b.putFloat64(0, y)
+  val yb = b.int64(0)
+  b.putInt64(0, (xb & 0x7FFFFFFFFFFFFFFF) | (yb & (1 << 63)))
+  return b.float64(0)
+}
+
+internal fun __pySignBit(x : float) : bool {
+  val b = Bytes(8)
+  b.putFloat64(0, x)
+  return b.int64(0) < 0
+}
+
+// fmod as C's: exact, the sign of x.
+internal fun __pyFmodFloat(x : float, y : float) : float {
+  if (x.isNaN() or y.isNaN()) { return x + y }
+  if (x.isInfinite() or y == 0.0) { return 0.0 / 0.0 }
+  if (y.isInfinite()) { return x }
+  val px = pyFloatExact(Math.abs(x))
+  val py = pyFloatExact(Math.abs(y))
+  val e = px.second < py.second ? px.second : py.second
+  val r = (px.first << (px.second - e)) % (py.first << (py.second - e))
+  return pyCopySign(pyExactToFloat(r, e), x)
+}
+
+// IEEE remainder: x - n*y, n the nearest integer to x/y, ties to even; exact.
+internal fun __pyRemainder(x : float, y : float) : float {
+  if (x.isNaN() or y.isNaN()) { return x + y }
+  if (x.isInfinite() or y == 0.0) { throw __pyDomainError() }
+  if (y.isInfinite()) { return x }
+  val px = pyFloatExact(Math.abs(x))
+  val py = pyFloatExact(Math.abs(y))
+  val e = px.second < py.second ? px.second : py.second
+  val bx = px.first << (px.second - e)
+  val by = py.first << (py.second - e)
+  val q = bx / by
+  var r = bx - q * by
+  val twice = r * 2
+  if (twice > by or (twice == by and q.testBit(0))) { r = r - by }
+  val f = pyExactToFloat(r, e)
+  return f == 0.0 ? pyCopySign(0.0, x) : (__pySignBit(x) ? -f : f)
+}
+
+// The square root of m * 2**e (m >= 0), the nearest float.
+internal fun __pyExactSqrt(m0 : BigInt, e0 : int) : float {
+  if (m0.isZero) { return 0.0 }
+  var m = m0
+  var e = e0
+  if (e % 2 != 0) { m = m << 1; e -= 1 }
+  // Enough bits that the root has 60 at least, and a bit below them for anything left over.
+  var k = 0
+  val need = 124 - m.bitLength
+  if (need > 0) { k = (need + 1) / 2 }
+  val scaled = m << (2 * k)
+  val r = scaled.sqrt()
+  val exact = r * r == scaled
+  return pyExactToFloat((r << 1) + (exact ? 0 : 1), e / 2 - k - 1)
+}
+
+// The length of a vector of floats, as CPython's vector_norm gives it: nearest the true value.
+internal fun __pyNorm(values : List<float>) : float {
+  var anyNan = false
+  for v in values {
+    if (v.isInfinite()) { return pyInf }
+    if (v.isNaN()) { anyNan = true }
+  }
+  if (anyNan) { return 0.0 / 0.0 }
+  val squares : open List<Pair<BigInt, int>> = []
+  for v in values {
+    val p = pyFloatExact(Math.abs(v))
+    squares.add(Pair(p.first * p.first, p.second * 2))
+  }
+  val sum = __pyExactSum(squares)
+  return __pyExactSqrt(sum.first, sum.second)
+}
+
+internal fun __pyFloats(x : any?) : List<float> => pyIterable(x).map { pyRealArg(it) }
+
+// ---- floor, ceil, trunc ----
+
+// A float made an int, toward minus infinity, plus infinity or zero (`way` -1, 1, 0).
+fun pyFloatToInt(f : float, way : int) : any? {
+  if (f.isNaN()) { throw pyValueError("cannot convert float NaN to integer") }
+  if (f.isInfinite()) { throw pyOverflowError("cannot convert float infinity to integer") }
+  val t = way < 0 ? __pyFloorF(f) : way > 0 ? __pyCeilF(f) : Math.trunc(f)
+  if (t > -9.0e18 and t < 9.0e18) { return t.toInt() }
+  return pyNorm(BigInt.of(t))
+}
+
+internal fun __pyRound(x : any?, dunder : string, way : int) : any? {
+  if (pyIsInt(x)) { return pyIndexValue(x) }
+  if (x is PyObject) {
+    val m = (x as PyObject).cls.lookup(dunder)
+    if (m !== pyUnbound and m != null) { return __pyCall1Special(m, x) }
+  }
+  if (!(x is float)) {
+    if (x is PyObject or x is string or x is Complex or !pyIsNumber(x)) {
+      if (dunder == "__trunc__") { throw pyTypeError("type ${pyTypeName(x)} doesn't define __trunc__ method") }
+    }
+  }
+  return pyFloatToInt(pyRealArg(x), way)
+}
+
+// ---- Ints ----
+
+internal fun __pyIntArg(x : any?) : BigInt {
+  if (x is float) { throw pyTypeError("'float' object cannot be interpreted as an integer") }
+  return pyBig(pyIndexValue(x))
+}
+
+// n! by splitting the product in halves, so that the numbers multiplied stay of a size.
+internal fun __pyProductRange(low : int, high : int) : BigInt {
+  if (high < low) { return BigInt.of(1) }
+  if (high - low < 8) {
+    var p = BigInt.of(low)
+    for i in (low + 1)..high { p = p * i }
+    return p
+  }
+  val mid = (low + high) / 2
+  return __pyProductRange(low, mid) * __pyProductRange(mid + 1, high)
+}
+
+internal fun __pyComb(n : BigInt, k0 : BigInt) : BigInt {
+  if (k0 > n) { return BigInt.of(0) }
+  var k = k0
+  if (k > n - k) { k = n - k }
+  val kk = k.toIntOrNull()
+  if (kk == null) { throw pyOverflowError("min(n - k, k) must not exceed 9223372036854775807") }
+  var r = BigInt.of(1)
+  for i in 1..kk!! { r = r * (n - kk!! + i) / i }
+  return r
+}
+
+// ---- The module ----
+
+fun pyMathModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["pi"] = Math.pi
+  m["e"] = Math.e
+  m["tau"] = 2.0 * Math.pi
+  m["inf"] = pyInf
+  m["nan"] = pyNaN
+  fun one(name : string, f : (float) -> float, canOverflow : bool = false, domain : ((float) -> string?)? = null) {
+    m[name] = __pyB(name) { a ->
+      __pyCheckCount(name, a, 1, 1)
+      __pyMath1(a.pos[0], f, canOverflow, domain)
+    }
+  }
+  fun finite(x : float) : string? => x.isInfinite() ? "expected a finite input, got ${__pyFloatText(x)}" : null
+  fun unit(x : float) : string? => x > 1.0 or x < -1.0 ? "expected a number in range from -1 up to 1, got ${__pyFloatText(x)}" : null
+  one("sqrt", { x -> Math.sqrt(x) }, false, { x -> x < 0.0 ? "expected a nonnegative input, got ${__pyFloatText(x)}" : null })
+  one("cbrt", { x -> pyCbrt(x) })
+  one("exp", { x -> Math.exp(x) }, true)
+  one("exp2", { x -> 2.0.pow(x) }, true)
+  one("expm1", { x -> Math.expm1(x) }, true)
+  one("log1p", { x -> Math.log1p(x) }, false, { x -> x <= -1.0 ? "expected argument value > -1, got ${__pyFloatText(x)}" : null })
+  one("sin", { x -> Math.sin(x) }, false, finite)
+  one("cos", { x -> Math.cos(x) }, false, finite)
+  one("tan", { x -> Math.tan(x) }, false, finite)
+  one("asin", { x -> Math.asin(x) }, false, unit)
+  one("acos", { x -> Math.acos(x) }, false, unit)
+  one("atan", { x -> Math.atan(x) })
+  one("sinh", { x -> Math.sinh(x) }, true)
+  one("cosh", { x -> Math.cosh(x) }, true)
+  one("tanh", { x -> Math.tanh(x) })
+  one("asinh", { x -> Math.asinh(x) })
+  one("acosh", { x -> Math.acosh(x) }, false, { x -> x < 1.0 ? "expected argument value not less than 1, got ${__pyFloatText(x)}" : null })
+  one("atanh", { x -> Math.atanh(x) }, false, { x -> x >= 1.0 or x <= -1.0 ? "expected a number between -1 and 1, got ${__pyFloatText(x)}" : null })
+  one("fabs", { x -> Math.abs(x) })
+  one("erf", { x -> x.isNaN() ? x : x.isInfinite() ? (x > 0.0 ? 1.0 : -1.0) : __pyErfExact(x, false) })
+  one("erfc", { x -> x.isNaN() ? x : x.isInfinite() ? (x > 0.0 ? 0.0 : 2.0) : __pyErfExact(x, true) })
+  m["gamma"] = __pyB("gamma") { a -> pyGamma(pyRealArg(a.pos[0])) }
+  m["lgamma"] = __pyB("lgamma") { a -> pyLgamma(pyRealArg(a.pos[0])) }
+  m["degrees"] = __pyB("degrees") { a -> pyRealArg(a.pos[0]) * (180.0 / Math.pi) }
+  m["radians"] = __pyB("radians") { a -> pyRealArg(a.pos[0]) * (Math.pi / 180.0) }
+  m["atan2"] = __pyB("atan2") { a ->
+    __pyCheckCount("atan2", a, 2, 2)
+    Math.atan2(pyRealArg(a.pos[0]), pyRealArg(a.pos[1]))
+  }
+  m["log"] = __pyB("log") { a ->
+    __pyCheckCount("log", a, 1, 2)
+    val num = __pyLog(a.pos[0], 0)
+    if (a.pos.size < 2) { num } else {
+      val den = __pyLog(a.pos[1], 0)
+      if (den == 0.0) { throw pyError(pyZeroDivisionErrorType, "division by zero") }
+      num / den
+    }
+  }
+  m["log2"] = __pyB("log2") { a -> __pyLog(a.pos[0], 2) }
+  m["log10"] = __pyB("log10") { a -> __pyLog(a.pos[0], 10) }
+  m["pow"] = __pyB("pow") { a ->
+    __pyCheckCount("pow", a, 2, 2)
+    val x = pyRealArg(a.pos[0])
+    val y = pyRealArg(a.pos[1])
+    if (x == 0.0 and y < 0.0 and !y.isInfinite() or (x == 0.0 and y == -pyInf)) {
+      if (x == 0.0 and y < 0.0) { throw __pyDomainError() }
+    }
+    if (x < 0.0 and !x.isInfinite() and !y.isInfinite() and y != __pyFloorF(y)) { throw __pyDomainError() }
+    val r = x.pow(y)
+    if (r.isInfinite() and !x.isInfinite() and !y.isInfinite()) { throw __pyRangeError() }
+    r
+  }
+  m["fmod"] = __pyB("fmod") { a ->
+    val x = pyRealArg(a.pos[0])
+    val y = pyRealArg(a.pos[1])
+    if ((x.isInfinite() and !y.isNaN()) or (y == 0.0 and !x.isNaN())) { throw __pyDomainError() }
+    __pyFmodFloat(x, y)
+  }
+  m["remainder"] = __pyB("remainder") { a -> __pyRemainder(pyRealArg(a.pos[0]), pyRealArg(a.pos[1])) }
+  m["copysign"] = __pyB("copysign") { a -> pyCopySign(pyRealArg(a.pos[0]), pyRealArg(a.pos[1])) }
+  m["floor"] = __pyB("floor") { a -> __pyRound(a.pos[0], "__floor__", -1) }
+  m["ceil"] = __pyB("ceil") { a -> __pyRound(a.pos[0], "__ceil__", 1) }
+  m["trunc"] = __pyB("trunc") { a -> __pyRound(a.pos[0], "__trunc__", 0) }
+  m["isfinite"] = __pyB("isfinite") { a -> val x = pyRealArg(a.pos[0]); !x.isNaN() and !x.isInfinite() }
+  m["isinf"] = __pyB("isinf") { a -> pyRealArg(a.pos[0]).isInfinite() }
+  m["isnan"] = __pyB("isnan") { a -> pyRealArg(a.pos[0]).isNaN() }
+  m["isclose"] = __pyB("isclose") { a ->
+    a.only(["rel_tol", "abs_tol"])
+    val x = pyRealArg(a.pos[0])
+    val y = pyRealArg(a.pos[1])
+    val rel = pyRealArg(a.get("rel_tol", 1e-09))
+    val abs = pyRealArg(a.get("abs_tol", 0.0))
+    if (rel < 0.0 or abs < 0.0) { throw pyValueError("tolerances must be non-negative") }
+    if (x == y) { true } else if (x.isInfinite() or y.isInfinite()) { false } else {
+      val diff = Math.abs(y - x)
+      (diff <= Math.abs(rel * y) or diff <= Math.abs(rel * x)) or diff <= abs
+    }
+  }
+  m["frexp"] = __pyB("frexp") { a ->
+    val x = pyRealArg(a.pos[0])
+    if (x == 0.0 or x.isNaN() or x.isInfinite()) { PyTuple([x, 0]) } else {
+      val p = pyFloatExact(x)
+      val bits = p.first.abs().bitLength
+      PyTuple([pyExactToFloat(p.first, -bits), p.second + bits])
+    }
+  }
+  m["ldexp"] = __pyB("ldexp") { a ->
+    val x = pyRealArg(a.pos[0])
+    if (a.pos[1] is float) { throw pyTypeError("Expected an int as second argument to ldexp.") }
+    val n = pyBig(pyIndexValue(a.pos[1]))
+    if (x == 0.0 or x.isNaN() or x.isInfinite()) { x } else if (n > 5000) { throw __pyRangeError() } else if (n < -5000) {
+      pyCopySign(0.0, x)
+    } else {
+      val p = pyFloatExact(x)
+      val r = pyExactToFloat(p.first, p.second + n.toInt())
+      if (r.isInfinite()) { throw __pyRangeError() }
+      r == 0.0 ? pyCopySign(0.0, x) : r
+    }
+  }
+  m["modf"] = __pyB("modf") { a ->
+    val x = pyRealArg(a.pos[0])
+    if (x.isInfinite()) { PyTuple([pyCopySign(0.0, x), x]) } else if (x.isNaN()) { PyTuple([x, x]) } else {
+      val whole = Math.trunc(x)
+      PyTuple([pyCopySign(x - whole, x), pyCopySign(whole, x)])
+    }
+  }
+  m["fma"] = __pyB("fma") { a ->
+    val x = pyRealArg(a.pos[0])
+    val y = pyRealArg(a.pos[1])
+    val z = pyRealArg(a.pos[2])
+    if (x.isNaN() or y.isNaN() or z.isNaN() or x.isInfinite() or y.isInfinite() or z.isInfinite()) {
+      val r = x * y + z
+      if (r.isNaN() and !x.isNaN() and !y.isNaN() and !z.isNaN()) { throw pyValueError("invalid operation in fma") }
+      r
+    } else {
+      val px = pyFloatExact(x)
+      val py = pyFloatExact(y)
+      val pz = pyFloatExact(z)
+      val sum = __pyExactSum([Pair(px.first * py.first, px.second + py.second), pz])
+      val r = pyExactToFloat(sum.first, sum.second)
+      if (r.isInfinite()) { throw pyOverflowError("overflow in fma") }
+      r == 0.0 ? (x * y + z) : r
+    }
+  }
+  m["nextafter"] = __pyB("nextafter") { a ->
+    a.only(["steps"])
+    if (a.pos.size != 2) { throw pyTypeError("nextafter() takes exactly 2 positional arguments (${a.pos.size} given)") }
+    var x = pyRealArg(a.pos[0])
+    val y = pyRealArg(a.pos[1])
+    val stepsArg = a.get("steps", null)
+    var steps = stepsArg == null ? 1 : pyIndex(stepsArg)
+    if (steps < 0) { throw pyValueError("steps must be a non-negative integer") }
+    while (steps > 0 and x != y and !x.isNaN() and !y.isNaN()) {
+      x = __pyNextAfter(x, y)
+      steps -= 1
+    }
+    x.isNaN() or y.isNaN() ? x + y : (x == y ? y : x)
+  }
+  m["ulp"] = __pyB("ulp") { a ->
+    val x = Math.abs(pyRealArg(a.pos[0]))
+    if (x.isNaN() or x.isInfinite()) { x } else {
+      val up = __pyNextAfter(x, pyInf)
+      if (up.isInfinite()) { x - __pyNextAfter(x, 0.0) } else { up - x }
+    }
+  }
+  m["hypot"] = __pyB("hypot") { a -> __pyNorm(a.pos.map { pyRealArg(it) }) }
+  m["dist"] = __pyB("dist") { a ->
+    __pyCheckCount("dist", a, 2, 2)
+    val p = __pyFloats(a.pos[0])
+    val q = __pyFloats(a.pos[1])
+    if (p.size != q.size) { throw pyValueError("both points must have the same number of dimensions") }
+    __pyNorm(p.indices.map { Math.abs(p[it] - q[it]) })
+  }
+  m["fsum"] = __pyB("fsum") { a ->
+    val values = __pyFloats(a.pos[0])
+    var plus = false
+    var minus = false
+    var nan = false
+    for v in values {
+      if (v.isNaN()) { nan = true }
+      if (v == pyInf) { plus = true }
+      if (v == -pyInf) { minus = true }
+    }
+    if (plus and minus) { throw pyValueError("-inf + inf in fsum") }
+    if (nan) { 0.0 / 0.0 } else if (plus) { pyInf } else if (minus) { -pyInf } else {
+      val sum = __pyExactSum(values.map { pyFloatExact(it) })
+      val r = pyExactToFloat(sum.first, sum.second)
+      if (r.isInfinite()) { throw pyOverflowError("intermediate overflow in fsum") }
+      r == 0.0 and values.isNotEmpty() and values.all { __pySignBit(it) } ? -0.0 : r
+    }
+  }
+  m["sumprod"] = __pyB("sumprod") { a ->
+    __pyCheckCount("sumprod", a, 2, 2)
+    val p = pyIterable(a.pos[0])
+    val q = pyIterable(a.pos[1])
+    if (p.size != q.size) { throw pyValueError("Inputs are not the same length") }
+    val ints = p.all { pyIsInt(it) } and q.all { pyIsInt(it) }
+    val reals = p.all { pyIsInt(it) or it is float } and q.all { pyIsInt(it) or it is float }
+    if (ints) {
+      var total = BigInt.of(0)
+      for i in p.indices { total = total + pyBig(pyIndexValue(p[i])) * pyBig(pyIndexValue(q[i])) }
+      pyNorm(total)
+    } else if (reals and p.indices.all { !(p[it] is float and ((p[it] as float).isNaN() or (p[it] as float).isInfinite())) and !(q[it] is float and ((q[it] as float).isNaN() or (q[it] as float).isInfinite())) }) {
+      val parts : open List<Pair<BigInt, int>> = []
+      for i in p.indices {
+        val x = pyFloatExact(pyRealArg(p[i]))
+        val y = pyFloatExact(pyRealArg(q[i]))
+        parts.add(Pair(x.first * y.first, x.second + y.second))
+      }
+      val sum = __pyExactSum(parts)
+      pyExactToFloat(sum.first, sum.second)
+    } else {
+      var total : any? = 0
+      for i in p.indices { total = pyAdd(total, pyMul(p[i], q[i])) }
+      total
+    }
+  }
+  m["prod"] = __pyB("prod") { a ->
+    a.only(["start"])
+    var r = a.get("start", 1)
+    for x in pyIterable(a.pos[0]) { r = pyMul(r, x) }
+    r
+  }
+  m["isqrt"] = __pyB("isqrt") { a ->
+    val n = __pyIntArg(a.pos[0])
+    if (n < 0) { throw pyValueError("isqrt() argument must be nonnegative") }
+    pyNorm(n.sqrt())
+  }
+  m["factorial"] = __pyB("factorial") { a ->
+    val n = __pyIntArg(a.pos[0])
+    if (n < 0) { throw pyValueError("factorial() not defined for negative values") }
+    val k = n.toIntOrNull()
+    if (k == null) { throw pyOverflowError("factorial() argument should not exceed 9223372036854775807") }
+    pyNorm(k!! < 2 ? BigInt.of(1) : __pyProductRange(2, k!!))
+  }
+  m["comb"] = __pyB("comb") { a ->
+    __pyCheckCount("comb", a, 2, 2)
+    val n = __pyIntArg(a.pos[0])
+    val k = __pyIntArg(a.pos[1])
+    if (n < 0) { throw pyValueError("n must be a non-negative integer") }
+    if (k < 0) { throw pyValueError("k must be a non-negative integer") }
+    pyNorm(__pyComb(n, k))
+  }
+  m["perm"] = __pyB("perm") { a ->
+    __pyCheckCount("perm", a, 1, 2)
+    val n = __pyIntArg(a.pos[0])
+    if (a.pos.size < 2 or a.pos[1] == null) {
+      if (n < 0) { throw pyValueError("factorial() not defined for negative values") }
+      val nn = n.toIntOrNull()
+      if (nn == null) { throw pyOverflowError("factorial() argument should not exceed 9223372036854775807") }
+      pyNorm(nn!! < 2 ? BigInt.of(1) : __pyProductRange(2, nn!!))
+    } else {
+      val k = __pyIntArg(a.pos[1])
+      if (n < 0) { throw pyValueError("n must be a non-negative integer") }
+      if (k < 0) { throw pyValueError("k must be a non-negative integer") }
+      if (k > n) { 0 } else {
+        val nn = n.toIntOrNull()
+        val kk = k.toIntOrNull()
+        if (nn == null or kk == null) { throw pyOverflowError("n must not exceed 9223372036854775807") }
+        pyNorm(kk!! == 0 ? BigInt.of(1) : __pyProductRange(nn!! - kk!! + 1, nn!!))
+      }
+    }
+  }
+  m["gcd"] = __pyB("gcd") { a ->
+    var g = BigInt.of(0)
+    for x in a.pos { g = g.gcd(__pyIntArg(x)) }
+    pyNorm(g.abs())
+  }
+  m["lcm"] = __pyB("lcm") { a ->
+    var l = BigInt.of(1)
+    for x in a.pos {
+      val v = __pyIntArg(x).abs()
+      if (v.isZero) { l = BigInt.of(0) } else if (!l.isZero) { l = l / l.gcd(v) * v }
+    }
+    pyNorm(l)
+  }
+  return pyNativeModule("math", m)
+}
+
+// A count of positional arguments, as CPython's math functions check it.
+internal fun __pyCheckCount(name : string, a : PyArgs, low : int, high : int) {
+  val n = a.pos.size
+  if (n >= low and n <= high) { return }
+  if (low == high) {
+    throw pyTypeError(low == 1 ? "math.$name() takes exactly one argument ($n given)" : "$name expected $low arguments, got $n")
+  }
+  throw pyTypeError(n < low ? "$name expected at least $low argument${low == 1 ? "" : "s"}, got $n" : "$name expected at most $high arguments, got $n")
+}
+
+// The next float after x toward y.
+internal fun __pyNextAfter(x : float, y : float) : float {
+  if (x.isNaN() or y.isNaN()) { return x + y }
+  if (x == y) { return y }
+  if (x == 0.0) { return y > 0.0 ? 5e-324 : -5e-324 }
+  val b = Bytes(8)
+  b.putFloat64(0, x)
+  var bits = b.int64(0)
+  val up = (y > x) == (x > 0.0)
+  bits = up ? bits + 1 : bits - 1
+  b.putInt64(0, bits)
+  return b.float64(0)
+}
+
+// cbrt as the C library computes it on Linux (glibc's): a polynomial guess on [0.5, 1) and one
+// step of Halley's method, its result not always the nearest float (cbrt(27) is 3.0000000000000004).
+fun pyCbrt(x : float) : float {
+  if (x == 0.0 or x.isNaN() or x.isInfinite()) { return x + x }
+  val p = pyFloatExact(Math.abs(x))
+  val bits = p.first.bitLength
+  var xe = p.second + bits
+  val xm = pyExactToFloat(p.first, -bits)
+  val u = 0.354895765043919860 + ((1.50819193781584896 + ((-2.11499494167371287 + ((2.44693122563534430 +
+          ((-1.83469277483613086 + (0.784932344976639262 - 0.145263899385486377 * xm) * xm) * xm)) * xm)) * xm)) * xm)
+  val t2 = u * u * u
+  val factors = [1.0 / 1.5874010519681994748, 1.0 / 1.2599210498948731648, 1.0, 1.2599210498948731648, 1.5874010519681994748]
+  // C's xe % 3, of the sign of xe.
+  val rem = xe % 3
+  val ym = u * (t2 + 2.0 * xm) / (2.0 * t2 + xm) * factors[2 + rem]
+  val q = xe / 3
+  val r = pyExactToFloat(pyFloatExact(x > 0.0 ? ym : -ym).first, pyFloatExact(x > 0.0 ? ym : -ym).second + q)
+  return r
+}
+
+// floor and ceil of a float, as floats (Math's give ints).
+internal fun __pyFloorF(x : float) : float {
+  if (x.isNaN() or x.isInfinite()) { return x }
+  val t = Math.trunc(x)
+  return t > x ? t - 1.0 : t
+}
+internal fun __pyCeilF(x : float) : float {
+  if (x.isNaN() or x.isInfinite()) { return x }
+  val t = Math.trunc(x)
+  return t < x ? t + 1.0 : t
+}

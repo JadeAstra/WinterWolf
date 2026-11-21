@@ -1,0 +1,481 @@
+import Snippy.Text.*
+// itertools (the Snippy plan, part 5.3, step 2), in WinterWolf: each of its functions a type of
+// the module, whose objects are iterators taking each item as it is asked for, as CPython's;
+// groupby's groups share their iterator as CPython's do.
+
+internal val __pyItertoolsTypes : open Map<string, PyType> = {:}
+
+// The itertools type `name`, made the first time, `make` making its objects from a call's arguments.
+internal fun __pyItType(name : string, make : ((PyArgs) -> any?)?) : PyType {
+  val had = __pyItertoolsTypes[name]
+  if (had != null) { return had!! }
+  val t = PyType(name, name, "itertools")
+  t.builtin = true
+  t.bases = [pyObjectType]
+  t.mro = [t, pyObjectType]
+  t.dict["__next__"] = PyMethodDescriptor(t, "__next__")
+  t.dict["__iter__"] = PyMethodDescriptor(t, "__iter__")
+  if (make != null) { t.construct = { tt, args, kw -> make!!(PyArgs(args, kw, "$name()")) } }
+  __pyItertoolsTypes[name] = t
+  return t
+}
+
+// An itertools iterator: `step` gives each item, or pyEnd; `repr` its repr where it has one.
+class PyItIter(val typeName : string, val step : () -> any?, val reprOf : (() -> string)? = null) : PyIterator() {
+  var done = false
+  override fun next() : any? {
+    if (done) { return pyEnd }
+    val v = step()
+    if (v === pyEnd) { done = true }
+    return v
+  }
+  override fun pyType() : PyType => __pyItType(typeName, null)
+  override fun reprText() : string? => reprOf == null ? null : reprOf!!()
+}
+
+internal fun __pyNoKw(a : PyArgs, name : string) {
+  if (a.kw.isNotEmpty()) { throw pyTypeError("$name() takes no keyword arguments") }
+}
+
+// An index of islice's: None, or an int from 0 to sys.maxsize.
+internal fun __pyIsliceIndex(x : any?, what : string) : int {
+  if (x == null) { return -1 }
+  val bad = { -> pyValueError(what == "stop" ? "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize." :
+                                                "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.") }
+  if (!pyIsInt(x)) { throw bad() }
+  val v = pyIndexValue(x)
+  if (v is BigInt or (v as int) < 0) { throw bad() }
+  return v as int
+}
+
+internal fun __pyTuple(items : List<any?>) : PyTuple => PyTuple(items.toList())
+
+fun pyItertoolsModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["count"] = __pyItType("count") { a ->
+    a.only(["start", "step"])
+    var cur = a.pos.isNotEmpty() ? a.pos[0] : a.get("start", 0)
+    val step = a.pos.size > 1 ? a.pos[1] : a.get("step", 1)
+    if (!pyIsNumber(cur) and !(cur is PyObject)) { throw pyTypeError("a number is required") }
+    PyItIter("count", {
+      val v = cur
+      cur = pyAdd(cur, step)
+      v
+    }, { -> pyIsInt(step) and pyEqB(step, 1) ? "count(${pyRepr(cur)})" : "count(${pyRepr(cur)}, ${pyRepr(step)})" })
+  }
+  m["cycle"] = __pyItType("cycle") { a ->
+    __pyNoKw(a, "cycle")
+    val it = pyIter(a.pos[0])
+    val saved : open List<any?> = []
+    var first = true
+    var i = 0
+    PyItIter("cycle", {
+      if (first) {
+        val v = pyNext(it)
+        if (v !== pyEnd) { saved.add(v); v } else {
+          first = false
+          if (saved.isEmpty()) { pyEnd } else { i = 1; saved[0] }
+        }
+      } else if (saved.isEmpty()) { pyEnd } else {
+        val v = saved[i % saved.size]
+        i += 1
+        v
+      }
+    })
+  }
+  m["repeat"] = __pyItType("repeat") { a ->
+    a.only(["object", "times"])
+    val obj = a.pos.isNotEmpty() ? a.pos[0] : a.get("object", null)
+    val timesArg = a.pos.size > 1 ? a.pos[1] : a.get("times", null)
+    var left = timesArg == null ? -1 : Math.max(0, pyIndex(timesArg))
+    PyItIter("repeat", {
+      if (left == 0) { pyEnd } else {
+        if (left > 0) { left -= 1 }
+        obj
+      }
+    }, { -> left < 0 ? "repeat(${pyRepr(obj)})" : "repeat(${pyRepr(obj)}, $left)" })
+  }
+  m["accumulate"] = __pyItType("accumulate") { a ->
+    a.only(["func", "initial"])
+    val it = pyIter(a.pos[0])
+    val func = a.pos.size > 1 ? a.pos[1] : a.get("func", null)
+    var total : any? = a.get("initial", null)
+    var started = total != null
+    var gaveInitial = false
+    PyItIter("accumulate", {
+      if (started and !gaveInitial) {
+        gaveInitial = true
+        total
+      } else {
+        val v = pyNext(it)
+        if (v === pyEnd) { pyEnd } else {
+          if (!started) { started = true; gaveInitial = true; total = v } else { total = func == null ? pyAdd(total, v) : pyCall2(func, total, v) }
+          total
+        }
+      }
+    })
+  }
+  fun chainOf(sources : () -> any?) : PyItIter {
+    var current : any? = null
+    return PyItIter("chain", {
+      var r : any? = pyEnd
+      while (true) {
+        if (current == null) {
+          val next = sources()
+          if (next === pyEnd) { break }
+          current = pyIter(next)
+        }
+        val v = pyNext(current)
+        if (v !== pyEnd) { r = v; break }
+        current = null
+      }
+      r
+    })
+  }
+  val chain = __pyItType("chain") { a ->
+    __pyNoKw(a, "chain")
+    var i = 0
+    val its = a.pos
+    chainOf({ -> if (i < its.size) { i += 1; its[i - 1] } else { pyEnd } })
+  }
+  chain.dict["from_iterable"] = PyClassMethod(PyBuiltin("from_iterable", { args, kw ->
+    val outer = pyIter(args[1])
+    chainOf({ -> pyNext(outer) })
+  }))
+  m["chain"] = chain
+  m["compress"] = __pyItType("compress") { a ->
+    val data = pyIter(a.pos.isNotEmpty() ? a.pos[0] : a.get("data", null))
+    val sel = pyIter(a.pos.size > 1 ? a.pos[1] : a.get("selectors", null))
+    PyItIter("compress", {
+      var r : any? = pyEnd
+      while (true) {
+        val d = pyNext(data)
+        if (d === pyEnd) { break }
+        val s = pyNext(sel)
+        if (s === pyEnd) { break }
+        if (pyTruth(s)) { r = d; break }
+      }
+      r
+    })
+  }
+  m["dropwhile"] = __pyItType("dropwhile") { a ->
+    __pyNoKw(a, "dropwhile")
+    val pred = a.pos[0]
+    val it = pyIter(a.pos[1])
+    var dropping = true
+    PyItIter("dropwhile", {
+      var r : any? = pyEnd
+      while (true) {
+        val v = pyNext(it)
+        if (v === pyEnd) { break }
+        if (dropping and pyTruth(pyCall1(pred, v))) { continue }
+        dropping = false
+        r = v
+        break
+      }
+      r
+    })
+  }
+  m["takewhile"] = __pyItType("takewhile") { a ->
+    __pyNoKw(a, "takewhile")
+    val pred = a.pos[0]
+    val it = pyIter(a.pos[1])
+    PyItIter("takewhile", {
+      val v = pyNext(it)
+      v === pyEnd or !pyTruth(pyCall1(pred, v)) ? pyEnd : v
+    })
+  }
+  m["filterfalse"] = __pyItType("filterfalse") { a ->
+    __pyNoKw(a, "filterfalse")
+    val pred = a.pos[0]
+    val it = pyIter(a.pos[1])
+    PyItIter("filterfalse", {
+      var r : any? = pyEnd
+      while (true) {
+        val v = pyNext(it)
+        if (v === pyEnd) { break }
+        val keep = pred == null ? pyTruth(v) : pyTruth(pyCall1(pred, v))
+        if (!keep) { r = v; break }
+      }
+      r
+    })
+  }
+  m["groupby"] = __pyItType("groupby") { a ->
+    a.only(["iterable", "key"])
+    PyGroupBy(pyIter(a.pos.isNotEmpty() ? a.pos[0] : a.get("iterable", null)), a.pos.size > 1 ? a.pos[1] : a.get("key", null))
+  }
+  m["islice"] = __pyItType("islice") { a ->
+    __pyNoKw(a, "islice")
+    if (a.pos.size < 2 or a.pos.size > 4) { throw pyTypeError("islice expected at most 4 arguments, got ${a.pos.size}") }
+    val it = pyIter(a.pos[0])
+    var start = 0
+    var stop = -1
+    var step = 1
+    if (a.pos.size == 2) { stop = __pyIsliceIndex(a.pos[1], "stop") } else {
+      val s = __pyIsliceIndex(a.pos[1], "start")
+      start = s < 0 ? 0 : s
+      stop = __pyIsliceIndex(a.pos[2], "stop")
+      if (a.pos.size > 3 and a.pos[3] != null) {
+        if (!pyIsInt(a.pos[3]) or pyIndex(a.pos[3]) < 1) { throw pyValueError("Step for islice() must be a positive integer or None.") }
+        step = pyIndex(a.pos[3])
+      }
+    }
+    var at = 0
+    var next = start
+    PyItIter("islice", {
+      var r : any? = pyEnd
+      if (stop < 0 or next < stop) {
+        while (at < next) {
+          if (pyNext(it) === pyEnd) { at = -1; break }
+          at += 1
+        }
+        if (at >= 0) {
+          val v = pyNext(it)
+          if (v !== pyEnd) {
+            at += 1
+            next += step
+            r = v
+          }
+        }
+      }
+      r
+    })
+  }
+  m["pairwise"] = __pyItType("pairwise") { a ->
+    __pyNoKw(a, "pairwise")
+    val it = pyIter(a.pos[0])
+    var last : any? = pyUnbound
+    PyItIter("pairwise", {
+      if (last === pyUnbound) { last = pyNext(it) }
+      if (last === pyEnd) { pyEnd } else {
+        val v = pyNext(it)
+        if (v === pyEnd) { last = pyEnd; pyEnd } else {
+          val pair = PyTuple([last, v])
+          last = v
+          pair
+        }
+      }
+    })
+  }
+  m["starmap"] = __pyItType("starmap") { a ->
+    __pyNoKw(a, "starmap")
+    val f = a.pos[0]
+    val it = pyIter(a.pos[1])
+    PyItIter("starmap", {
+      val v = pyNext(it)
+      v === pyEnd ? pyEnd : pyCallV(f, pyIterable(v), null)
+    })
+  }
+  m["zip_longest"] = __pyItType("zip_longest") { a ->
+    a.only(["fillvalue"])
+    val fill = a.get("fillvalue", null)
+    val its : open List<any?> = a.pos.map { pyIter(it) }.toOpenList()
+    val active : open List<bool> = its.map { true }.toOpenList()
+    var live = its.size
+    PyItIter("zip_longest", {
+      if (its.isEmpty() or live == 0) { pyEnd } else {
+        val row : open List<any?> = []
+        for (i, it) in its.withIndex() {
+          if (!active[i]) { row.add(fill); continue }
+          val v = pyNext(it)
+          if (v === pyEnd) {
+            active[i] = false
+            live -= 1
+            row.add(fill)
+          } else { row.add(v) }
+        }
+        live == 0 ? pyEnd : PyTuple(row)
+      }
+    })
+  }
+  m["tee"] = __pyB("tee") { a ->
+    val n = a.pos.size > 1 ? pyIndex(a.pos[1]) : 2
+    if (n < 0) { throw pyValueError("n must be >= 0") }
+    val source = pyIter(a.pos[0])
+    val buffer : open List<any?> = []
+    var ended = false
+    val made : open List<any?> = []
+    for k in 0..<n {
+      var i = 0
+      made.add(PyItIter("_tee", {
+        if (i < buffer.size) { i += 1; buffer[i - 1] } else if (ended) { pyEnd } else {
+          val v = pyNext(source)
+          if (v === pyEnd) { ended = true; pyEnd } else { buffer.add(v); i += 1; v }
+        }
+      }))
+    }
+    PyTuple(made)
+  }
+  m["batched"] = __pyItType("batched") { a ->
+    a.only(["strict"])
+    val n = pyIndex(a.pos[1])
+    if (n < 1) { throw pyValueError("n must be at least one") }
+    val strict = pyTruth(a.get("strict", false))
+    val it = pyIter(a.pos[0])
+    PyItIter("batched", {
+      val batch : open List<any?> = []
+      while (batch.size < n) {
+        val v = pyNext(it)
+        if (v === pyEnd) { break }
+        batch.add(v)
+      }
+      if (batch.isEmpty()) { pyEnd } else {
+        if (strict and batch.size < n) { throw pyValueError("batched(): incomplete batch") }
+        PyTuple(batch)
+      }
+    })
+  }
+  m["product"] = __pyItType("product") { a ->
+    a.only(["repeat"])
+    val repeat = pyIndex(a.get("repeat", 1))
+    val pools : open List<List<any?>> = []
+    for r in 0..<Math.max(0, repeat) { for p in a.pos { pools.add(pyIterable(p).toList()) } }
+    val idx : open List<int> = pools.map { 0 }.toOpenList()
+    var first = true
+    var over = pools.any { it.isEmpty() }
+    PyItIter("product", {
+      if (over) { pyEnd } else if (first) {
+        first = false
+        PyTuple(pools.indices.map { pools[it][0] })
+      } else {
+        var i = pools.size - 1
+        while (i >= 0) {
+          idx[i] += 1
+          if (idx[i] < pools[i].size) { break }
+          idx[i] = 0
+          i -= 1
+        }
+        if (i < 0) { over = true; pyEnd } else { PyTuple(pools.indices.map { pools[it][idx[it]] }) }
+      }
+    })
+  }
+  m["combinations"] = __pyItType("combinations") { a ->
+    val pool = pyIterable(a.pos[0]).toList()
+    val r = pyIndex(a.pos.size > 1 ? a.pos[1] : a.get("r", null))
+    if (r < 0) { throw pyValueError("r must be non-negative") }
+    val n = pool.size
+    val idx : open List<int> = (0..<r).toList().toOpenList()
+    var first = true
+    var over = r > n
+    PyItIter("combinations", {
+      if (over) { pyEnd } else if (first) {
+        first = false
+        PyTuple(idx.map { pool[it] })
+      } else {
+        var i = r - 1
+        while (i >= 0 and idx[i] == i + n - r) { i -= 1 }
+        if (i < 0) { over = true; pyEnd } else {
+          idx[i] += 1
+          for j in (i + 1)..<r { idx[j] = idx[j - 1] + 1 }
+          PyTuple(idx.map { pool[it] })
+        }
+      }
+    })
+  }
+  m["combinations_with_replacement"] = __pyItType("combinations_with_replacement") { a ->
+    val pool = pyIterable(a.pos[0]).toList()
+    val r = pyIndex(a.pos.size > 1 ? a.pos[1] : a.get("r", null))
+    if (r < 0) { throw pyValueError("r must be non-negative") }
+    val n = pool.size
+    val idx : open List<int> = (0..<r).map { 0 }.toOpenList()
+    var first = true
+    var over = n == 0 and r > 0
+    PyItIter("combinations_with_replacement", {
+      if (over) { pyEnd } else if (first) {
+        first = false
+        PyTuple(idx.map { pool[it] })
+      } else {
+        var i = r - 1
+        while (i >= 0 and idx[i] == n - 1) { i -= 1 }
+        if (i < 0) { over = true; pyEnd } else {
+          val v = idx[i] + 1
+          for j in i..<r { idx[j] = v }
+          PyTuple(idx.map { pool[it] })
+        }
+      }
+    })
+  }
+  m["permutations"] = __pyItType("permutations") { a ->
+    val pool = pyIterable(a.pos[0]).toList()
+    val n = pool.size
+    val rArg = a.pos.size > 1 ? a.pos[1] : a.get("r", null)
+    val r = rArg == null ? n : pyIndex(rArg)
+    if (r < 0) { throw pyValueError("r must be non-negative") }
+    val idx : open List<int> = (0..<n).toList().toOpenList()
+    val cycles : open List<int> = (0..<r).map { n - it }.toOpenList()
+    var first = true
+    var over = r > n
+    PyItIter("permutations", {
+      if (over) { pyEnd } else if (first) {
+        first = false
+        PyTuple((0..<r).map { pool[idx[it]] })
+      } else {
+        var found = false
+        var i = r - 1
+        while (i >= 0) {
+          cycles[i] -= 1
+          if (cycles[i] == 0) {
+            val moved = idx[i]
+            idx.removeAt(i)
+            idx.add(moved)
+            cycles[i] = n - i
+          } else {
+            val j = cycles[i]
+            val t = idx[i]
+            idx[i] = idx[n - j]
+            idx[n - j] = t
+            found = true
+            break
+          }
+          i -= 1
+        }
+        if (!found) { over = true; pyEnd } else { PyTuple((0..<r).map { pool[idx[it]] }) }
+      }
+    })
+  }
+  return pyNativeModule("itertools", m)
+}
+
+// groupby: (key, group) for each run of items of one key, each group taking its items from the
+// groupby's own iterator, and given none once the groupby moves on (CPython's groupby_next and
+// _grouper_next).
+class PyGroupBy(val it : any?, val keyFunc : any?) : PyIterator() {
+  var tgtkey : any? = pyUnbound
+  var currkey : any? = pyUnbound
+  var currvalue : any? = pyUnbound
+  var current : any? = null
+  override fun pyType() : PyType => __pyItType("groupby", null)
+  fun step() : bool {
+    val v = pyNext(it)
+    if (v === pyEnd) { return false }
+    currkey = keyFunc == null ? v : pyCall1(keyFunc, v)
+    currvalue = v
+    return true
+  }
+  override fun next() : any? {
+    current = null
+    while (true) {
+      if (currkey === pyUnbound) {
+      } else if (tgtkey === pyUnbound) { break } else if (!pyEqB(tgtkey, currkey)) { break }
+      if (!step()) { return pyEnd }
+    }
+    tgtkey = currkey
+    val group = PyGrouper(this, tgtkey)
+    current = group
+    return PyTuple([tgtkey, group])
+  }
+}
+
+class PyGrouper(val parent : PyGroupBy, val tgtkey : any?) : PyIterator() {
+  override fun pyType() : PyType => __pyItType("_grouper", null)
+  override fun next() : any? {
+    if (parent.current !== this) { return pyEnd }
+    if (parent.currvalue === pyUnbound) {
+      if (!parent.step()) { return pyEnd }
+    }
+    if (!pyEqB(tgtkey, parent.currkey)) { return pyEnd }
+    val r = parent.currvalue
+    parent.currvalue = pyUnbound
+    return r
+  }
+}

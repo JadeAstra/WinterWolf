@@ -56,7 +56,7 @@ if (Program.environment["WW_SNIPPY_LIB_CHILD"] != null) {
     print("snippy builtins and modules: ${differ.size} of ${programs.size} differ")
     for d in differ { print("  " + d) }
   }
-  print(every.size >= 8)   // all of them found, whichever ran
+  print(every.size >= 12)   // all of them found, whichever ran
 }
 // expect: snippy builtins and modules: all as CPython's
 // expect: true

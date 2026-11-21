@@ -1,0 +1,23 @@
+abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 0123456789abcdefABCDEF 01234567
+'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~' ' \t\n\r\x0b\x0c' 100 0123456789abcdefghij
+Hello Wide World A-B-C X Y
+tim likes kung pao, tims and $ cash ann likes tea, anns and $ cash $who likes $what, ${who}s and $$ cash
+bo likes $what, bos and $ cash 1 $b ['who', 'what'] True
+KeyError 'what'
+ValueError Invalid placeholder in string: line 1, col 1
+ValueError Invalid placeholder in string: line 1, col 1
+5 and %
+1 and two [('a', '0', '>3', None), ('b', 'x', '', 'r'), ('c', None, None, None)] 1 2
+3 2 abab 3.5 3 1 1024 -5 -5 3 -6 16 4
+2 7 5 True True True True True True matmul
+True True True True True False True 2 2 [1, 2] 7 3 0
+[10, 3] 3 el
+[1, 2] [1, 2] [0, 0, 0] [1, 2] {1, 2}
+b ('a', 'c') one operator.itemgetter(1) [(2, 'a'), (1, 'b')]
+p ('p', 'p') hi bob? operator.attrgetter('name') operator.methodcaller('greet', 'bob', punct='?') X
+3 operator 2
+TypeError itemgetter expected 1 argument, got 0
+TypeError attribute name must be a string
+TypeError 'int' object is not subscriptable
+TypeError 'float' object cannot be interpreted as an integer
+['Formatter', 'Template', 'ascii_letters', 'ascii_lowercase', 'ascii_uppercase', 'capwords', 'digits', 'hexdigits', 'octdigits', 'printable', 'punctuation', 'whitespace']

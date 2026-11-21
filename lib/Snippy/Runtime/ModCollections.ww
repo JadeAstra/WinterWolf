@@ -1,0 +1,754 @@
+import Snippy.Text.*
+// collections and copy (the Snippy plan, part 5.3, step 2), in WinterWolf: Counter, OrderedDict
+// and defaultdict are Python classes made on dict, namedtuple makes classes on tuple, UserDict,
+// UserList and UserString keep their value in `data`, as CPython's do; deque is an object of the
+// runtime's own. copy and deepcopy as CPython's copy module makes them.
+
+internal fun __pyDictOf(self : any?) : PyDict => (self as PyObject).value as PyDict
+internal fun __pyClassName(self : any?) : string => pyTypeOf(self).name
+
+// ---- Counter ----
+
+internal fun __pyCounterGet(self : any?, k : any?) : any? => __pyDictOf(self).get(k, 0)
+
+internal fun __pyCounterUpdate(self : any?, a : PyArgs, sign : int) {
+  if (a.pos.size > 1) { throw pyTypeError("expected at most 1 argument, got ${a.pos.size}") }
+  val source = a.pos.isNotEmpty() ? a.pos[0] : null
+  if (source != null) {
+    if (source is PyDict or (source is PyObject and pyIsInstance(source, pyDictType))) {
+      for k in pyIterable(source) {
+        val v = pyGetItem(source, k)
+        pySetItem(self, k, sign > 0 ? pyAdd(__pyCounterGet(self, k), v) : pySub(__pyCounterGet(self, k), v))
+      }
+    } else {
+      for k in pyIterable(source) { pySetItem(self, k, pyAdd(__pyCounterGet(self, k), sign)) }
+    }
+  }
+  for (k, v) in a.kw { pySetItem(self, k, sign > 0 ? pyAdd(__pyCounterGet(self, k), v) : pySub(__pyCounterGet(self, k), v)) }
+}
+
+// The items by count, most first, ties in the order they were first counted.
+internal fun __pyMostCommon(self : any?) : open List<any?> {
+  val d = __pyDictOf(self)
+  val items : open List<any?> = d.keyList().map { PyTuple([it, d.get(it, null)]) as any? }.toOpenList()
+  return pySortedBy(items, { x -> (x as PyTuple).items[1] }, true)
+}
+
+// A sort of Python values by key, stable, `reverse` keeping ties in order as Python's does.
+fun pySortedBy(items : open List<any?>, key : (any?) -> any?, reverse : bool) : open List<any?> {
+  val keyed = items.map { Pair(key(it), it) }
+  val indices : open List<int> = items.indices.toOpenList()
+  val sorted = indices.sortedWith { i, j ->
+    val a = keyed[i].first
+    val b = keyed[j].first
+    if (pyTruth(pyLt(a, b))) { reverse ? 1 : -1 } else if (pyTruth(pyLt(b, a))) { reverse ? -1 : 1 } else { 0 }
+  }
+  return sorted.map { keyed[it].second }.toOpenList()
+}
+
+internal fun __pyNewCounter(cls : any?) : any? => pyCall0(cls)
+
+// Counter + - | & : a new Counter of the positive counts.
+internal fun __pyCounterOp(self : any?, other : any?, op : string) : any? {
+  if (!pyIsInstance(other, __pyCounterType)) { return pyNotImplemented }
+  val result = pyCall0(__pyCounterType)
+  val mine = __pyDictOf(self)
+  val theirs = __pyDictOf(other)
+  for k in mine.keyList() {
+    val a = mine.get(k, 0)
+    val b = theirs.get(k, 0)
+    val v = when (op) { "+" -> pyAdd(a, b); "-" -> pySub(a, b); "|" -> (pyTruth(pyLt(a, b)) ? b : a); else -> (pyTruth(pyLt(a, b)) ? a : b) }
+    if (pyTruth(pyGt(v, 0))) { pySetItem(result, k, v) }
+  }
+  if (op == "+" or op == "|") {
+    for k in theirs.keyList() {
+      if (!mine.has(k)) {
+        val v = theirs.get(k, 0)
+        if (pyTruth(pyGt(v, 0))) { pySetItem(result, k, v) }
+      }
+    }
+  }
+  return result
+}
+
+internal lazy val __pyCounterType : PyType = pyLibClass("Counter", "collections", [pyDictType], {
+  "__init__": pyLibMethod("Counter", "__init__") { self, a -> __pyCounterUpdate(self, a, 1); null },
+  "__missing__": pyLibMethod("Counter", "__missing__") { self, a -> 0 },
+  "total": pyLibMethod("Counter", "total") { self, a ->
+    var t : any? = 0
+    for v in __pyDictOf(self).valueList() { t = pyAdd(t, v) }
+    t
+  },
+  "most_common": pyLibMethod("Counter", "most_common") { self, a ->
+    val all = __pyMostCommon(self)
+    val n = a.pos.isNotEmpty() ? a.pos[0] : a.get("n", null)
+    pyNewList(n == null ? all : all.take(Math.max(0, pyIndex(n))).toOpenList())
+  },
+  "elements": pyLibMethod("Counter", "elements") { self, a ->
+    val out : open List<any?> = []
+    val d = __pyDictOf(self)
+    for k in d.keyList() {
+      val c = d.get(k, 0)
+      if (pyIsInt(c)) { for i in 0..<Math.max(0, pyIndex(c)) { out.add(k) } }
+    }
+    PyListIter(out)
+  },
+  "update": pyLibMethod("Counter", "update") { self, a -> __pyCounterUpdate(self, a, 1); null },
+  "subtract": pyLibMethod("Counter", "subtract") { self, a -> __pyCounterUpdate(self, a, -1); null },
+  "copy": pyLibMethod("Counter", "copy") { self, a -> pyCall1(pyTypeOf(self), self) },
+  "__delitem__": pyLibMethod("Counter", "__delitem__") { self, a ->
+    __pyDictOf(self).remove(a.pos[0])
+    null
+  },
+  "__repr__": pyLibMethod("Counter", "__repr__") { self, a ->
+    val name = __pyClassName(self)
+    if (__pyDictOf(self).count == 0) { "$name()" } else {
+      val d = PyDict()
+      for x in __pyMostCommon(self) { d.set((x as PyTuple).items[0], (x as PyTuple).items[1]) }
+      "$name(${pyRepr(d)})"
+    }
+  },
+  "__add__": pyLibMethod("Counter", "__add__") { self, a -> __pyCounterOp(self, a.pos[0], "+") },
+  "__sub__": pyLibMethod("Counter", "__sub__") { self, a -> __pyCounterOp(self, a.pos[0], "-") },
+  "__or__": pyLibMethod("Counter", "__or__") { self, a -> __pyCounterOp(self, a.pos[0], "|") },
+  "__and__": pyLibMethod("Counter", "__and__") { self, a -> __pyCounterOp(self, a.pos[0], "&") },
+  "__pos__": pyLibMethod("Counter", "__pos__") { self, a ->
+    val r = pyCall0(__pyCounterType)
+    val d = __pyDictOf(self)
+    for k in d.keyList() { val v = d.get(k, 0); if (pyTruth(pyGt(v, 0))) { pySetItem(r, k, v) } }
+    r
+  },
+  "__neg__": pyLibMethod("Counter", "__neg__") { self, a ->
+    val r = pyCall0(__pyCounterType)
+    val d = __pyDictOf(self)
+    for k in d.keyList() { val v = d.get(k, 0); if (pyTruth(pyLt(v, 0))) { pySetItem(r, k, pySub(0, v)) } }
+    r
+  },
+  "__eq__": pyLibMethod("Counter", "__eq__") { self, a ->
+    val other = a.pos[0]
+    if (!pyIsInstance(other, __pyCounterType)) { pyNotImplemented } else {
+      val x = __pyDictOf(self)
+      val y = __pyDictOf(other)
+      x.keyList().all { pyEqB(x.get(it, 0), y.get(it, 0)) } and y.keyList().all { pyEqB(x.get(it, 0), y.get(it, 0)) }
+    }
+  },
+  "fromkeys": pyLibClassMethod("Counter", "fromkeys") { cls, a ->
+    throw pyError(pyNotImplementedErrorType, "Counter.fromkeys() is undefined.  Use Counter(iterable) instead.")
+  }
+})
+
+// ---- OrderedDict ----
+
+internal fun __pyOrderedMove(self : any?, key : any?, last : bool) {
+  val d = __pyDictOf(self)
+  if (!d.has(key)) { throw pyKeyError(key) }
+  val v = d.get(key, null)
+  if (last) {
+    d.remove(key)
+    d.set(key, v)
+  } else {
+    val keys = d.keyList()
+    val values = keys.map { d.get(it, null) }
+    for k in keys { d.remove(k) }
+    d.set(key, v)
+    for (i, k) in keys.withIndex() { if (!pyEqB(k, key)) { d.set(k, values[i]) } }
+  }
+}
+
+internal lazy val __pyOrderedDictType : PyType = pyLibClass("OrderedDict", "collections", [pyDictType], {
+  "move_to_end": pyLibMethod("OrderedDict", "move_to_end") { self, a ->
+    __pyOrderedMove(self, a.pos[0], pyTruth(a.pos.size > 1 ? a.pos[1] : a.get("last", true)))
+    null
+  },
+  "popitem": pyLibMethod("OrderedDict", "popitem") { self, a ->
+    val last = pyTruth(a.pos.isNotEmpty() ? a.pos[0] : a.get("last", true))
+    val d = __pyDictOf(self)
+    if (d.count == 0) { throw pyKeyError("dictionary is empty") }
+    val keys = d.keyList()
+    val k = last ? keys[keys.size - 1] : keys[0]
+    val v = d.get(k, null)
+    d.remove(k)
+    PyTuple([k, v])
+  },
+  "__reversed__": pyLibMethod("OrderedDict", "__reversed__") { self, a -> PyListIter(__pyDictOf(self).keyList().reversed()) },
+  "__eq__": pyLibMethod("OrderedDict", "__eq__") { self, a ->
+    val other = a.pos[0]
+    if (pyIsInstance(other, __pyOrderedDictType)) {
+      val x = __pyDictOf(self)
+      val y = __pyDictOf(other)
+      val xk = x.keyList()
+      val yk = y.keyList()
+      xk.size == yk.size and xk.indices.all { pyEqB(xk[it], yk[it]) and pyEqB(x.get(xk[it], null), y.get(yk[it], null)) }
+    } else if (other is PyDict or pyIsInstance(other, pyDictType)) {
+      pyBuiltinEq(__pyDictOf(self), pyUnwrap(other))
+    } else { pyNotImplemented }
+  },
+  "copy": pyLibMethod("OrderedDict", "copy") { self, a -> pyCall1(pyTypeOf(self), self) },
+  "__repr__": pyLibMethod("OrderedDict", "__repr__") { self, a ->
+    val d = __pyDictOf(self)
+    d.count == 0 ? "${__pyClassName(self)}()" : "${__pyClassName(self)}(${pyRepr(d)})"
+  }
+})
+
+// ---- defaultdict ----
+
+internal lazy val __pyDefaultDictType : PyType = pyLibClass("defaultdict", "collections", [pyDictType], {
+  "__init__": pyLibMethod("defaultdict", "__init__") { self, a ->
+    val factory = a.pos.isNotEmpty() ? a.pos[0] : null
+    if (factory != null and !pyTruth(pyCallable(factory))) { throw pyTypeError("first argument must be callable or None") }
+    pySetAttr(self, "default_factory", factory)
+    val rest : open List<any?> = a.pos.size > 1 ? a.pos[1..].toOpenList() : []
+    val names : open List<string> = []
+    for (k, v) in a.kw { rest.add(v); names.add(k) }
+    pyCallV(pyGetAttr(pyDictType, "update"), [self] + rest, names.isEmpty() ? null : names)
+    null
+  },
+  "__missing__": pyLibMethod("defaultdict", "__missing__") { self, a ->
+    val factory = pyGetAttrOr(self, "default_factory", null)
+    if (factory == null) { throw pyKeyError(a.pos[0]) }
+    val v = pyCall0(factory)
+    pySetItem(self, a.pos[0], v)
+    v
+  },
+  "copy": pyLibMethod("defaultdict", "copy") { self, a -> pyCall2(pyTypeOf(self), pyGetAttrOr(self, "default_factory", null), self) },
+  "__repr__": pyLibMethod("defaultdict", "__repr__") { self, a ->
+    val f = pyGetAttrOr(self, "default_factory", null)
+    "${__pyClassName(self)}(${f == null ? "None" : pyRepr(f)}, ${pyRepr(__pyDictOf(self))})"
+  }
+})
+
+// ---- deque ----
+
+internal lazy val __pyDequeType : PyType = pyNativeType("deque", "collections", ["append", "appendleft", "pop", "popleft", "extend",
+  "extendleft", "rotate", "remove", "insert", "index", "count", "clear", "copy", "reverse", "__len__", "__getitem__", "__setitem__",
+  "__delitem__", "__iter__", "__reversed__", "__contains__", "__repr__", "__eq__", "__add__", "__mul__", "__iadd__", "__bool__",
+  "__copy__", "__lt__", "__le__", "__gt__", "__ge__"], { t, args, kw ->
+  val a = PyArgs(args, kw, "deque()")
+  val ml = a.pos.size > 1 ? a.pos[1] : a.get("maxlen", null)
+  val maxlen = ml == null ? -1 : pyIndex(ml)
+  if (ml != null and maxlen < 0) { throw pyValueError("maxlen must be non-negative") }
+  val d = PyDeque(maxlen)
+  val src = a.pos.isNotEmpty() ? a.pos[0] : a.get("iterable", null)
+  if (src != null) { for x in pyIterable(src) { d.push(x, true) } }
+  d
+})
+
+class PyDeque(val maxlen : int) : PyNative() {
+  val items : open List<any?> = []
+  override fun pyType() : PyType => __pyDequeType
+  // Added at one end, an item falling off the other where it is full.
+  fun push(x : any?, right : bool) {
+    if (maxlen == 0) { return }
+    if (right) { items.add(x) } else { items.add(0, x) }
+    if (maxlen >= 0 and items.size > maxlen) { if (right) { items.removeAt(0) } else { items.removeAt(items.size - 1) } }
+  }
+  fun at(k : any?) : int {
+    var i = pyIndex(k)
+    if (i < 0) { i += items.size }
+    if (i < 0 or i >= items.size) { throw pyIndexError("deque index out of range") }
+    return i
+  }
+  override fun attr(name : string) : any? => name == "maxlen" ? (maxlen < 0 ? null : maxlen) : pyUnbound
+  override fun call(name : string, a : PyArgs) : any? {
+    val p = a.pos
+    return when (name) {
+      "append" -> { push(p[0], true); null }
+      "appendleft" -> { push(p[0], false); null }
+      "pop", "popleft" -> {
+        if (items.isEmpty()) { throw pyIndexError("pop from an empty deque") }
+        name == "pop" ? items.removeAt(items.size - 1) : items.removeAt(0)
+      }
+      "extend" -> { val xs = pyIterable(p[0]).toList(); for x in xs { push(x, true) }; null }
+      "extendleft" -> { val xs = pyIterable(p[0]).toList(); for x in xs { push(x, false) }; null }
+      "rotate" -> {
+        val n = items.size
+        if (n > 0) {
+          var k = p.isEmpty() ? 1 : pyIndex(p[0])
+          k = ((k % n) + n) % n
+          val moved = items[(n - k)..] + items[..<(n - k)]
+          items.clear()
+          items.addAll(moved)
+        }
+        null
+      }
+      "remove" -> {
+        val i = items.indexOfFirst { pyEqB(it, p[0]) }
+        if (i < 0) { throw pyValueError("deque.remove(x): x not in deque") }
+        items.removeAt(i)
+        null
+      }
+      "insert" -> {
+        if (maxlen >= 0 and items.size >= maxlen) { throw pyIndexError("deque already at its maximum size") }
+        var i = pyIndex(p[0])
+        if (i < 0) { i += items.size; if (i < 0) { i = 0 } }
+        if (i > items.size) { i = items.size }
+        items.add(i, p[1])
+        null
+      }
+      "index" -> {
+        val i = items.indexOfFirst { pyEqB(it, p[0]) }
+        if (i < 0) { throw pyValueError("deque.index(x): x not in deque") }
+        i
+      }
+      "count" -> items.count { pyEqB(it, p[0]) }
+      "clear" -> { items.clear(); null }
+      "copy", "__copy__" -> { val d = PyDeque(maxlen); d.items.addAll(items); d }
+      "reverse" -> { items.reverse(); null }
+      "__len__" -> items.size
+      "__bool__" -> items.isNotEmpty()
+      "__getitem__" -> items[at(p[0])]
+      "__setitem__" -> { items[at(p[0])] = p[1]; null }
+      "__delitem__" -> { items.removeAt(at(p[0])); null }
+      "__iter__" -> PyListIter(items.toList())
+      "__reversed__" -> PyListIter(items.reversed())
+      "__contains__" -> items.any { pyEqB(it, p[0]) }
+      "__repr__" -> "deque(${pyRepr(items.toOpenList())}${maxlen >= 0 ? ", maxlen=$maxlen" : ""})"
+      "__eq__" -> p[0] is PyDeque ? pyBuiltinEq(items.toOpenList(), (p[0] as PyDeque).items.toOpenList()) : pyNotImplemented
+      "__lt__", "__le__", "__gt__", "__ge__" -> {
+        if (!(p[0] is PyDeque)) { pyNotImplemented } else {
+          val x = items.toOpenList()
+          val y = (p[0] as PyDeque).items.toOpenList()
+          when (name) { "__lt__" -> pyLt(x, y); "__le__" -> pyLe(x, y); "__gt__" -> pyGt(x, y); else -> pyGe(x, y) }
+        }
+      }
+      "__add__" -> {
+        if (!(p[0] is PyDeque)) { throw pyTypeError("can only concatenate deque (not \"${pyTypeName(p[0])}\") to deque") }
+        val d = PyDeque(maxlen)
+        for x in items { d.push(x, true) }
+        for x in (p[0] as PyDeque).items { d.push(x, true) }
+        d
+      }
+      "__iadd__" -> { for x in pyIterable(p[0]).toList() { push(x, true) }; this }
+      "__mul__" -> {
+        val d = PyDeque(maxlen)
+        for i in 0..<Math.max(0, pyIndex(p[0])) { for x in items { d.push(x, true) } }
+        d
+      }
+      else -> throw pyAttributeError("'deque' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- namedtuple ----
+
+internal fun __pyIsIdent(s : string) : bool => pyIsIdentifier(s) and !(s in __pyKeywords)
+internal val __pyKeywords : List<string> = ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+  "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+  "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]
+
+// namedtuple(typename, field_names, *, rename=False, defaults=None, module=None): a class on tuple
+// with a property for each field, made as CPython's collections.namedtuple makes it.
+fun pyNamedTuple(a : PyArgs) : PyType {
+  a.only(["rename", "defaults", "module"])
+  val typename = a.pos[0] as string
+  val given = a.pos[1]
+  var fields : open List<string> = []
+  if (given is string) {
+    for f in (given as string).replace(",", " ").split(" ") { if (f.isNotEmpty()) { fields.add(f) } }
+  } else {
+    for f in pyIterable(given) { fields.add(pyStr(f)) }
+  }
+  if (pyTruth(a.get("rename", false))) {
+    val seen : open Set<string> = Set<string>()
+    for (i, f) in fields.withIndex() {
+      if (!__pyIsIdent(f) or f.startsWith("_") or f in seen) { fields[i] = "_$i" }
+      seen.add(fields[i])
+    }
+  }
+  for name in [typename] + fields {
+    if (!__pyIsIdent(name)) {
+      if (!pyIsIdentifier(name)) { throw pyValueError("Type names and field names must be valid identifiers: ${pyRepr(name)}") }
+      throw pyValueError("Type names and field names cannot be a keyword: ${pyRepr(name)}")
+    }
+  }
+  val seen : open Set<string> = Set<string>()
+  for f in fields {
+    if (f.startsWith("_") and !pyTruth(a.get("rename", false))) { throw pyValueError("Field names cannot start with an underscore: ${pyRepr(f)}") }
+    if (f in seen) { throw pyValueError("Encountered duplicate field name: ${pyRepr(f)}") }
+    seen.add(f)
+  }
+  val defaultsArg = a.get("defaults", null)
+  val defaults = defaultsArg == null ? [] : pyIterable(defaultsArg)
+  if (defaults.size > fields.size) { throw pyTypeError("Got more default values than field names") }
+  val fieldDefaults = PyDict()
+  for (i, d) in defaults.withIndex() { fieldDefaults.set(fields[fields.size - defaults.size + i], d) }
+  val n = fields.size
+  val members : open Map<string, any?> = {:}
+  var cls : PyType? = null
+  fun make(c : any?, values : List<any?>) : any? {
+    val o = PyObject(c as PyType)
+    o.dict = null
+    o.value = PyTuple(values)
+    return o
+  }
+  members["__slots__"] = PyTuple([])
+  members["_fields"] = PyTuple(fields)
+  members["_field_defaults"] = fieldDefaults
+  members["__match_args__"] = PyTuple(fields)
+  members["__new__"] = PyStaticMethod(PyBuiltin("__new__", { args, kw ->
+    val c = args[0]
+    val a2 = PyArgs(args[1..], kw, "$typename.__new__()")
+    val values : open List<any?> = []
+    val filled : open List<bool> = []
+    for i in 0..<n { values.add(null); filled.add(false) }
+    if (a2.pos.size > n) { throw pyTypeError("$typename.__new__() takes ${n + 1} positional arguments but ${a2.pos.size + 1} were given") }
+    for (i, v) in a2.pos.withIndex() { values[i] = v; filled[i] = true }
+    for (k, v) in a2.kw {
+      val i = fields.indexOf(k)
+      if (i < 0) { throw pyTypeError("$typename.__new__() got an unexpected keyword argument '$k'") }
+      if (filled[i]) { throw pyTypeError("$typename.__new__() got multiple values for argument '$k'") }
+      values[i] = v
+      filled[i] = true
+    }
+    val missing : open List<string> = []
+    for i in 0..<n {
+      if (!filled[i]) {
+        val d = fieldDefaults.get(fields[i], pyUnbound)
+        if (d !== pyUnbound) { values[i] = d } else { missing.add(fields[i]) }
+      }
+    }
+    if (missing.isNotEmpty()) {
+      val names = missing.map { "'$it'" }
+      val listed = names.size == 1 ? names[0] : names.size == 2 ? "${names[0]} and ${names[1]}" : names[..<(names.size - 1)].join(", ") + ", and " + names[names.size - 1]
+      throw pyTypeError("$typename.__new__() missing ${missing.size} required positional argument${missing.size == 1 ? "" : "s"}: $listed")
+    }
+    make(c, values)
+  }))
+  members["_make"] = pyLibClassMethod(typename, "_make") { c, a2 ->
+    val values = pyIterable(a2.pos[0]).toList()
+    if (values.size != n) { throw pyTypeError("Expected $n arguments, got ${values.size}") }
+    make(c, values)
+  }
+  members["_asdict"] = pyLibMethod(typename, "_asdict") { self, a2 ->
+    val d = PyDict()
+    val t = ((self as PyObject).value as PyTuple).items
+    for (i, f) in fields.withIndex() { d.set(f, t[i]) }
+    d
+  }
+  val replace = pyLibMethod(typename, "_replace") { self, a2 ->
+    val t = ((self as PyObject).value as PyTuple).items.toOpenList()
+    for (k, v) in a2.kw {
+      val i = fields.indexOf(k)
+      if (i < 0) { throw pyValueError("Got unexpected field names: ['$k']") }
+      t[i] = v
+    }
+    make(pyTypeOf(self), t)
+  }
+  members["_replace"] = replace
+  members["__replace__"] = replace
+  members["__repr__"] = pyLibMethod(typename, "__repr__") { self, a2 ->
+    val t = ((self as PyObject).value as PyTuple).items
+    "${pyTypeOf(self).name}(" + fields.indices.map { "${fields[it]}=${pyRepr(t[it])}" }.join(", ") + ")"
+  }
+  members["__getnewargs__"] = pyLibMethod(typename, "__getnewargs__") { self, a2 -> PyTuple(((self as PyObject).value as PyTuple).items) }
+  for (i, f) in fields.withIndex() {
+    members[f] = PyProperty(PyBuiltin(f, { args, kw -> ((args[0] as PyObject).value as PyTuple).items[i] }), null, null, "Alias for field number $i")
+  }
+  val module = a.get("module", null)
+  val made = pyLibClass(typename, module == null ? "__main__" : module as string, [pyTupleType], members)
+  return made
+}
+
+// ---- ChainMap, UserDict, UserList, UserString ----
+
+internal fun __pyMaps(self : any?) : List<any?> => pyIterable(pyGetAttr(self, "maps"))
+
+internal lazy val __pyChainMapType : PyType = pyLibClass("ChainMap", "collections", [pyObjectType], {
+  "__init__": pyLibMethod("ChainMap", "__init__") { self, a ->
+    pySetAttr(self, "maps", pyNewList(a.pos.isEmpty() ? [PyDict() as any?] : a.pos.toOpenList()))
+    null
+  },
+  "__getitem__": pyLibMethod("ChainMap", "__getitem__") { self, a ->
+    var found : any? = pyUnbound
+    for m in __pyMaps(self) {
+      if (pyContains(m, a.pos[0])) { found = pyGetItem(m, a.pos[0]); break }
+    }
+    if (found === pyUnbound) {
+      val missing = pyGetAttrOr(self, "__missing__", null)
+      if (missing == null) { throw pyKeyError(a.pos[0]) }
+      pyCall1(missing, a.pos[0])
+    } else { found }
+  },
+  "__setitem__": pyLibMethod("ChainMap", "__setitem__") { self, a -> pySetItem(__pyMaps(self)[0], a.pos[0], a.pos[1]); null },
+  "__delitem__": pyLibMethod("ChainMap", "__delitem__") { self, a ->
+    try { pyDelItem(__pyMaps(self)[0], a.pos[0]) } catch (e : PyError) {
+      if (e.exc.cls.isSubtype(pyKeyErrorType)) { throw pyKeyError("Key not found in the first mapping: ${pyRepr(a.pos[0])}") }
+      throw e
+    }
+    null
+  },
+  "__contains__": pyLibMethod("ChainMap", "__contains__") { self, a -> __pyMaps(self).any { pyContains(it, a.pos[0]) } },
+  "__len__": pyLibMethod("ChainMap", "__len__") { self, a -> pyLength(__pyChainKeys(self)) },
+  "__iter__": pyLibMethod("ChainMap", "__iter__") { self, a -> pyIter(__pyChainKeys(self)) },
+  "keys": pyLibMethod("ChainMap", "keys") { self, a -> pyCallM0(__pyChainKeys(self), "keys") },
+  "items": pyLibMethod("ChainMap", "items") { self, a ->
+    val d = __pyChainKeys(self)
+    pyNewList(d.keyList().map { PyTuple([it, pyGetItem(self, it)]) as any? }.toOpenList())
+  },
+  "values": pyLibMethod("ChainMap", "values") { self, a -> pyNewList(__pyChainKeys(self).keyList().map { pyGetItem(self, it) }.toOpenList()) },
+  "get": pyLibMethod("ChainMap", "get") { self, a ->
+    pyTruth(pyContains(self, a.pos[0])) ? pyGetItem(self, a.pos[0]) : (a.pos.size > 1 ? a.pos[1] : null)
+  },
+  "new_child": pyLibMethod("ChainMap", "new_child") { self, a ->
+    val m = a.pos.isNotEmpty() ? a.pos[0] : PyDict()
+    pyCallV(pyTypeOf(self), [m] + __pyMaps(self), null)
+  },
+  "parents": PyProperty(PyBuiltin("parents", { args, kw -> pyCallV(pyTypeOf(args[0]), __pyMaps(args[0])[1..], null) }), null, null, null),
+  "copy": pyLibMethod("ChainMap", "copy") { self, a ->
+    val maps = __pyMaps(self)
+    pyCallV(pyTypeOf(self), [pyCallM0(maps[0], "copy")] + maps[1..], null)
+  },
+  "__repr__": pyLibMethod("ChainMap", "__repr__") { self, a -> "${__pyClassName(self)}(${__pyMaps(self).map { pyRepr(it) }.join(", ")})" }
+})
+
+// The keys of a ChainMap, the first map's last, in the order of a dict made from the maps backwards.
+internal fun __pyChainKeys(self : any?) : PyDict {
+  val d = PyDict()
+  for m in __pyMaps(self).reversed() { for k in pyIterable(m) { d.set(k, null) } }
+  return d
+}
+
+internal fun __pyData(self : any?) : any? => pyGetAttr(self, "data")
+
+internal lazy val __pyUserDictType : PyType = pyLibClass("UserDict", "collections", [pyObjectType], {
+  "__init__": pyLibMethod("UserDict", "__init__") { self, a ->
+    pySetAttr(self, "data", PyDict())
+    if (a.pos.isNotEmpty()) { pyCall1(pyGetAttr(self, "update"), a.pos[0]) }
+    for (k, v) in a.kw { pySetItem(self, k, v) }
+    null
+  },
+  "__len__": pyLibMethod("UserDict", "__len__") { self, a -> pyLength(__pyData(self)) },
+  "__getitem__": pyLibMethod("UserDict", "__getitem__") { self, a ->
+    val d = __pyData(self)
+    if (pyContains(d, a.pos[0])) { pyGetItem(d, a.pos[0]) } else {
+      val missing = pyTypeOf(self).lookup("__missing__")
+      if (missing === pyUnbound) { throw pyKeyError(a.pos[0]) }
+      pyCall2(missing, self, a.pos[0])
+    }
+  },
+  "__setitem__": pyLibMethod("UserDict", "__setitem__") { self, a -> pySetItem(__pyData(self), a.pos[0], a.pos[1]); null },
+  "__delitem__": pyLibMethod("UserDict", "__delitem__") { self, a -> pyDelItem(__pyData(self), a.pos[0]); null },
+  "__iter__": pyLibMethod("UserDict", "__iter__") { self, a -> pyIter(__pyData(self)) },
+  "__contains__": pyLibMethod("UserDict", "__contains__") { self, a -> pyContains(__pyData(self), a.pos[0]) },
+  "keys": pyLibMethod("UserDict", "keys") { self, a -> pyCallM0(__pyData(self), "keys") },
+  "items": pyLibMethod("UserDict", "items") { self, a -> pyCallM0(__pyData(self), "items") },
+  "values": pyLibMethod("UserDict", "values") { self, a -> pyCallM0(__pyData(self), "values") },
+  "get": pyLibMethod("UserDict", "get") { self, a ->
+    pyTruth(pyContains(self, a.pos[0])) ? pyGetItem(self, a.pos[0]) : (a.pos.size > 1 ? a.pos[1] : null)
+  },
+  "update": pyLibMethod("UserDict", "update") { self, a ->
+    if (a.pos.isNotEmpty()) {
+      val src = a.pos[0]
+      if (pyGetAttrOr(src, "keys", null) != null) { for k in pyIterable(pyCallM0(src, "keys")) { pySetItem(self, k, pyGetItem(src, k)) } }
+      else { for kv in pyIterable(src) { val p = pyIterable(kv); pySetItem(self, p[0], p[1]) } }
+    }
+    for (k, v) in a.kw { pySetItem(self, k, v) }
+    null
+  },
+  "copy": pyLibMethod("UserDict", "copy") { self, a -> pyCall1(pyTypeOf(self), __pyData(self)) },
+  "__repr__": pyLibMethod("UserDict", "__repr__") { self, a -> pyRepr(__pyData(self)) },
+  "__eq__": pyLibMethod("UserDict", "__eq__") { self, a ->
+    val o = a.pos[0]
+    pyEq(__pyData(self), pyIsInstance(o, __pyUserDictType) ? __pyData(o) : o)
+  }
+})
+
+internal lazy val __pyUserListType : PyType = pyLibClass("UserList", "collections", [pyObjectType], {
+  "__init__": pyLibMethod("UserList", "__init__") { self, a ->
+    pySetAttr(self, "data", pyNewList(a.pos.isEmpty() ? [] : pyIterable(a.pos[0]).toOpenList()))
+    null
+  },
+  "__len__": pyLibMethod("UserList", "__len__") { self, a -> pyLength(__pyData(self)) },
+  "__getitem__": pyLibMethod("UserList", "__getitem__") { self, a ->
+    val r = pyGetItem(__pyData(self), a.pos[0])
+    a.pos[0] is PySlice ? pyCall1(pyTypeOf(self), r) : r
+  },
+  "__setitem__": pyLibMethod("UserList", "__setitem__") { self, a -> pySetItem(__pyData(self), a.pos[0], a.pos[1]); null },
+  "__delitem__": pyLibMethod("UserList", "__delitem__") { self, a -> pyDelItem(__pyData(self), a.pos[0]); null },
+  "__iter__": pyLibMethod("UserList", "__iter__") { self, a -> pyIter(__pyData(self)) },
+  "__contains__": pyLibMethod("UserList", "__contains__") { self, a -> pyContains(__pyData(self), a.pos[0]) },
+  "__add__": pyLibMethod("UserList", "__add__") { self, a ->
+    val o = a.pos[0]
+    pyCall1(pyTypeOf(self), pyAdd(__pyData(self), pyIsInstance(o, __pyUserListType) ? __pyData(o) : pyNewList(pyIterable(o).toOpenList())))
+  },
+  "append": pyLibMethod("UserList", "append") { self, a -> pyCallV(pyGetAttr(__pyData(self), "append"), [a.pos[0]], null) },
+  "extend": pyLibMethod("UserList", "extend") { self, a -> pyCallV(pyGetAttr(__pyData(self), "extend"), [a.pos[0]], null) },
+  "pop": pyLibMethod("UserList", "pop") { self, a -> pyCallV(pyGetAttr(__pyData(self), "pop"), a.pos, null) },
+  "insert": pyLibMethod("UserList", "insert") { self, a -> pyCallV(pyGetAttr(__pyData(self), "insert"), a.pos, null) },
+  "remove": pyLibMethod("UserList", "remove") { self, a -> pyCallV(pyGetAttr(__pyData(self), "remove"), a.pos, null) },
+  "sort": pyLibMethod("UserList", "sort") { self, a ->
+    val names : open List<string> = []
+    val values : open List<any?> = []
+    for (k, v) in a.kw { names.add(k); values.add(v) }
+    pyCallV(pyGetAttr(__pyData(self), "sort"), values, names.isEmpty() ? null : names)
+  },
+  "__repr__": pyLibMethod("UserList", "__repr__") { self, a -> pyRepr(__pyData(self)) },
+  "__eq__": pyLibMethod("UserList", "__eq__") { self, a ->
+    val o = a.pos[0]
+    pyEq(__pyData(self), pyIsInstance(o, __pyUserListType) ? __pyData(o) : o)
+  }
+})
+
+// UserString: its methods those of its str, what each gives made a UserString where it is a str.
+internal lazy val __pyUserStringType : PyType = __pyMakeUserString()
+internal fun __pyMakeUserString() : PyType {
+  val members : open Map<string, any?> = {:}
+  members["__init__"] = pyLibMethod("UserString", "__init__") { self, a ->
+    val seq = a.pos[0]
+    pySetAttr(self, "data", pyIsInstance(seq, __pyUserStringType) ? __pyData(seq) : pyStr(seq))
+    null
+  }
+  members["__str__"] = pyLibMethod("UserString", "__str__") { self, a -> __pyData(self) }
+  members["__repr__"] = pyLibMethod("UserString", "__repr__") { self, a -> pyRepr(__pyData(self)) }
+  members["__len__"] = pyLibMethod("UserString", "__len__") { self, a -> pyLength(__pyData(self)) }
+  members["__eq__"] = pyLibMethod("UserString", "__eq__") { self, a ->
+    val o = a.pos[0]
+    pyEq(__pyData(self), pyIsInstance(o, __pyUserStringType) ? __pyData(o) : o)
+  }
+  members["__add__"] = pyLibMethod("UserString", "__add__") { self, a ->
+    val o = a.pos[0]
+    pyCall1(pyTypeOf(self), pyAdd(__pyData(self), pyIsInstance(o, __pyUserStringType) ? __pyData(o) : pyStr(o)))
+  }
+  for name in __pyStrNames() {
+    if (name.startsWith("__")) { continue }
+    members[name] = pyLibMethod("UserString", name) { self, a ->
+      val names : open List<string> = []
+      val values : open List<any?> = a.pos.toOpenList()
+      for (k, v) in a.kw { names.add(k); values.add(v) }
+      val r = pyCallMethodV(__pyData(self), name, values, names.isEmpty() ? null : names)
+      r is string ? pyCall1(pyTypeOf(self), r) : r
+    }
+  }
+  return pyLibClass("UserString", "collections", [pyObjectType], members)
+}
+
+fun pyCollectionsModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["Counter"] = __pyCounterType
+  m["OrderedDict"] = __pyOrderedDictType
+  m["defaultdict"] = __pyDefaultDictType
+  m["deque"] = __pyDequeType
+  m["namedtuple"] = __pyB("namedtuple") { a -> pyNamedTuple(a) }
+  m["ChainMap"] = __pyChainMapType
+  m["UserDict"] = __pyUserDictType
+  m["UserList"] = __pyUserListType
+  m["UserString"] = __pyUserStringType
+  return pyNativeModule("collections", m)
+}
+
+// ---- copy ----
+
+internal fun __pyAtomic(x : any?) : bool =>
+  x == null or x is bool or x is int or x is float or x is BigInt or x is Complex or x is string or x is Bytes or x is PyRange or
+  x is PyType or x is PyFunction or x is PyBuiltin or x === pyEllipsis or x === pyNotImplemented or x is PyModule or
+  (x is PySet and (x as PySet).frozen)
+
+fun pyShallowCopy(x : any?) : any? {
+  if (__pyAtomic(x) or x is PyTuple) { return x }
+  if (x is open List<any?>) { return pyNewList((x as List<any?>).toOpenList()) }
+  if (x is PyDict) { return (x as PyDict).copy() }
+  if (x is PySet) { return (x as PySet).copy(false) }
+  if (x is PyByteArray) { return PyByteArray(Bytes((x as PyByteArray).bytes)) }
+  if (x is PyNative) {
+    val r = pyNativeSpecial(x as PyNative, "__copy__", [])
+    if (r !== pyUnbound) { return r }
+    return x
+  }
+  if (x is PyObject) {
+    val o = x as PyObject
+    val m = o.cls.lookup("__copy__")
+    if (m !== pyUnbound and m != null) { return __pyCall1Special(m, x) }
+    val c = PyObject(o.cls)
+    c.dict = o.dict == null ? null : o.dict!!.copy()
+    c.value = o.value is PyTuple ? o.value : pyShallowCopy(o.value)
+    return c
+  }
+  return x
+}
+
+// deepcopy: `memo` by id() for the runtime's own objects, as CPython's memo; `seen` the copies of
+// values with no id of their own here (a list is WinterWolf's), found by identity.
+fun pyDeepCopy(x : any?, memo : PyDict, seen : open List<Pair<any?, any?>>) : any? {
+  if (__pyAtomic(x)) { return x }
+  val identified = x is PyIdentified
+  val id : any? = identified ? pyId(x) : null
+  if (identified) {
+    val had = memo.get(id, pyUnbound)
+    if (had !== pyUnbound) { return had }
+  } else {
+    for p in seen { if (p.first === x) { return p.second } }
+  }
+  fun keep(copy : any?) {
+    if (identified) { memo.set(id, copy) } else { seen.add(Pair(x, copy)) }
+  }
+  return when (x) {
+    is PyTuple -> {
+      val items = (x as PyTuple).items.map { pyDeepCopy(it, memo, seen) }
+      var same = true
+      for (i, v) in items.withIndex() { if (!pyIs(v, (x as PyTuple).items[i])) { same = false } }
+      val r = same ? x : PyTuple(items)
+      keep(r)
+      r
+    }
+    is open List<any?> -> {
+      val r : open List<any?> = []
+      keep(r)
+      for v in x as List<any?> { r.add(pyDeepCopy(v, memo, seen)) }
+      r
+    }
+    is PyDict -> {
+      val r = PyDict()
+      keep(r)
+      for k in (x as PyDict).keyList() { r.set(pyDeepCopy(k, memo, seen), pyDeepCopy((x as PyDict).get(k, null), memo, seen)) }
+      r
+    }
+    is PySet -> {
+      val r = PySet(false)
+      keep(r)
+      for k in (x as PySet).items() { r.add(pyDeepCopy(k, memo, seen)) }
+      r
+    }
+    is PyNative -> {
+      val r = pyNativeSpecial(x as PyNative, "__deepcopy__", [memo])
+      r === pyUnbound ? pyShallowCopy(x) : r
+    }
+    is PyObject -> {
+      val o = x as PyObject
+      val m = o.cls.lookup("__deepcopy__")
+      if (m !== pyUnbound and m != null) { return __pyCall2Special(m, x, memo) }
+      val c = PyObject(o.cls)
+      keep(c)
+      c.value = pyDeepCopy(o.value, memo, seen)
+      if (o.dict == null) { c.dict = null } else {
+        val d = PyDict()
+        for k in o.dict!!.keyList() { d.set(k, pyDeepCopy(o.dict!!.get(k, null), memo, seen)) }
+        c.dict = d
+      }
+      c
+    }
+    else -> x
+  }
+}
+
+fun pyCopyModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["copy"] = __pyB("copy") { a -> pyShallowCopy(a.pos[0]) }
+  m["deepcopy"] = __pyB("deepcopy") { a ->
+    val memo = a.pos.size > 1 ? a.pos[1] : a.get("memo", null)
+    pyDeepCopy(a.pos[0], memo is PyDict ? memo as PyDict : PyDict(), [])
+  }
+  m["replace"] = __pyB("replace") { a ->
+    val obj = a.pos[0]
+    val r = pyTypeOf(obj).lookup("__replace__")
+    if (r === pyUnbound) { throw pyTypeError("replace() does not support ${pyTypeName(obj)} objects") }
+    val names : open List<string> = []
+    val values : open List<any?> = [obj]
+    for (k, v) in a.kw { names.add(k); values.add(v) }
+    pyCallV(r, values, names.isEmpty() ? null : names)
+  }
+  val error = __pyExc("Error", pyExceptionType)
+  error.module = "copy"
+  m["Error"] = error
+  m["error"] = error
+  return pyNativeModule("copy", m)
+}

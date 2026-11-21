@@ -1,0 +1,42 @@
+3.141592653589793 2.718281828459045 6.283185307179586 inf -inf nan float
+1.4142135623730951 4.0 4 1000000000000000 3.0000000000000004 -2.0 2.718281828459045 1024.0 1.00000000005e-10
+2.0 3.0 1.0 3.0 10.0 9.999999999500001e-11 693.1471805599454 399.99999999999994
+1.4142135623730951 2.0 3.0 1.0 -1.0 1.0 1.0
+2 -3 3 -2 -2 5 int
+0.49999999999999994 1.0 0.9999999999999999 1.5707963267948966 1.5707963267948966 0.7853981633974483 2.356194490192345 -3.141592653589793
+1.1752011936438014 1.5430806348152437 0.46211715726000974 0.881373587019543 1.762747174039086 0.5493061443340549 180.0 3.141592653589793
+5.0 3.0 0.0 5.0 1.7320508075688772
+3628800 15511210043330985984000000 120 100891344545564193334812497256 20 120 0
+6 0 3 0 12 105 1 6
+24 1 60 3.0 1.0 1.0 1.0
+32 0.060000000000000005
+True False True True True True True -3.0 (0.5, 4) (0.0, 0) 8.0 (0.75, 3.0) (-0.5, -2.0)
+0.8427007929497149 0.15729920705028513 24.0 1.7724538509055159 12.801827480081467 1.0000000000000002 0.9999999999999998 2.220446049250313e-16 5e-324
+10.0 100000000000000000000 -100000000000000000000 True 0 1
+ValueError expected a nonnegative input, got -1.0
+ValueError expected a positive input
+ValueError expected a positive input
+ValueError factorial() not defined for negative values
+TypeError 'float' object cannot be interpreted as an integer
+ValueError expected a number in range from -1 up to 1, got 2.0
+ValueError isqrt() argument must be nonnegative
+ValueError n must be a non-negative integer
+OverflowError math range error
+ValueError math domain error
+ValueError math domain error
+OverflowError cannot convert float infinity to integer
+ValueError cannot convert float NaN to integer
+TypeError 'float' object cannot be interpreted as an integer
+TypeError must be real number, not str
+ValueError both points must have the same number of dimensions
+OverflowError math range error
+42 -42 7 1 1.0
+0.9272952180016122 (5.0, 0.9272952180016122) (1.2246467991473532e-16+2j) 5.0 1j (2+1j) (-1+1.2246467991473532e-16j)
+(1.6094379124341003+0.9272952180016122j) (2+0j) (3+0j) 1.1752011936438014j (0.8337300251311491-0.9888977057628651j) 0.46211715726000974j (1.5707963267948966+1.3169578969248166j) -1.3169578969248166j 0.5493061443340549j
+0.8414709848078965j (1.5430806348152437+0j) (1.0839233273386946+0.2717525853195118j) 1.5707963267948966j (0.881373587019543+1.5707963267948966j) (0.5493061443340549+0j) 3.141592653589793 2.718281828459045 6.283185307179586 inf infj nan nanj
+True True True True 3.141592653589793 -3.141592653589793
+ValueError math domain error
+TypeError must be real number, not str
+ValueError math domain error
+['acos', 'acosh', 'asin', 'asinh', 'atan', 'atan2', 'atanh', 'cbrt', 'ceil', 'comb', 'copysign', 'cos', 'cosh', 'degrees', 'dist', 'e', 'erf', 'erfc', 'exp', 'exp2', 'expm1', 'fabs', 'factorial', 'floor', 'fma', 'fmod', 'frexp', 'fsum', 'gamma', 'gcd', 'hypot', 'inf', 'isclose', 'isfinite', 'isinf', 'isnan', 'isqrt', 'lcm', 'ldexp', 'lgamma', 'log', 'log10', 'log1p', 'log2', 'modf', 'nan', 'nextafter', 'perm', 'pi', 'pow', 'prod', 'radians', 'remainder', 'sin', 'sinh', 'sqrt', 'sumprod', 'tan', 'tanh', 'tau', 'trunc', 'ulp']
+['acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'cos', 'cosh', 'e', 'exp', 'inf', 'infj', 'isclose', 'isfinite', 'isinf', 'isnan', 'log', 'log10', 'nan', 'nanj', 'phase', 'pi', 'polar', 'rect', 'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'tau']

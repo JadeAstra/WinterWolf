@@ -443,6 +443,22 @@ internal fun __pyComplexOp(a : Complex, b : Complex, op : int) : any? {
 // a op b with Python's order of asking: a's method, then b's reflected one (b's first where b's
 // class is under a's and has its own).
 fun pyBinary(a : any?, b : any?, op : int) : any? {
+  // The runtime's own objects (part 5.3: deque, Fraction...): their method, then the other's reflected one.
+  if ((a is PyNative or b is PyNative) and !(a is PyObject) and !(b is PyObject)) {
+    if (a is PyNative) {
+      val r = pyNativeSpecial(a as PyNative, __pyOpNames[op], [b])
+      if (r !== pyUnbound and r !== pyNotImplemented) { return r }
+    }
+    if (b is PyNative) {
+      val r = pyNativeSpecial(b as PyNative, __pyROpNames[op], [a])
+      if (r !== pyUnbound and r !== pyNotImplemented) { return r }
+    }
+    if (!(a is PyNative and b is PyNative)) {
+      val r = pyBuiltinOp(a, b, op)
+      if (r !== pyNotImplemented) { return r }
+    }
+    throw pyUnsupported(a, b, op)
+  }
   if (!(a is PyObject) and !(b is PyObject)) {
     val r = pyBuiltinOp(a, b, op)
     if (r !== pyNotImplemented) { return r }
@@ -565,6 +581,12 @@ fun pyOr(a : any?, b : any?) : any? {
 // a op= b: the object's own in-place method where it has one (a list's += extends it, as its
 // aliases see), else a op b.
 fun pyInplace(a : any?, b : any?, op : int) : any? {
+  // The runtime's own objects and a bytearray (part 5.3): their in-place method where they have one.
+  if (a is PyNative) {
+    val r = pyNativeSpecial(a as PyNative, __pyIOpNames[op], [b])
+    if (r !== pyUnbound and r !== pyNotImplemented) { return r }
+  }
+  if (a is PyByteArray and (op == 0 or op == 2)) { return pyByteArrayMethod(a as PyByteArray, op == 0 ? "__iadd__" : "__imul__", PyArgs([b], null, "")) }
   if (a is open List<any?> and !(a is PyTuple)) {
     if (op == 0) {
       val items = pyIterable(b)
@@ -864,6 +886,20 @@ internal val __pyCmpSwapped : List<int> = [0, 1, 4, 5, 2, 3]
 internal val __pyCmpSymbols : List<string> = ["==", "!=", "<", "<=", ">", ">="]
 
 fun pyRichCompare(a : any?, b : any?, op : int) : any? {
+  // The runtime's own objects (part 5.3): their comparison, then the other's swapped one.
+  if ((a is PyNative or b is PyNative) and !(a is PyObject) and !(b is PyObject)) {
+    if (a is PyNative) {
+      val r = pyNativeSpecial(a as PyNative, __pyCmpNames[op], [b])
+      if (r !== pyUnbound and r !== pyNotImplemented) { return r }
+    }
+    if (b is PyNative) {
+      val r = pyNativeSpecial(b as PyNative, __pyCmpNames[__pyCmpSwapped[op]], [a])
+      if (r !== pyUnbound and r !== pyNotImplemented) { return r }
+    }
+    if (op == 0) { return pyIs(a, b) }
+    if (op == 1) { return !pyIs(a, b) }
+    throw pyTypeError("'${__pyCmpSymbols[op]}' not supported between instances of '${pyTypeName(a)}' and '${pyTypeName(b)}'")
+  }
   val ta = pyTypeOf(a)
   val tb = pyTypeOf(b)
   var triedB = false
@@ -1159,7 +1195,11 @@ internal fun __pyHashTuple(t : PyTuple) : int {
 internal fun __pyHashObject(o : PyObject) : int {
   val h = o.cls.lookup("__hash__")
   if (h == null) { throw pyTypeError("unhashable type: '${o.cls.name}'") }
-  if (h === pyUnbound or (h is PyMethodDescriptor and (h as PyMethodDescriptor).owner === pyObjectType)) { return o.identity() >>> 4 }
+  if (h === pyUnbound or (h is PyMethodDescriptor and (h as PyMethodDescriptor).owner === pyObjectType)) {
+    // A subclass of an immutable builtin (int, float, str, tuple, frozenset, complex, bytes): its value's.
+    if (o.cls.layout >= 5 and o.cls.layout <= 11 and o.value != null) { return pyHash(o.value) }
+    return o.identity() >>> 4
+  }
   if (h is PyMethodDescriptor and o.cls.layout >= 2) { return pyHash(o.value) }
   val r = __pyCall1Special(h, o)
   if (r is int) { return r == -1 ? -2 : r as int }

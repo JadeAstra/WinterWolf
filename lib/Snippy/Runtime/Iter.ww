@@ -11,6 +11,8 @@ abstract class PyIterator : PyIdentified() {
   fun pyType() : PyType => pyIteratorType
   // What it has left, if known (__length_hint__).
   fun left() : int => -1
+  // Its repr where it has one of its own (part 5.3: itertools.count(2)), else null.
+  fun reprText() : string? => null
 }
 
 internal fun __pyIterType(name : string) : PyType {

@@ -76,6 +76,11 @@ fun pyBindDescriptor(v : any?, obj : any?, cls : PyType) : any? {
       val get = (v as PyObject).cls.lookup("__get__")
       if (get !== pyUnbound and get != null) { pyCall3(get, v, obj, cls) } else { v }
     }
+    is PyNative -> {
+      // The runtime's own objects with __get__ (part 5.3: an lru_cache wrapper on a method).
+      val r = pyNativeSpecial(v as PyNative, "__get__", [obj, cls])
+      r === pyUnbound ? v : r
+    }
     else -> v
   }
 }
@@ -285,7 +290,10 @@ internal fun __pyBuiltinAttrOrUnbound(o : any?, name : string) : any? {
           if (f.attrs == null) { f.attrs = PyDict() }
           return f.attrs
         }
-        "__annotations__" -> return f.annotations ?: pyNewDict()
+        "__annotations__" -> {
+          if (f.annotations == null and f.annotate != null) { f.annotations = f.annotate!!(); f.annotate = null }
+          return f.annotations ?: pyNewDict()
+        }
         "__closure__" -> return null
         "__code__" -> return PyCode(f.spec)
         "__globals__" -> return pyNewDict()

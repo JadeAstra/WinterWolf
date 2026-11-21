@@ -7,6 +7,14 @@ fun pyStandardModules() : open Map<string, () -> PyModule> {
   m["sys"] = { -> pySysModule() }
   m["asyncio"] = { -> pyAsyncioModule() }
   m["builtins"] = { -> PyBuiltinsModule() }
+  m["math"] = { -> pyMathModule() }
+  m["cmath"] = { -> pyCmathModule() }
+  m["string"] = { -> pyStringModule() }
+  m["operator"] = { -> pyOperatorModule() }
+  m["collections"] = { -> pyCollectionsModule() }
+  m["copy"] = { -> pyCopyModule() }
+  m["functools"] = { -> pyFunctoolsModule() }
+  m["itertools"] = { -> pyItertoolsModule() }
   return m
 }
 
