@@ -866,6 +866,13 @@ Plain().close()   // IllegalStateException as Plain is made</pre>
 
 <h2 id="deferred">Language and library work left for later</h2>
 <p>Decided in M6.6 and left "for M6.7 or after"; M6.7 took only task scopes and 8.5i, so each is still to do, in no milestone yet.</p>
+<section class="item" id="o-bigdecimal">
+<h3>A big decimal type (BigDecimal)</h3>
+<p class="status"><span class="label">Condition</span> When something asks for it: exact money arithmetic in a program, Snippy's <code>decimal</code>, or ported Kotlin code using BigDecimal</p>
+<p>Asked 2026-11-21 ("should we have a bigfloat and have bigint/bigint return that?") while looking at Snippy's int / int rounding twice (<a href="snippy-ww-checklist.html">S1</a>); the user: "add it as a future item". Decided then: <code>BigInt / BigInt</code> stays whole, as <code>int / int</code> is (7 / 2 is 3, as in Kotlin): a BigInt is an int that does not overflow, and a program growing past 2<sup>63</sup> should not change the kind of its answers. S1 is fixed instead by a BigInt division rounded once to a float (the checklist's A1), which a big float would need at its end anyway.</p>
+<p>What a big decimal type would serve: exact decimal arithmetic for money (0.1 + 0.2 is 0.3); Snippy's <code>decimal</code> module, on its plan as "later, or never" (it would rest on this as <code>fractions</code> rests on BigInt); Kotlin and Java code that uses BigDecimal, ported. To decide in its own plan, then: decimal, as Java's BigDecimal (a BigInt of digits and a scale), rather than binary of a chosen precision (as MPFR); how a result's precision and rounding are chosen (Java's MathContext and RoundingMode, Python's decimal contexts); its text both ways; how it mixes with int, float and BigInt. Built on ww's BigInt.</p>
+</section>
+
 <section class="item" id="o-jadegate-mods">
 <h3>JadeGate's mods on WinterWolf scripts</h3>
 <p class="status"><span class="label">Condition</span> With the JadeGate port (M13)</p>

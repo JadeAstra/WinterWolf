@@ -120,7 +120,7 @@ ul.check > li.done::before { content: "☑"; color: var(--accent); }
 <ul class="check">
 <li><span class="id">S1</span>int / int rounds twice <span class="tag checked">checked</span><br>
 <span class="where">Runtime/Ops.ww:420 <code>__pyBigTrueDiv</code></span><br>
-Where the quotient is not whole it is <code>p.toFloat() / q.toFloat()</code>; CPython rounds once. <code>896756281784094569167941 / 826325471441701108669</code> is 1085.2337399445184 in Snippy, 1085.2337399445182 in CPython (two more cases found the same way). Fix: a correctly rounded division (A1), or Snippy's own exact one.<br>
+Where an int is 2<sup>53</sup> or more and the quotient is not whole, it is <code>p.toFloat() / q.toFloat()</code>: each int rounded to a float, then the quotient rounded again, where CPython rounds once (<code>long_true_divide</code>). So the last digit can be off: <code>896756281784094569167941 / 826325471441701108669</code> is 1085.2337399445184 in Snippy, 1085.2337399445182 in CPython (two more cases found the same way). And an int past about 1.8×10<sup>308</sup> becomes infinity before the division: <code>(10**400 + 1) / 10**399</code> is an OverflowError ("integer division result too large for a float") in Snippy, 10.0 in CPython. Fix: a correctly rounded division (A1), or Snippy's own exact one.<br>
 <span class="owner">Owner: Snippy session; easiest after A1.</span></li>
 <li><span class="id">S2</span><code>time.mktime</code> reads <code>tm_yday</code> and leaves out the month and day <span class="tag checked">checked</span><br>
 <span class="where">Runtime/ModTime.ww:482-489</span><br>
