@@ -479,7 +479,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#Base64"><code>Base64</code></a> (3)</li>
 <li><a href="#BeforeAll"><code>BeforeAll</code></a> (1)</li>
 <li><a href="#BeforeTest"><code>BeforeTest</code></a> (1)</li>
-<li><a href="#BigInt"><code>BigInt</code></a> (68)</li>
+<li><a href="#BigInt"><code>BigInt</code></a> (69)</li>
 <li><a href="#BitOrder"><code>BitOrder</code></a> (1)</li>
 <li><a href="#BitReader"><code>BitReader</code></a> (9)</li>
 <li><a href="#BlendMode"><code>BlendMode</code></a> (1)</li>
@@ -498,6 +498,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#Color"><code>Color</code></a> (24)</li>
 <li><a href="#ColorLookup"><code>ColorLookup</code></a> (1)</li>
 <li><a href="#ColorSpace"><code>ColorSpace</code></a> (1)</li>
+<li><a href="#Compiler"><code>Compiler</code></a> (2)</li>
 <li><a href="#Complex"><code>Complex</code></a> (47)</li>
 <li><a href="#Composite"><code>Composite</code></a> (1)</li>
 <li><a href="#ConcurrentModificationException"><code>ConcurrentModificationException</code></a> (1)</li>
@@ -736,7 +737,7 @@ val back = Base64.decode(text).decodeToString()  // &quot;hello&quot;
 val n = &quot;123456789012345678901234567890&quot;.toBigInt()
 print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 </pre>
-<p>It mixes with ints on either side (<code>5 + big</code>, <code>big * 2</code>, <code>5 == BigInt.of(5)</code>), and with floats, which make a float. <code>/</code> and <code>%</code> cut toward zero, as an int's do (-7 / 2 is -3, -7 % 2 is -1); floorDiv and floorMod round down, as Python's // and % do. The bitwise operators work as if the number were in two's complement with as many bits as it needs, a negative one's ones going on forever (as Python's and Java's do).</p>
+<p>It mixes with ints on either side (<code>5 + big</code>, <code>big * 2</code>, <code>5 == BigInt.of(5)</code>), and with floats, which make a float (a division by or of a float rounded once, from the exact quotient). divideToFloat divides two as a float, rounded once. <code>/</code> and <code>%</code> of two cut toward zero, as an int's do (-7 / 2 is -3, -7 % 2 is -1); floorDiv and floorMod round down, as Python's // and % do. The bitwise operators work as if the number were in two's complement with as many bits as it needs, a negative one's ones going on forever (as Python's and Java's do).</p>
 <div class="entry" id="BigInt"><code class="sig">class BigInt</code><a class="anchor" href="#BigInt">#</a>
 <p>A whole number of any size, exact; each operation gives a new one.</p>
 </div>
@@ -810,7 +811,7 @@ print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 <p>Divided by an int, cut toward zero.</p>
 </div>
 <div class="entry member" id="BigInt./-3"><code class="sig">op /(other : float) : float</code><a class="anchor" href="#BigInt./-3">#</a>
-<p>Divided by a float, as a float.</p>
+<p>Divided by a float, as the float nearest the exact quotient (rounded once).</p>
 </div>
 <div class="entry member" id="BigInt.%"><code class="sig">op %(other : BigInt) : BigInt</code><a class="anchor" href="#BigInt.%">#</a>
 <p>The rest, with the sign of the number divided, as an int's; an ArithmeticException for 0.</p>
@@ -935,6 +936,11 @@ print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 <div class="entry member" id="BigInt.toFloat"><code class="sig">fun toFloat() : float</code><a class="anchor" href="#BigInt.toFloat">#</a>
 <p>The nearest float, rounded as the processor rounds (to even where halfway); an infinity past the largest.</p>
 </div>
+<div class="entry member" id="BigInt.divideToFloat"><code class="sig">fun divideToFloat(divisor : BigInt) : float</code><a class="anchor" href="#BigInt.divideToFloat">#</a>
+<p>Divided by <code>divisor</code>, as the float nearest the exact quotient: rounded once, where toFloat() / divisor.toFloat() rounds three times, and is NaN where both are past the largest float. A subnormal quotient rounded at its own place, an infinity past the largest float, a zero with the quotient's sign (0 divided by a negative is -0.0). An ArithmeticException for a divisor of 0.</p>
+<pre>(BigInt.ten.pow(400) + 1).divideToFloat(BigInt.ten.pow(399))   // 10.0
+</pre>
+</div>
 <div class="entry member" id="BigInt.toString"><code class="sig">fun toString(radix : int) : string</code><a class="anchor" href="#BigInt.toString">#</a>
 <p>In base <code>radix</code>, 2 to 36 (digits past 9 in small letters), a minus first where negative.</p>
 </div>
@@ -990,9 +996,10 @@ print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 <p>The float times a BigInt, as a float.</p>
 </div>
 <div class="entry" id="float./"><code class="sig">op float./(other : BigInt) : float</code><a class="anchor" href="#float./">#</a>
-<p>The float divided by a BigInt, as a float.</p>
+<p>The float divided by a BigInt, as the float nearest the exact quotient (rounded once).</p>
 </div>
 <h3>How it is worked out</h3>
+<h3>Floats rounded once</h3>
 </section>
 <section class="file" id="file-bits-ww">
 <h2>bits.ww</h2>
@@ -6870,6 +6877,20 @@ depth   how deep its calls go: deeper is a StackOverflowError in the script
 <p>The top level, as the script starts, is a call as any. A call that ends by a limit ends at once, no catch or finally of the script's run, and is a ScriptLimitException in the program; the script goes on for the next, what it was in the middle of left as it was. A program whose scripts keep passing their limits stops them (a game: a mod disabled after a few).</p>
 </div>
 <h3>What the compiler and the contract's proxies call</h3>
+<h3>Code compiled into the program itself</h3>
+<div class="entry" id="Compiler"><code class="sig">object Compiler</code><a class="anchor" href="#Compiler">#</a>
+<p>Source compiled while the program runs into the program itself (asked 2026-11-21, for an emulator that translates the code it runs into WinterWolf): in the program's own VM, on the calling thread, trusted, with nothing copied. Unlike a Script, it is the program's own code: its imports are the program's files and their classes, the same ones, and the names of the program's main file are its own, so what it makes is an object like any (a class of the program's extended, an interface of the program's implemented, a function) and runs as fast as the program's own code.</p>
+<pre>// shape.ww, imported by the program
+interface Shape { fun area() : float }
+</pre>
+<pre>val made = Compiler.compile(&quot;import \&quot;shape.ww\&quot;.*\nobject : Shape { override fun area() : float =&gt; 2.5 }&quot;) as Shape
+print(made.area())   // 2.5
+</pre>
+<p>Each compile is one more file in <code>folder</code> (by default the folder of the program's own file), which its imports are looked for from: the names of that folder's files are its own, as for any file there, and what it declares at its top level joins them (a name the program already declares cannot be declared again). The compile needs the compiler's view of the program. Run from its source (ww program.ww), the program is compiled from it each time it starts (the units ww kept are put back, so that is quick), never read back whole from what ww kept, and that view is kept. Built (ww build, to a bytecode file or an executable), it carries the sources it was compiled from and keeps all of its code; its first compile compiles it again from those, not from the disk (once, taking about as long as compiling it did), so it works where they are not.</p>
+</div>
+<div class="entry member" id="Compiler.compile"><code class="sig">fun compile(source : string, name : string = &quot;code.ww&quot;, folder : FilePath? = null) : any?</code><a class="anchor" href="#Compiler.compile">#</a>
+<p><code>source</code> compiled into the program, as the file <code>name</code> in <code>folder</code>, and run: what its last expression gives (null where it ends with none). An IllegalArgumentException with the compiler's errors, each with its line and column, where it does not compile; an IllegalStateException in a program built without its sources (by a ww before 0.9.5050).</p>
+</div>
 </section>
 <section class="file" id="file-securerandom-ww">
 <h2>securerandom.ww</h2>

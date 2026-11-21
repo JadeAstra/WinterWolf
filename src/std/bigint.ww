@@ -9,7 +9,9 @@
 //   print(big * n + 7, big / 3, big % 1000, -big < n)
 //
 // It mixes with ints on either side (`5 + big`, `big * 2`, `5 == BigInt.of(5)`), and with floats,
-// which make a float. `/` and `%` cut toward zero, as an int's do (-7 / 2 is -3, -7 % 2 is -1);
+// which make a float (a division by or of a float rounded once, from the exact quotient).
+// divideToFloat divides two as a float, rounded once. `/` and `%` of two cut toward zero, as an
+// int's do (-7 / 2 is -3, -7 % 2 is -1);
 // floorDiv and floorMod round down, as Python's // and % do. The bitwise operators work as if
 // the number were in two's complement with as many bits as it needs, a negative one's ones
 // going on forever (as Python's and Java's do).
@@ -102,8 +104,8 @@ class BigInt {
     if (other > 0 and other < __BIG_BASE) { return BigInt(sign, __bigDivSmall(mag, other)[0] as List<int>) }
     return this / BigInt.of(other)
   }
-  // Divided by a float, as a float.
-  op /(other : float) : float => toFloat() / other
+  // Divided by a float, as the float nearest the exact quotient (rounded once).
+  op /(other : float) : float => __bigDivideByFloat(this, other)
   // The rest, with the sign of the number divided, as an int's; an ArithmeticException for 0.
   op %(other : BigInt) : BigInt => divRem(other).second
   // The rest after dividing by an int, with the sign of this number.
@@ -339,6 +341,23 @@ class BigInt {
     val x = high.toFloat() * __bigTwoTo(cut)
     return sign < 0 ? -x : x
   }
+  // Divided by `divisor`, as the float nearest the exact quotient: rounded once, where
+  // toFloat() / divisor.toFloat() rounds three times, and is NaN where both are past the largest
+  // float. A subnormal quotient rounded at its own place, an infinity past the largest float, a
+  // zero with the quotient's sign (0 divided by a negative is -0.0). An ArithmeticException for a
+  // divisor of 0.
+  //   (BigInt.ten.pow(400) + 1).divideToFloat(BigInt.ten.pow(399))   // 10.0
+  fun divideToFloat(divisor : BigInt) : float {
+    if (divisor.sign == 0) { throw ArithmeticException("division by zero") }
+    val negative = (sign < 0) != (divisor.sign < 0)
+    if (sign == 0) { return negative ? -0.0 : 0.0 }
+    val a = abs()
+    val b = divisor.abs()
+    // Both exact as floats: one division, rounded once.
+    if (__bigBits(a.mag) <= 53 and __bigBits(b.mag) <= 53) { return toFloat() / divisor.toFloat() }
+    val x = __bigDivideScaled(a, b, 0)
+    return negative ? -x : x
+  }
   // In base `radix`, 2 to 36 (digits past 9 in small letters), a minus first where negative.
   fun toString(radix : int) : string => __bigToString(this, radix)
   // In base 10, a minus first where negative.
@@ -378,8 +397,8 @@ op float.+(other : BigInt) : float => this + other.toFloat()
 op float.-(other : BigInt) : float => this - other.toFloat()
 // The float times a BigInt, as a float.
 op float.*(other : BigInt) : float => this * other.toFloat()
-// The float divided by a BigInt, as a float.
-op float./(other : BigInt) : float => this / other.toFloat()
+// The float divided by a BigInt, as the float nearest the exact quotient (rounded once).
+op float./(other : BigInt) : float => __bigFloatDividedBy(this, other)
 
 // ---- How it is worked out ----
 
@@ -444,6 +463,75 @@ fun __bigAnyBelow(d : List<int>, count : int) : bool {
   for (i in 0 ..< Math.min(whole, d.size)) { if (d[i] != 0) { return true } }
   val part = count % 30
   return part > 0 and whole < d.size and (d[whole] & ((1 << part) - 1)) != 0
+}
+
+// ---- Floats rounded once ----
+
+// n × 2^e for n > 0, as the nearest float: rounded once, halves to even, where `sticky` says
+// something under n's lowest bit was left out (so a half is more than a half; it counts only
+// where n has two bits or more past what the float keeps, as __bigDivideScaled sees to). A
+// subnormal result is rounded at its own place, a result past the largest float is an infinity.
+fun __bigScaledToFloat(n : BigInt, e : int, sticky : bool) : float {
+  val bits = __bigBits(n.mag)
+  val top = bits - 1 + e   // n × 2^e is from 2^top to under 2^(top + 1)
+  if (top > 1023) { return 1.0 / 0.0 }
+  val keep = top >= -1022 ? 53 : top + 1075   // the bits a float has there
+  if (keep < 0) { return 0.0 }               // under half the least subnormal
+  val drop = bits - keep
+  if (drop <= 0) { return __bigTimesTwoTo(n.toFloat(), e) }
+  var m = n >> drop
+  val half = !((n >> (drop - 1)) & 1).isZero
+  val below = sticky or __bigAnyBelow(n.mag, drop - 1)
+  if (half and (below or !(m & 1).isZero)) { m = m + 1 }
+  return __bigTimesTwoTo(m.toFloat(), e + drop)
+}
+
+// (a / b) × 2^e for a, b > 0, as the nearest float, rounded once: a quotient of 55 bits or 56
+// made by shifting one of them, the rest kept as a sticky bit (CPython's long_true_divide works
+// so).
+fun __bigDivideScaled(a : BigInt, b : BigInt, e : int) : float {
+  val shift = 55 - (__bigBits(a.mag) - __bigBits(b.mag))
+  val parts = shift >= 0 ? (a << shift).divRem(b) : a.divRem(b << -shift)
+  return __bigScaledToFloat(parts.first, e - shift, !parts.second.isZero)
+}
+
+// x × 2^k, exactly where the result is a float (x a float of at most 53 bits): in steps that
+// lose nothing on the way.
+fun __bigTimesTwoTo(x : float, k : int) : float {
+  if (k >= 0) { return x * __bigTwoTo(k) }
+  var y = x
+  var left = -k
+  while (left > 1000) {
+    y = y / 1.0715086071862673e301   // 2^1000
+    left -= 1000
+  }
+  return y / __bigTwoTo(left)
+}
+
+// A finite float other than 0 as m × 2^e, m a whole number of at most 53 bits, positive.
+fun __bigFloatParts(x : float) : Pair<int, int> {
+  val bits = Bytes(8).putFloat64(0, x).int64(0)
+  val biased = (bits >> 52) & 0x7FF
+  val fraction = bits & 0xFFFFFFFFFFFFF
+  if (biased == 0) { return Pair(fraction, -1074) }
+  return Pair(fraction | 0x10000000000000, biased - 1075)
+}
+
+// A BigInt divided by a float, rounded once.
+fun __bigDivideByFloat(n : BigInt, x : float) : float {
+  if (x.isNaN() or x.isInfinite() or x == 0.0 or __bigBits(n.mag) <= 53) { return n.toFloat() / x }
+  if (n.sign == 0) { return (x < 0.0) ? -0.0 : 0.0 }
+  val parts = __bigFloatParts(Math.abs(x))
+  val q = __bigDivideScaled(n.abs(), BigInt.of(parts.first), -parts.second)
+  return (n.sign < 0) != (x < 0.0) ? -q : q
+}
+
+// A float divided by a BigInt, rounded once.
+fun __bigFloatDividedBy(x : float, n : BigInt) : float {
+  if (x.isNaN() or x.isInfinite() or x == 0.0 or n.sign == 0 or __bigBits(n.mag) <= 53) { return x / n.toFloat() }
+  val parts = __bigFloatParts(Math.abs(x))
+  val q = __bigDivideScaled(BigInt.of(parts.first), n.abs(), parts.second)
+  return (n.sign < 0) != (x < 0.0) ? -q : q
 }
 
 // 2 to the power `e` as a float, exactly (an infinity past the largest).
