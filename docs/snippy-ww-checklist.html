@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snippy and ww checklist</title>
+<style>
+:root {
+  --bg: #fbfaf7; --surface: #ffffff; --ink: #1d2422; --muted: #5d6763; --line: #dfe3e0;
+  --accent: #1f5fa8; --accent-soft: #e8f0fa; --decide: #a8551f; --decide-soft: #fbefe5;
+  --code-bg: #eef1ef;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161a19; --surface: #1d2221; --ink: #e4e9e6; --muted: #9aa5a0; --line: #2e3533;
+    --accent: #7fb2ec; --accent-soft: #1e2a38; --decide: #e7a06b; --decide-soft: #3a2a1f;
+    --code-bg: #262c2a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161a19; --surface: #1d2221; --ink: #e4e9e6; --muted: #9aa5a0; --line: #2e3533;
+  --accent: #7fb2ec; --accent-soft: #1e2a38; --decide: #e7a06b; --decide-soft: #3a2a1f;
+  --code-bg: #262c2a;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+main { max-width: 880px; margin: 0 auto; padding: 40px 16px 80px; }
+h1 { font-size: 1.9rem; line-height: 1.25; margin: 0 0 8px; }
+.lede { color: var(--muted); margin: 0 0 28px; }
+h2 { font-size: 1.3rem; line-height: 1.3; margin: 32px 0 12px; }
+h3 { font-size: 1.05rem; margin: 0 0 8px; }
+p { margin: 0 0 12px; }
+ul { margin: 0 0 12px; padding-left: 22px; }
+li { margin: 4px 0; }
+a { color: var(--accent); }
+code {
+  font: 0.88em/1.4 Consolas, "Cascadia Mono", monospace; background: var(--code-bg);
+  padding: 1px 5px; border-radius: 4px;
+}
+nav {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 20px; margin: 0 0 8px;
+}
+nav h2 { font-size: 1rem; margin: 0 0 8px; color: var(--muted); }
+nav ul { list-style: none; padding: 0; margin: 0; }
+nav a { text-decoration: none; color: var(--ink); }
+nav a:hover { color: var(--accent); }
+.code { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 6px; }
+section.decision {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 20px 24px 16px; margin: 0 0 18px;
+}
+.verdict {
+  display: flex; align-items: center; gap: 14px; background: var(--decide-soft);
+  border: 1px dashed var(--decide); border-radius: 6px; padding: 10px 14px; margin-top: 12px;
+}
+.label { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.verdict .label { color: var(--decide); white-space: nowrap; }
+.verdict .blank { flex: 1; border-bottom: 1px solid var(--decide); height: 1.2em; opacity: 0.6; }
+.verdict .note { font-size: 0.92rem; }
+.verdict.decided { border-style: solid; align-items: flex-start; }
+.verdict.decided .label { padding-top: 2px; }
+.table { overflow-x: auto; margin: 4px 0 18px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; border-top: none; border-bottom: 2px solid var(--line); }
+td.part { white-space: nowrap; color: var(--muted); }
+td.when { min-width: 9em; }
+.note { color: var(--muted); font-size: 0.93rem; }
+@media (max-width: 600px) {
+  main { padding-top: 24px; }
+  h1 { font-size: 1.5rem; }
+  section.decision { padding: 14px 14px 10px; }
+}
+h4 { font-size: 1rem; margin: 18px 0 8px; }
+h5 { font-size: 0.95rem; margin: 14px 0 6px; }
+section.source { border-top: 2px solid var(--line); margin-top: 48px; padding-top: 8px; }
+.from { color: var(--muted); font-size: 0.9rem; margin: 0 0 16px; }
+pre { background: var(--code-bg); padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+ul.check { list-style: none; padding-left: 0; }
+ul.check > li { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px 8px 40px; margin: 0 0 10px; position: relative; }
+ul.check > li::before { content: "☐"; position: absolute; left: 14px; top: 8px; font-size: 1.1rem; color: var(--muted); }
+ul.check > li.done::before { content: "☑"; color: var(--accent); }
+.id { font-weight: 700; color: var(--accent); margin-right: 6px; font-variant-numeric: tabular-nums; }
+.where { color: var(--muted); font-size: 0.9rem; }
+.tag { display: inline-block; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 4px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
+.tag.checked { background: var(--accent-soft); color: var(--accent); }
+.tag.reported { background: var(--code-bg); color: var(--muted); }
+.tag.decide { background: var(--decide-soft); color: var(--decide); }
+.owner { font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<h1>Snippy and ww: a checklist</h1>
+<p class="lede">Made 2026-11-21 from a review of all of Snippy (<code>lib/Snippy</code>, 41 files, about 24,500 lines) against ww's standard library (<code>src/std</code> and the C++ behind it) and its libraries (<code>lib/Crypto</code>, <code>lib/Web</code>, <code>lib/Formula</code>), asked by the user: "make sure it uses something in ww rather than write its own, list anything that might fall under this", then "check on why they're different and if we should make ww give snippy's expected output". Snippy's measure is CPython 3.14's output, to the character; a piece of ww can take the place of Snippy's own only where it gives that output.</p>
+
+<nav>
+<h2>Contents</h2>
+<ul>
+<li><a href="#bugs">1. Snippy's bugs</a></li>
+<li><a href="#use">2. Snippy could use ww's code now</a></li>
+<li><a href="#change">3. ww to change</a></li>
+<li><a href="#add">4. ww to add</a></li>
+<li><a href="#decide">5. Decisions for the user</a></li>
+<li><a href="#keep">6. Kept as they are</a></li>
+<li><a href="#own">7. Snippy's own, with nothing in ww</a></li>
+</ul>
+</nav>
+
+<p>How to read it: <span class="tag checked">checked</span> is a finding seen again by hand (the code read, or the program run beside CPython); <span class="tag reported">reported</span> is a reviewer's finding not yet run. The <span class="owner">owner</span> says who does it: the files under <code>lib/Snippy</code> are the Snippy session's; <code>src/std</code> and the C++ are done wherever the user puts them. "After W1" and the like say what an item waits for. Paths below are from the repository's root; Snippy's runtime is <code>lib/Snippy/Runtime</code>.</p>
+
+<h2 id="bugs">1. Snippy's bugs: different from CPython today</h2>
+<ul class="check">
+<li><span class="id">S1</span>int / int rounds twice <span class="tag checked">checked</span><br>
+<span class="where">Runtime/Ops.ww:420 <code>__pyBigTrueDiv</code></span><br>
+Where the quotient is not whole it is <code>p.toFloat() / q.toFloat()</code>; CPython rounds once. <code>896756281784094569167941 / 826325471441701108669</code> is 1085.2337399445184 in Snippy, 1085.2337399445182 in CPython (two more cases found the same way). Fix: a correctly rounded division (A1), or Snippy's own exact one.<br>
+<span class="owner">Owner: Snippy session; easiest after A1.</span></li>
+<li><span class="id">S2</span><code>time.mktime</code> reads <code>tm_yday</code> and leaves out the month and day <span class="tag checked">checked</span><br>
+<span class="where">Runtime/ModTime.ww:482-489</span><br>
+The date is <code>pyYmdToOrd(year, 1, 1) + yday - 1</code>; C's <code>mktime</code> uses year, month and day (normalising them) and ignores <code>tm_yday</code>, so <code>mktime((2024, 3, 1, 0, 0, 0, 0, 0, -1))</code> gives 1 January.<br>
+<span class="owner">Owner: Snippy session.</span></li>
+<li><span class="id">S3</span><code>str.isidentifier</code> goes by category <span class="tag checked">checked</span><br>
+<span class="where">Runtime/Methods.ww:767-778 <code>pyIsIdentifier</code></span><br>
+CPython goes by XID_Start and XID_Continue, which take in Other_ID_Start and Other_ID_Continue: <code>'℘'.isidentifier()</code> and <code>'a·'.isidentifier()</code> are True there (CPython asked), False in Snippy. <code>src/regex_unicode.inc</code> already holds CPython's answers for identifier characters; reading them from there (or from W1's data) fixes it.<br>
+<span class="owner">Owner: Snippy session; with W1, or the regex table now.</span></li>
+<li><span class="id">S4</span><code>str.isupper</code> and <code>islower</code> go by category <span class="tag checked">checked</span><br>
+<span class="where">Runtime/Methods.ww:621-640</span><br>
+CPython goes by the Uppercase and Lowercase properties: <code>'ª'.islower()</code> and <code>'Ⓐ'.isupper()</code> are True there (CPython asked), False in Snippy. <code>pyCharUpperCase</code> and <code>pyCharLowerCase</code> in <code>lib/Snippy/Text/Casing.ww:147-148</code> already answer these right.<br>
+<span class="owner">Owner: Snippy session.</span></li>
+<li><span class="id">S5</span><code>NormalDist.samples</code> without a seed makes a Random of its own <span class="tag checked">checked</span><br>
+<span class="where">Runtime/ModStatistics.ww:300-307</span><br>
+CPython's is <code>rnd = random.random if seed is None else random.Random(seed).random</code>: without a seed it draws from the module's generator, so <code>random.seed(1)</code> before it gives CPython's numbers; Snippy's does not.<br>
+<span class="owner">Owner: Snippy session.</span></li>
+<li><span class="id">S6</span><code>statistics</code>' own fsum <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModStatistics.ww:111-124 <code>pyFsum</code> (and <code>__pySumprodF</code> 129-138, <code>__pyFloats2</code> 126)</span><br>
+A second copy of <code>math.fsum</code> (ModMath.ww:640-657) that gives NaN before it looks for both infinities (CPython raises "-inf + inf in fsum" for <code>[nan, inf, -inf]</code>, so <code>fmean</code> differs) and lacks ModMath's -0.0. Use ModMath's.<br>
+<span class="owner">Owner: Snippy session.</span></li>
+<li><span class="id">S7</span><code>str.isdigit</code> and <code>isnumeric</code> from lists by hand <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Methods.ww:758-765</span><br>
+The lists miss characters (the Ethiopic digits U+1369 to U+1371, most CJK numerals); CPython goes by Numeric_Type. A table made from Unicode's data (or from CPython, as Snippy's case tables are) would be whole.<br>
+<span class="owner">Owner: Snippy session; with W1's data.</span></li>
+</ul>
+
+<h2 id="use">2. Snippy could use ww's code now, with the same results</h2>
+<p>Each of these is Snippy writing again what ww has, the results the same. <span class="owner">Owner of all: the Snippy session.</span></p>
+<h3>Dates and times</h3>
+<ul class="check">
+<li><span class="id">U1</span>Leap years, days in a month, dates to ordinals and back, floor division <span class="tag checked">checked</span><br>
+<span class="where">Runtime/ModTime.ww:12-48, 78-79</span> → <code>src/std/time.ww</code>: <code>__monthDays</code> (324), <code>__civilDays</code> and <code>__civilDate</code> (301-321, ordinal = <code>__civilDays(y, m, d) + 719163</code>), <code>__floorDiv</code> (292). Both proleptic Gregorian.</li>
+<li><span class="id">U2</span>The weekday and the day of the year <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModTime.ww:50</span> → <code>LocalDate.dayOfWeek - 1</code>, <code>LocalDate.dayOfYear</code> (<code>src/std/localtime.ww:21-25</code>).</li>
+<li><span class="id">U3</span>The names of days and months; two-digit numbers <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModTime.ww:6-8, 95-99</span> → <code>__dayNames</code>, <code>__monthNames</code> (<code>localtime.ww:179-181</code>), <code>__digits</code> (<code>time.ww:298</code>); for negative years ww's gives "00-5" where Snippy's gives "-05" (only <code>%Y</code>, <code>%C</code> of negative years).</li>
+<li><span class="id">U4</span><code>date.isoformat</code> <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModDatetime.ww:494</span> → <code>__isoDate</code> (<code>localtime.ww:168</code>), years 1 to 9999.</li>
+<li><span class="id">U5</span>The offset of local time for a naive datetime <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModDatetime.ww:866-871, 898-901</span> → the same two passes as <code>LocalDateTime.toInstant</code> (<code>localtime.ww:125-130</code>); only the offset can be shared, as <code>Instant</code> ends at 2262 (D2).</li>
+</ul>
+<h3>Text and bytes</h3>
+<ul class="check">
+<li><span class="id">U6</span><code>removeprefix</code>, <code>removesuffix</code> <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Methods.ww:699-706</span> → <code>string.removePrefix</code>, <code>removeSuffix</code> (<code>src/std/string.ww:84-86</code>).</li>
+<li><span class="id">U7</span><code>ljust</code>, <code>rjust</code> <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Methods.ww:666-681</span> → <code>padEnd</code>, <code>padStart</code> (code points, as CPython counts).</li>
+<li><span class="id">U8</span><code>split(sep)</code> without maxsplit <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Methods.ww:473-485</span> → <code>string.split(delimiter)</code>; <code>"".split(",")</code> is <code>[""]</code> in both.</li>
+<li><span class="id">U9</span><code>int.bit_length</code> <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Methods.ww:1140-1149</span> → <code>BigInt.abs().bitLength</code> (<code>src/std/bigint.ww:63</code>).</li>
+<li><span class="id">U10</span>Hex text: bytes, and numbers to a width <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Bytes.ww:236-241 <code>pyBytesHex</code> (no separator); lib/Snippy/Text/Repr.ww:82-90 <code>pyHex</code>; Runtime/ModRe.ww:55-60 <code>__pyReHex</code></span> → <code>Bytes.toHex()</code> (<code>src/std/base64.ww:97</code>), <code>n.toString(16).padStart(width, '0')</code>.</li>
+<li><span class="id">U11</span><code>bytes.translate</code>, and ASCII <code>upper</code>/<code>lower</code>/<code>swapcase</code> of bytes <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Bytes.ww:525-540, 369-371</span> → <code>Bytes.mapped(table)</code> (<code>builtins.ww:451</code>); deleted bytes still need Snippy's step.</li>
+<li><span class="id">U12</span>Slices of bytes and lists, and inserting many <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Bytes.ww:57-61 <code>pyBytesPart</code>; Runtime/Containers.ww:226-229, 250-259, 339</span> → <code>b[a..&lt;b]</code>, <code>l[a..&lt;b]</code> (copied natively), <code>addAll(index, items)</code>. A slice running backwards is an error in ww and empty in Snippy: keep that check.</li>
+<li><span class="id">U13</span>Latin-1 both ways <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Text.ww:747-748; Runtime/Builtins.ww:292-296 <code>pyBytesText</code>; Runtime/Containers.ww:471-475 <code>pyBytesOfLatin1</code></span> → <code>decodeToString(Charset.latin1)</code>, <code>toBytes(Charset.latin1)</code>.</li>
+<li><span class="id">U14</span>Finding a byte in bytes <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Containers.ww:481</span> → <code>Bytes.contains</code>, <code>Bytes.indexOf</code>, after Snippy's 0-255 check.</li>
+</ul>
+<h3>Patterns, Template, JSON</h3>
+<ul class="check">
+<li><span class="id">U15</span>textwrap's word splitting, rebuilt by hand <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModTextwrap.ww:26-75</span> → CPython's own <code>wordsep_re</code>, <code>wordsep_simple_re</code> and <code>sentence_end_re</code> compiled with <code>RegexOption.snippy</code> and split with ModRe's own split. Also adds the class attributes a subclass replaces (today a subclass's <code>wordsep_re</code> is not read).</li>
+<li><span class="id">U16</span><code>string.Template</code>'s matching, by hand <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModString.ww:42-117, 188-231</span> → CPython's <code>Template.pattern</code> built from <code>idpattern</code>, <code>braceidpattern</code> and <code>flags</code> and compiled with <code>RegexOption.snippy</code>. Today those three are set (175-177) and never read, so a subclass that changes them gets results other than CPython's.</li>
+<li><span class="id">U17</span>A JSON error's line and column <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModJson.ww:22-41</span> → the same arithmetic as <code>__JsonReader.failure</code>; <code>JsonParseException</code> has <code>position</code>, <code>line</code>, <code>column</code> (<code>src/std/json.ww:107</code>).</li>
+</ul>
+<h3>Numbers</h3>
+<ul class="check">
+<li><span class="id">U18</span>An exact fmod of floats from BigInts <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModMath.ww:351-360 <code>__pyFmodFloat</code>; 165 <code>__pySinPi</code></span> → a float's <code>%</code>, which is C's <code>fmod</code> (exact, the sign of x, NaN and infinity as CPython's). Not <code>float.mod</code>, which is floored.</li>
+<li><span class="id">U19</span>The inverse in Fraction's hash <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModFractions.ww:161</span> → <code>BigInt.modInverse(P)</code> in place of <code>modPow(P - 2, P)</code> (P = 2<sup>61</sup> - 1 is prime and <code>d % P != 0</code> is checked first).</li>
+<li><span class="id">U20</span>cmath's <code>phase</code>, <code>polar</code>, <code>rect</code> <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModCmath.ww:233-249</span> → <code>Complex.arg()</code>, <code>Complex.abs()</code>, <code>Complex.fromPolar</code> (<code>src/std/complex.ww:21-24, 76-78</code>). Line 247 is dead code (<code>and false</code>).</li>
+<li><span class="id">U21</span>Complex <code>*</code>, <code>/</code> and whole powers <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Ops.ww:1361-1388</span> → Complex's own <code>*</code>, <code>/</code> (the same Smith's formula, term for term) and <code>pow(int)</code>; keep Snippy's check for a zero divisor and its <code>|n| &lt;= 100</code> rule.</li>
+<li><span class="id">U22</span>An int's <code>%</code> <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Ops.ww:103-108 <code>__pyModInt</code></span> → <code>int.mod</code> (<code>src/stdlib.cpp:877-884</code>), the same to a divisor of -1; check for 0 first.</li>
+<li><span class="id">U23</span><code>SystemRandom.random</code>; bytes to a BigInt <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModRandom.ww:536-541; 102-109, 547-548</span> → <code>SecureRandom.random()</code> (53 bits, as CPython's); <code>BigInt.parse(bytes.toHex(), 16)</code>, but not for no bytes at all (<code>getrandbits(0)</code>).</li>
+</ul>
+<h3>Containers</h3>
+<ul class="check">
+<li><span class="id">U24</span>Sorting <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Builtins.ww:606-657 <code>pySortList</code>, <code>__pyMergeSort</code>; Runtime/ModCollections.ww:38-47</span> → <code>List.sort(comparator)</code>, a stable merge sort that asks <code>less(right, left)</code> once a step, as CPython's <code>ISLT</code>; <code>pySortedBy</code> asks <code>pyLt</code> twice a step and can ask once.</li>
+<li><span class="id">U25</span><code>deque</code>, and asyncio's queues <span class="tag reported">reported</span><br>
+<span class="where">Runtime/ModCollections.ww:247-341 <code>PyDeque</code>; Runtime/Async.ww:585, 602</span> → <code>Deck</code> (<code>src/std/set.ww:199-418</code>): <code>removeAt(0)</code> on a list is slower the longer it is, a Deck's ends are not. <code>insert</code>, <code>rotate</code>, <code>remove</code>, <code>index</code> stay Snippy's (Deck's <code>indexOf</code> compares by ww's <code>==</code>).</li>
+<li><span class="id">U26</span>A range's length and containment; lists filled with one value <span class="tag reported">reported</span><br>
+<span class="where">Runtime/Iter.ww:345-358; Runtime/Set.ww:334-344</span> → <code>Range(start, stop, step).size</code>, <code>.contains</code>; <code>List(n) { x }</code>.</li>
+</ul>
+
+<h2 id="change">3. ww to change: ww's flaws, whose fixes also give Snippy what it needs</h2>
+<ul class="check">
+<li><span class="id">W1</span>Unicode data of ww's own for case and character classes <span class="tag checked">checked</span><br>
+<span class="where">src/builtins.cpp:96-124 <code>changeCase</code>; src/stdlib.cpp:110-205 <code>charactersAre</code></span><br>
+Outside ASCII, <code>string.upper</code>/<code>lower</code> and <code>char.isLetter</code>, <code>isDigit</code>, <code>isWhitespace</code>, <code>isUpperCase</code>, <code>isLowerCase</code> ask the operating system (<code>LCMapStringEx</code> and <code>GetStringTypeW</code> on Windows, the C library elsewhere), so one program can answer differently on Windows and Linux. The code says so itself: "the operating system's until the text engine brings Unicode data of our own (M4)". Case maps one character to one: <code>"ß".upper()</code> is "ß" (Kotlin's is "SS"). To do: tables made from Unicode's own files, the same everywhere, with full case mappings; one source shared with the regex engine's (<code>src/regex_unicode.inc</code>, and the <code>\p</code> classes the Snippy session is adding as 0.9.5067). Then Snippy's <code>upper</code>, <code>lower</code>, <code>isalpha</code>, <code>isidentifier</code> can use ww's (S3, S4); title case and casefold could be added beside them.<br>
+<span class="owner">Owner: as the user decides (D3); agree the table's home with the Snippy session first.</span></li>
+<li><span class="id">W2</span><code>trim</code> and <code>split()</code> know only ASCII whitespace <span class="tag reported">reported</span><br>
+<span class="where">src/builtins.cpp:168, 813</span><br>
+Kotlin's go by <code>isWhitespace</code>, Unicode's. To do: W1's whitespace. Snippy's <code>strip</code> and <code>split()</code> could then use them, but for <code>\x85</code>, which Kotlin does not count and CPython does.<br>
+<span class="owner">Owner: with W1.</span></li>
+<li><span class="id">W3</span><code>lines()</code> leaves out a lone <code>\r</code> <span class="tag reported">reported</span><br>
+<span class="where">src/std/builtins.ww:118</span><br>
+Kotlin's <code>lines()</code> breaks at <code>\r\n</code>, <code>\n</code> and <code>\r</code>. To do: as Kotlin. (Snippy's <code>splitlines</code>, which breaks at more and gives no empty last line, stays its own.)</li>
+<li><span class="id">W4</span><code>char.digitToInt</code> takes ASCII digits only <span class="tag reported">reported</span><br>
+<span class="where">src/stdlib.cpp:936-942</span><br>
+Kotlin's takes any Unicode decimal digit. To do: as Kotlin, from W1's data. Snippy's <code>int()</code> of such digits (as CPython reads them) could then use it (Runtime/Builtins.ww:176-221).</li>
+<li><span class="id">W5</span><code>Math.random</code>, <code>randomInt</code> and <code>seed</code> differ from system to system <span class="tag checked">checked</span><br>
+<span class="where">src/builtins.cpp:700-728</span><br>
+The generator (<code>std::mt19937_64</code>) is defined exactly by the C++ standard, but <code>std::uniform_real_distribution</code> and <code>uniform_int_distribution</code> are each C++ library's own, so a seeded program gets other numbers on Windows than on Linux. To do: ww's own step from the generator's numbers to a float (53 bits) and to an int in a range (without bias). Snippy keeps its own generator (CPython's Mersenne Twister, its seeding and state), so this is for ww's sake.</li>
+<li><span class="id">W6</span>Complex as CPython's cmath at the edges <span class="tag reported">reported</span><br>
+<span class="where">src/std/complex.ww:120-226</span><br>
+complex.ww says its functions "follow C99's and Python's cmath", but <code>sqrt</code> has no rescaling of subnormals and overflows past DBL_MAX; <code>log</code> lacks the branches past DBL_MAX/4 and under DBL_MIN, takes the 0.71 and 1.73 bounds the other way, and gives -inf for 0 where cmath raises; <code>exp</code>, <code>sinh</code>, <code>cosh</code> lack the <code>exp(x - 1) e</code> branch past 708.4; <code>atanh</code>'s thresholds are 1e150 and 1e-150, not CPython's; <code>tanh</code> uses another formula (cut over at 20) and differs in the last digits even for ordinary values. To do: CPython's cmath algorithms in ww's Complex. Snippy's <code>cmath</code> (Runtime/ModCmath.ww, 270 lines) could then be ww's Complex.</li>
+</ul>
+
+<h2 id="add">4. ww to add: pieces both sides need</h2>
+<ul class="check">
+<li><span class="id">A1</span>A BigInt divided by a BigInt, as a float rounded once<br>
+ww has <code>BigInt / BigInt</code> cut to a BigInt and <code>BigInt / float</code> as <code>toFloat() / other</code>, which rounds twice (<code>src/std/bigint.ww:106</code>). For S1, Fraction's <code>__float__</code> (Runtime/ModFractions.ww:10-22), and any ww program dividing large ints.</li>
+<li><span class="id">A2</span>A float's bits, frexp and ldexp<br>
+Kotlin has <code>toBits()</code> and <code>Double.fromBits</code>; ww has none (Snippy goes through <code>Bytes.putFloat64</code>). For CPython's float hash (Runtime/Ops.ww:1101-1279), <code>math.frexp</code> (Runtime/ModMath.ww:11-24), <code>float.hex</code> and <code>fromhex</code> (Runtime/Methods.ww:1302-1361).</li>
+<li><span class="id">A3</span>A floor and a ceiling that give a float <span class="tag decide">name to decide</span><br>
+<code>Math.floor</code> and <code>ceil</code> give an int by design (<code>src/std/builtins.ww:725-729</code>) and throw past 2<sup>63</sup>, while <code>Math.trunc</code> gives a float; Kotlin's <code>floor</code> gives a Double. For Snippy's <code>pyFloor</code> and <code>math.floor</code> of large floats (Runtime/Ops.ww:204-208, ModMath.ww:791-800); <code>lib/Formula</code> needed one too (<code>__fxFloor</code>).</li>
+<li><span class="id">A4</span><code>format</code>'s <code>#</code> flag (0x, 0o) and BigInt in <code>%d</code> and <code>%x</code><br>
+Java's formatter has both; ww's does not (<code>src/stdlib.cpp:438-449</code>). Part of Snippy's <code>%</code>-formatting could use it; its <code>_</code> grouping and groups of four stay its own.</li>
+<li><span class="id">A5</span>Writing JSON as it goes, to a Writer<br>
+ww builds the whole text first (<code>__JsonWriter</code>). For <code>json.dump</code> and <code>iterencode</code> (Runtime/ModJson.ww:358-518), and for ww programs writing large documents.</li>
+</ul>
+
+<h2 id="decide">5. Decisions for the user</h2>
+<ul class="check">
+<li><span class="id">D1</span><code>format</code>'s rounding <span class="tag decide">to decide</span><br>
+ww rounds <code>"%.1f"</code> of 0.35 to 0.4, half up from the digits a float prints as, as Kotlin writes it (documented in <code>src/std/builtins.ww:204-209</code>); C, CPython and the exact value give 0.3. Keep Kotlin's, or round the exact value? Changing it changes what existing programs print. Recommended (quality over porting ease): the exact value.</li>
+<li><span class="id">D2</span>The reach of <code>Instant</code> and <code>Duration</code> <span class="tag decide">to decide</span><br>
+Both are int nanoseconds, so an Instant reaches from 1677 to 2262 (<code>src/std/time.ww:169</code>) and a Duration about ±292 years. Java's, which ww's say they follow, are seconds and nanoseconds, reaching far past years 1 to 9999. Widening serves dates in history and lets Snippy's datetime (which reaches to 9999 with BigInt today) use them; <code>epochNanoseconds</code> would change. Recommended: widen.</li>
+<li><span class="id">D3</span>What to start, and where <span class="tag decide">to decide</span><br>
+Sections 3 and 4 are ww's code (<code>src/std</code> and the C++); sections 1 and 2 are the Snippy session's. Recommended first: W1 (ww's answers differ between systems today, and S3, S4 and S7 wait for it), then W5, A1 and A2; the Snippy side after each.</li>
+<li><span class="id">D4</span>A3's name <span class="tag decide">to decide</span><br>
+A float floor and ceiling: <code>Math.floor</code> giving a float for a float (as Kotlin's, changing what it gives today), or new names beside the int ones.</li>
+</ul>
+
+<h2 id="keep">6. Kept as they are: ww's on purpose, or ww the more exact</h2>
+<ul>
+<li><strong>Regex</strong>: after an empty match ww's <code>findAll</code>, <code>split</code> and <code>replace</code> go on as Java's do; <code>split</code> leaves out groups, <code>replace</code> writes <code>$1</code>, <code>escape</code> is <code>\Q...\E</code>, and <code>split</code>'s limit is Kotlin's (<code>src/std/regex.ww</code>: "Java's syntax ... Kotlin's Regex around it"). Snippy has <code>RegexOption.snippy</code> and its own loops (Runtime/ModRe.ww:341-381, 517-558, 599-607).</li>
+<li><strong>Time</strong>: ISO text in one form (<code>Instant.parse</code>), <code>__isoTime</code> leaving out zero seconds, Java's pattern letters for formatting where CPython has <code>%</code>, Duration's text: all Java's. Snippy's ISO parsing, <code>isoformat</code>, strftime and strptime stay its own.</li>
+<li><strong>JSON reading</strong>: a lone surrogate becomes U+FFFD because a ww string cannot hold one (Snippy keeps its own, at private-use code points); a byte-order mark is refused; the hooks give ww's maps and lists; the messages are ww's ("string ... null"), its sort of keys ww's.</li>
+<li><strong>Map and Set</strong> go in the order things were put in, as ww chose (<code>src/std/set.ww:3-5</code>); CPython's set goes by its hash slots, and its hashes are its own (SipHash, the int hash modulo 2<sup>61</sup> - 1). Snippy's dict and set stay its own. Also: ww's map filters by a 32-bit hash before <code>==</code> and keeps the collector off while a key's <code>==</code> runs, neither of which a Python-like <code>__eq__</code> could rely on.</li>
+<li><strong>Numbers</strong>: <code>float.mod</code> giving -0.0 (Kotlin's); <code>Math.log(x, base)</code> rounding once, more exact than CPython's two roundings (Snippy keeps <code>ln / ln</code>); <code>Math.hypot</code> of two (Snippy's, of any number and rounded once, stays); <code>Complex.pow</code> of a complex power as <code>exp(w log z)</code>; ww's overflow checks on ints, which Snippy keeps rather than catching.</li>
+<li><strong>Different functions for different jobs</strong>: <code>trimIndent</code> (Kotlin's) and <code>dedent</code>; <code>padStart</code> and <code>zfill</code>; <code>hexToBytes</code> and <code>bytes.fromhex</code>; JSON's quoting and <code>repr</code>; <code>string.format</code> (printf's) and <code>str.format</code>.</li>
+<li><strong>EventLoop</strong> has no "run until this one is done"; asyncio keeps its own loop.</li>
+</ul>
+
+<h2 id="own">7. Snippy's own, with nothing in ww to use</h2>
+<p>For the record, the larger parts that are Snippy's because nothing in ww does them: CPython's hashing (Runtime/Ops.ww:1101-1279); gamma, lgamma, erf, erfc, fsum, fma, sumprod, comb, perm, nextafter, ulp and cbrt (Runtime/ModMath.ww); the Fraction type (ModFractions.ww); statistics' exact sums and the normal distribution's inverse (ModStatistics.ww); the Mersenne Twister and the variates (ModRandom.ww); strptime, ISO weeks, tzinfo and struct_time (ModTime.ww, ModDatetime.ww); re's templates and Pattern and Match (ModRe.ww); <code>str.format</code>, <code>%</code>-formatting and CPython's float formatting (Runtime/Text.ww); the Unicode category and printable tables and title case and casefold (lib/Snippy/Text); <code>expandtabs</code>, <code>center</code>, <code>to_bytes</code>, <code>from_bytes</code>; the lazy itertools; the C3 method order; the "Did you mean" suggestions; the Neumaier sum; timers kept in order (ww has no heap).</p>
+</main>
+</body>
+</html>
