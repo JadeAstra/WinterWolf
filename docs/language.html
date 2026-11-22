@@ -1151,13 +1151,13 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <p>The text in lower case as Kotlin's lowercase() gives it: Unicode's full mappings (&quot;İ&quot; is &quot;i̇&quot;), and a Σ that ends a word as ς: &quot;ΟΔΟΣ&quot; is &quot;οδος&quot;.</p>
 </div>
 <div class="entry" id="string.trim"><code class="sig">fun string.trim() : string</code><a class="anchor" href="#string.trim">#</a>
-<p>The text without the spaces, tabs and line ends at its start and at its end.</p>
+<p>The text without the whitespace at its start and at its end: whitespace as Kotlin's Char.isWhitespace has it, the spaces of every script (the no-break ones too), tabs and line ends, the same on every system.</p>
 </div>
 <div class="entry" id="string.trimStart"><code class="sig">fun string.trimStart() : string</code><a class="anchor" href="#string.trimStart">#</a>
-<p>The text without the spaces, tabs and line ends at its start.</p>
+<p>The text without the whitespace (as trim's) at its start.</p>
 </div>
 <div class="entry" id="string.trimEnd"><code class="sig">fun string.trimEnd() : string</code><a class="anchor" href="#string.trimEnd">#</a>
-<p>The text without the spaces, tabs and line ends at its end.</p>
+<p>The text without the whitespace (as trim's) at its end.</p>
 </div>
 <div class="entry" id="string.trimIndent"><code class="sig">fun string.trimIndent() : string</code><a class="anchor" href="#string.trimIndent">#</a>
 <p>For text written over several lines in the source: the indentation shared by all the lines with something on them taken away, and a first and a last line that are blank dropped.</p>
@@ -1166,7 +1166,7 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <p>For text written over several lines in the source: on each line, the spaces and tabs up to <code>marginPrefix</code> and the prefix itself taken away, and a first and a last line that are blank dropped. A line without the prefix is kept as it is.</p>
 </div>
 <div class="entry" id="string.split"><code class="sig">fun string.split() : open List&lt;string&gt;</code><a class="anchor" href="#string.split">#</a>
-<p>The words of the text: the parts between runs of whitespace, none of them empty, as a new list.</p>
+<p>The words of the text: the parts between runs of whitespace (as trim's), none of them empty, as a new list.</p>
 <pre>&quot; a  b &quot;.split()      // [&quot;a&quot;, &quot;b&quot;]
 </pre>
 </div>
@@ -1179,7 +1179,7 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <p>The parts of the text between the places where the character <code>delimiter</code> is, as a new list.</p>
 </div>
 <div class="entry" id="string.lines"><code class="sig">fun string.lines() : open List&lt;string&gt;</code><a class="anchor" href="#string.lines">#</a>
-<p>The lines of the text without their line ends (&quot;\n&quot; or &quot;\r\n&quot;), as a new list. Text that ends in a line end gives an empty last line.</p>
+<p>The lines of the text without their line ends (&quot;\r\n&quot;, &quot;\n&quot;, or &quot;\r&quot; alone, as Kotlin's), as a new list. Text that ends in a line end gives an empty last line.</p>
 </div>
 <div class="entry" id="string.repeat"><code class="sig">fun string.repeat(times : int) : string</code><a class="anchor" href="#string.repeat">#</a>
 <p>The text <code>times</code> times over; &quot;&quot; for 0. An IllegalArgumentException for a negative <code>times</code>.</p>
@@ -1285,7 +1285,7 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <p>The number the text spells, or null where it is not one.</p>
 </div>
 <div class="entry" id="string.format"><code class="sig">fun string.format(vararg values : any?) : string</code><a class="anchor" href="#string.format">#</a>
-<p>The text with each <code>%</code> item in it replaced by the next of <code>values</code>, as Kotlin's String.format: <code>%[n$][flags][width][.precision]kind</code>. The kinds are d (a whole number), x X o (in hex or octal), f e E g G (a fraction), s S (anything, as print shows it), c (a character), b (true or false), <code>%%</code> and <code>%n</code>; the flags <code>-</code> (to the left), <code>0</code>, <code>+</code>, a space, and <code>,</code> (thousands). A fraction is rounded half up from the digits print shows (&quot;%.1f&quot; of 0.35 is 0.4), and %g keeps its zeros (&quot;%.4g&quot; of 1.0 is 1.000), as Kotlin writes them. An IllegalArgumentException for a bad item or too few values.</p>
+<p>The text with each <code>%</code> item in it replaced by the next of <code>values</code>, as Kotlin's String.format: <code>%[n$][flags][width][.precision]kind</code>. The kinds are d (a whole number), x X o (in hex or octal), f e E g G (a fraction), s S (anything, as print shows it), c (a character), b (true or false), <code>%%</code> and <code>%n</code>; the flags <code>-</code> (to the left), <code>0</code>, <code>+</code>, a space, and <code>,</code> (thousands). A fraction is rounded from its exact binary value, a half to even, as C's printf rounds it: &quot;%.1f&quot; of 0.35 is 0.3 (0.35 is 0.34999... in binary) and &quot;%.0f&quot; of 2.5 is 2. %g keeps its zeros (&quot;%.4g&quot; of 1.0 is 1.000), as Kotlin writes them. An IllegalArgumentException for a bad item or too few values.</p>
 <pre>&quot;%d items, %.2f each&quot;.format(3, 1.5)   // &quot;3 items, 1.50 each&quot;
 </pre>
 </div>
@@ -1691,7 +1691,7 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <p>The character in lower case, one for one as Java's Character.toLowerCase gives it.</p>
 </div>
 <div class="entry" id="char.digitToInt"><code class="sig">fun char.digitToInt(radix : int = 10) : int</code><a class="anchor" href="#char.digitToInt">#</a>
-<p>The number the digit stands for in base <code>radix</code>: '7' is 7, and in base 16, 'f' is 15. A NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a radix outside 2 to 36.</p>
+<p>The number the digit stands for in base <code>radix</code>: '7' is 7, and in base 16, 'f' is 15. A decimal digit of any script counts ('٣', Arabic-Indic three, is 3), and so do the fullwidth letters, as Kotlin's digitToInt. A NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a radix outside 2 to 36.</p>
 </div>
 <div class="entry" id="byte.toInt"><code class="sig">fun byte.toInt() : int</code><a class="anchor" href="#byte.toInt">#</a>
 <p>A byte holds 0 to 255; arithmetic on bytes gives an int. toInt() gives the number the byte holds, as an int.</p>
@@ -1970,7 +1970,7 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <p>A random int from <code>low</code> to <code>high</code>, both included; an IllegalArgumentException where <code>low</code> is greater than <code>high</code>.</p>
 </div>
 <div class="entry member" id="Math.seed"><code class="sig">fun seed(value : int)</code><a class="anchor" href="#Math.seed">#</a>
-<p>Starts random() and randomInt() again from <code>value</code>: after the same seed, they give the same numbers in the same order.</p>
+<p>Starts random() and randomInt() again from <code>value</code>: after the same seed, they give the same numbers in the same order, on every system.</p>
 </div>
 </section>
 <section class="file" id="file-bytesource-ww">

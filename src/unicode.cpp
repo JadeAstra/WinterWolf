@@ -14,6 +14,7 @@ struct UnicodeRecord {
     uint16_t properties;
     int32_t upper, lower, title;
     uint16_t special;  // 1 + the special casing's number, 0 for none
+    int8_t digit;      // the decimal digit's value, -1 for none
 };
 struct UnicodeSpecial {
     uint16_t lowerAt, lowerLength, titleAt, titleLength, upperAt, upperLength;
@@ -90,6 +91,8 @@ bool isWhitespace(uint32_t c) {
     if (c == 0xA0 || c == 0x2007 || c == 0x202F) return false;
     return (c >= 9 && c <= 13) || (c >= 0x1C && c <= 0x1F) || isSpaceChar(c);
 }
+
+int decimalValue(uint32_t c) { return recordOf(c).digit; }
 
 uint32_t toUpper(uint32_t c) { return moved(c, recordOf(c).upper); }
 uint32_t toLower(uint32_t c) { return moved(c, recordOf(c).lower); }

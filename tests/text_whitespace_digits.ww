@@ -1,0 +1,36 @@
+// Whitespace as Kotlin's Char.isWhitespace has it for trim, trimStart, trimEnd, isBlank and split()
+// (W2 of docs/snippy-ww-checklist.html), lines() at a lone "\r" too (W3), and digitToInt for the
+// decimal digits of every script and the fullwidth letters (W4). The values are Kotlin's on the
+// JVM: Java's Character.isWhitespace or isSpaceChar, and Character.digit.
+
+// The no-break spaces (U+00A0, U+2007, U+202F) and the em space are whitespace; the zero-width
+// space (U+200B, a format character) and U+0085 are not; U+001C (a separator) is.
+print("[" + "\u{A0} x\u{2003}\u{202F}\u{2007}".trim() + "]")        // expect: [x]
+print("\u{A0}\tx \u{A0}".trimStart().size)                         // expect: 3
+print("\u{3000}x\u{A0}\u{2007}".trimEnd().size)                     // expect: 2
+print("\u{200B}x\u{200B}".trim().size, "\u{200B}".isBlank())        // expect: 3 false
+print("\u{85}x".trim().size, "\u{1C}x".trim())                      // expect: 2 x
+print("\u{A0}\u{3000}\u{2029} ".isBlank(), "\u{A0}a".isBlank(), "".isBlank(), "\u{A0}".isNotBlank())
+// expect: true false true false
+print(" a\u{A0}b\u{3000}\u{3000}c\u{2028}d ".split())               // expect: ["a", "b", "c", "d"]
+print("é keeps é".trim(), "日本\u{A0}".trim().size)                  // expect: é keeps é 2
+
+// lines(): "\r\n", "\n" and "\r" alone each end a line.
+print("a\rb\r\nc\nd\r".lines())                                     // expect: ["a", "b", "c", "d", ""]
+print("\r\r\n\n".lines().size, "x".lines(), "".lines().size)        // expect: 4 ["x"] 1
+print("  a\r  b".trimIndent().lines())                              // expect: ["a", "b"]
+
+// digitToInt: Arabic-Indic 3, fullwidth 7, fullwidth F in base 16, the mathematical bold 9 and
+// the next run's 0, Adlam 0, fullwidth z in base 36.
+print('\u{663}'.digitToInt(), '\u{FF17}'.digitToInt(), '\u{FF26}'.digitToInt(16), '\u{1D7D7}'.digitToInt(), '\u{1D7D8}'.digitToInt())
+// expect: 3 7 15 9 0
+print('\u{1E950}'.digitToInt(), '\u{FF5A}'.digitToInt(36), 'z'.digitToInt(36), '9'.digitToInt())
+// expect: 0 35 35 9
+// Roman numeral four is a number but not a digit; superscript two neither; fullwidth F is past 9.
+for (c in ['\u{2163}', '\u{B2}', '\u{FF26}', '\u{663}']) {
+  try { print(c.digitToInt()) } catch (e : NumberFormatException) { print("not a digit:", c.code) }
+}
+// expect: not a digit: 8547
+// expect: not a digit: 178
+// expect: not a digit: 65318
+// expect: 3

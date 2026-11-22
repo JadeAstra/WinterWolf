@@ -8,7 +8,8 @@
 //
 // Layout: kUnicodeBlock[c >> 7] picks a block of 128 entries in kUnicodeEntry, each an index into
 // kUnicodeRecord { category, properties, simple uppercase, lowercase and titlecase each minus the
-// character, the special casing's number plus 1 (0 for none) }. kUnicodeSpecial gives a special
+// character, the special casing's number plus 1 (0 for none), the decimal digit's value (-1 for
+// none) }. kUnicodeSpecial gives a special
 // casing's lowercase, titlecase and uppercase as (start, length) in kUnicodeSpecialChars.
 
 val folder = FilePath("tools/unicode/ucd-16.0.0")
@@ -25,6 +26,7 @@ val upper : open List<int> = List(count) { 0 }
 val lower : open List<int> = List(count) { 0 }
 val title : open List<int> = List(count) { 0 }
 val special : open List<int> = List(count) { 0 }
+val digit : open List<int> = List(count) { -1 }
 
 // The data lines of a file: comments and blank lines left out, fields trimmed.
 fun fieldsOf(name : string) : List<List<string>> {
@@ -60,6 +62,7 @@ for (f in fieldsOf("UnicodeData.txt")) {
   }
   val from = f[1].endsWith(", Last>") ? rangeStart : c
   for (k in from..c) { category[k] = cat }
+  if (f[6].isNotEmpty()) { digit[c] = f[6].toInt() }
   if (f[12].isNotEmpty()) { upper[c] = f[12].toInt(16) - c }
   if (f[13].isNotEmpty()) { lower[c] = f[13].toInt(16) - c }
   // Titlecase is the uppercase where none is given.
@@ -90,7 +93,7 @@ val recordIndex : open Map<string, int> = {:}
 val records : open List<string> = []
 val entries : open List<int> = []
 for (c in 0..<count) {
-  val key = "{${category[c]}, ${properties[c]}, ${upper[c]}, ${lower[c]}, ${title[c]}, ${special[c]}}"
+  val key = "{${category[c]}, ${properties[c]}, ${upper[c]}, ${lower[c]}, ${title[c]}, ${special[c]}, ${digit[c]}}"
   var at = recordIndex[key]
   if (at == null) {
     at = records.size

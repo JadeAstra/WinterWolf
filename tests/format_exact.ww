@@ -1,0 +1,22 @@
+// format rounds a fraction from its exact binary value, a half to even, as C's printf does
+// (D1 of docs/snippy-ww-checklist.html). The values are CPython's % (C's rounding, tools/random/
+// expect.py); %g keeps its trailing zeros as Kotlin does, so it is CPython's %#g without a lone point.
+
+// 0.35 is 0.34999... in binary, 1.005 is 1.00499..., 99.995 is 99.99500000000000454...; 2.5,
+// 3.5, 0.25 and 1234567.125 are exact halves, which go to even.
+print("%.1f".format(0.35), "%.0f".format(2.5), "%.0f".format(3.5), "%.2f".format(1.005), "%.1f".format(0.25))
+// expect: 0.3 2 4 1.00 0.2
+print("%.2f".format(1234567.125), "%,.2f".format(1234567.125), "%.2f".format(99.995), "%.1f".format(-0.05))
+// expect: 1234567.12 1,234,567.12 100.00 -0.1
+print("%.20f".format(0.1), "%.15f".format(1e-10))
+// expect: 0.10000000000000000555 0.000000000100000
+
+print("%.4e".format(12345.0), "%.2e".format(999.5), "%.3e".format(1.0005), "%.0e".format(25.0), "%.2E".format(-0.000125))
+// expect: 1.2345e+04 1.00e+03 1.000e+00 2e+01 -1.25E-04
+
+print("%.4g".format(12345.0), "%.3g".format(999.5), "%g".format(0.0001), "%g".format(0.00009999995))
+// expect: 1.234e+04 1.00e+03 0.000100000 0.000100000
+print("%.2g".format(0.000125), "%.1g".format(0.5), "%g".format(123456.5), "%g".format(1234565.0), "%g".format(0.0))
+// expect: 0.00013 0.5 123456 1.23456e+06 0.00000
+print("%#.0f".format(2.5), "%#.0e".format(25.0), "%08.2f".format(-3.14159), "%+.3f".format(2.0005))
+// expect: 2. 2.e+01 -0003.14 +2.001

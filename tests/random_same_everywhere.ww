@@ -1,0 +1,26 @@
+// Math.random and Math.randomInt give the same numbers on every system after the same seed
+// (W5 of docs/snippy-ww-checklist.html): mt19937_64, a float from its top 53 bits, an int by
+// drawing again below 2^64 mod n. The values are from tools/random/expect.py, which writes
+// mt19937_64 out in Python and checks it against C++'s.
+
+Math.seed(42)
+print(Math.random(), Math.random(), Math.random())
+// expect: 0.755155532954539 0.6390313938546974 0.7521452007480266
+print((1..10).map { Math.randomInt(1, 6) })
+// expect: [1, 6, 3, 5, 1, 5, 2, 2, 1, 1]
+print(Math.randomInt(-1000000000000, 1000000000000), Math.randomInt(-1000000000000, 1000000000000), Math.randomInt(-1000000000000, 1000000000000))
+// expect: 601236633000 809466663734 953241649864
+print(Math.randomInt(int.minValue, int.maxValue))
+// expect: -4552314978986509258
+Math.seed(-7)
+print(Math.random())   // expect: 0.12800408372644967
+
+// The bounds: one value, and never past them.
+var inside = true
+for (i in 1..10000) {
+  val r = Math.randomInt(-3, 3)
+  inside = inside and r >= -3 and r <= 3
+  val f = Math.random()
+  inside = inside and f >= 0.0 and f < 1.0
+}
+print(inside, Math.randomInt(5, 5))   // expect: true 5

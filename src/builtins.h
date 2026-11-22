@@ -21,6 +21,10 @@ size_t clampPosition(int64_t position, size_t length);
 std::string changeCase(const std::string& s, bool upper);
 
 std::string_view trimmed(std::string_view s);
+std::string_view trimmedStart(std::string_view s);
+std::string_view trimmedEnd(std::string_view s);
+// Whitespace as Kotlin's Char.isWhitespace has it (Java's isWhitespace or isSpaceChar).
+bool isKotlinWhitespace(uint32_t c);
 bool parseInt(std::string_view s, int64_t& out);
 bool parseFloat(std::string_view s, double& out);
 int64_t floatToInt(VM& vm, double d);

@@ -92,13 +92,75 @@ size_t clampPosition(int64_t position, size_t length) {
 // every system.
 std::string changeCase(const std::string& s, bool upper) { return upper ? unicode::upper(s) : unicode::lower(s); }
 
-std::string_view trimmed(std::string_view s) {
-    const char* whitespace = " \t\r\n\f\v";
-    size_t begin = s.find_first_not_of(whitespace);
-    if (begin == std::string_view::npos) return {};
-    size_t end = s.find_last_not_of(whitespace);
-    return s.substr(begin, end - begin + 1);
+namespace {
+
+// A float in [0, 1) from the top 53 bits of one number: every float a multiple of 2^-53 there,
+// each as likely.
+double randomFloat(std::mt19937_64& engine) { return static_cast<double>(engine() >> 11) * 0x1.0p-53; }
+
+// An int in lo..hi, each as likely: numbers below 2^64 mod n (n the count) are drawn again, so
+// the rest, a whole number of n's, map evenly by the remainder.
+int64_t randomBetween(std::mt19937_64& engine, int64_t lo, int64_t hi) {
+    const uint64_t n = static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo) + 1;
+    if (n == 0) return static_cast<int64_t>(engine());   // the whole of int
+    const uint64_t skip = (0 - n) % n;
+    uint64_t x;
+    do x = engine(); while (x < skip);
+    return static_cast<int64_t>(static_cast<uint64_t>(lo) + x % n);
 }
+
+}  // namespace
+
+// Whitespace as Kotlin's Char.isWhitespace has it: Java's isWhitespace or isSpaceChar, so the
+// no-break spaces too, from WinterWolf's own Unicode data (W2 of docs/snippy-ww-checklist.html).
+bool isKotlinWhitespace(uint32_t c) { return unicode::isWhitespace(c) || unicode::isSpaceChar(c); }
+
+namespace {
+
+// The character starting at byte `i` of UTF-8 text, and how many bytes it has.
+uint32_t utf8At(std::string_view s, size_t i, size_t& length) {
+    const unsigned char b = static_cast<unsigned char>(s[i]);
+    length = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+    if (i + length > s.size()) length = 1;
+    if (length == 1) return b;
+    uint32_t c = b & (length == 2 ? 0x1F : length == 3 ? 0x0F : 0x07);
+    for (size_t k = 1; k < length; k++) c = (c << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+    return c;
+}
+
+// Where the whitespace at the start ends, and where that at the end begins.
+size_t whitespaceAtStart(std::string_view s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t length;
+        if (!isKotlinWhitespace(utf8At(s, i, length))) break;
+        i += length;
+    }
+    return i;
+}
+
+size_t whitespaceAtEnd(std::string_view s, size_t from) {
+    size_t end = s.size();
+    while (end > from) {
+        size_t begin = end - 1;
+        while (begin > from && (static_cast<unsigned char>(s[begin]) & 0xC0) == 0x80) begin--;
+        size_t length;
+        if (!isKotlinWhitespace(utf8At(s, begin, length))) break;
+        end = begin;
+    }
+    return end;
+}
+
+}  // namespace
+
+std::string_view trimmed(std::string_view s) {
+    const size_t begin = whitespaceAtStart(s);
+    return s.substr(begin, whitespaceAtEnd(s, begin) - begin);
+}
+
+std::string_view trimmedStart(std::string_view s) { return s.substr(whitespaceAtStart(s)); }
+
+std::string_view trimmedEnd(std::string_view s) { return s.substr(0, whitespaceAtEnd(s, 0)); }
 
 bool parseInt(std::string_view s, int64_t& out) {
     if (!s.empty() && s[0] == '+') s.remove_prefix(1);
@@ -151,16 +213,16 @@ int64_t floatToInt(VM& vm, double d) {
     return static_cast<int64_t>(d);
 }
 
+// The lines of the text without their line ends, as Kotlin's lines(): a line ends at "\r\n", "\n"
+// or "\r" alone (W3 of docs/snippy-ww-checklist.html); text that ends in one gives an empty last line.
 std::vector<std::string> splitLines(const std::string& text) {
     std::vector<std::string> lines;
     size_t start = 0;
     for (;;) {
-        size_t end = text.find('\n', start);
-        std::string line = text.substr(start, end == std::string::npos ? end : end - start);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        lines.push_back(std::move(line));
+        const size_t end = text.find_first_of("\r\n", start);
+        lines.push_back(text.substr(start, end == std::string::npos ? end : end - start));
         if (end == std::string::npos) break;
-        start = end + 1;
+        start = end + (text[end] == '\r' && end + 1 < text.size() && text[end + 1] == '\n' ? 2 : 1);
     }
     return lines;
 }
@@ -623,14 +685,17 @@ void registerMath(VM& vm) {
         return Value::number(fmath::pow(vm.toNumber(args[0], "Math.pow() base"), vm.toNumber(args[1], "Math.pow() exponent")));
     });
 
-    // In a sandbox, its own randomness, from a fixed seed (M6.6.2).
+    // In a sandbox, its own randomness, from a fixed seed (M6.6.2). The engine is mt19937_64,
+    // the same on every system; how its numbers become floats and ints is WinterWolf's own, not
+    // the C++ library's distributions, which differ between libraries (W5 of
+    // docs/snippy-ww-checklist.html): a seed gives the same numbers everywhere.
     def("random", 0, 0, [](VM& vm, int, Value*) -> Value {
         if (Host& host = vm.currentHost(); host.isSandbox()) {
             SandboxHost& box = static_cast<SandboxHost&>(host);
             std::lock_guard<std::mutex> hold(box.randomMutex);
-            return Value::number(std::uniform_real_distribution<double>(0.0, 1.0)(box.random));
+            return Value::number(randomFloat(box.random));
         }
-        return Value::number(std::uniform_real_distribution<double>(0.0, 1.0)(vm.rng));
+        return Value::number(randomFloat(vm.rng));
     });
 
     def("randomInt", 2, 2, [](VM& vm, int, Value* args) -> Value {
@@ -640,9 +705,9 @@ void registerMath(VM& vm) {
         if (Host& host = vm.currentHost(); host.isSandbox()) {
             SandboxHost& box = static_cast<SandboxHost&>(host);
             std::lock_guard<std::mutex> hold(box.randomMutex);
-            return Value::integer(std::uniform_int_distribution<int64_t>(lo, hi)(box.random));
+            return Value::integer(randomBetween(box.random, lo, hi));
         }
-        return Value::integer(std::uniform_int_distribution<int64_t>(lo, hi)(vm.rng));
+        return Value::integer(randomBetween(vm.rng, lo, hi));
     });
 
     def("seed", 1, 1, [](VM& vm, int, Value* args) -> Value {
@@ -750,11 +815,8 @@ void registerStringMethods(VM& vm) {
         std::vector<Value> parts;
 
         if (argc == 0) {
-            // No separator: split on runs of whitespace.
-            auto space = [text](size_t i) {
-                const uint32_t c = text->at(i);
-                return c < 0x80 && std::isspace(static_cast<int>(c));
-            };
+            // No separator: split on runs of whitespace, as trim() knows it (Kotlin's).
+            auto space = [text](size_t i) { return isKotlinWhitespace(text->at(i)); };
             size_t i = 0;
             while (i < length) {
                 while (i < length && space(i)) i++;

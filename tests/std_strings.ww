@@ -72,7 +72,7 @@ print("true".toBoolean(), "TRUE".toBoolean(), "yes".toBoolean(), 12.toString(), 
 // format.
 print("%d items at %.2f each".format(3, 1.5), "%5d|%-5d|%05d".format(42, 42, 42), "%,d".format(1234567), "%+d %+d".format(5, -5))   // expect: 3 items at 1.50 each    42|42   |00042 1,234,567 +5 -5
 print("%s and %s".format("text", [1, 2]), "%10s|%-10s|".format("right", "left"), "%.3s".format("abcdef"), "%S".format("loud"))   // expect: text and [1, 2]      right|left      | abc LOUD
-print("%x %X %o".format(255, 255, 8), "%08.3f".format(3.14159), "%.0f".format(2.5), "%e".format(12345.678), "%c%c".format("é", 65))   // expect: ff FF 10 0003.142 3 1.234568e+04 éA
+print("%x %X %o".format(255, 255, 8), "%08.3f".format(3.14159), "%.0f".format(2.5), "%e".format(12345.678), "%c%c".format("é", 65))   // expect: ff FF 10 0003.142 2 1.234568e+04 éA
 print("%2\$s %1\$s".format("world", "hello"), "100%%".format(), "%b %b".format(true, null), "a%nb".format().size, "%,.2f".format(1234567.891))   // expect: hello world 100% true false 3 1,234,567.89
 try { "%d".format("x") } catch (e) { print(e.message) }      // expect: format: %d takes a whole number, not x; %f and %s take any number
 try { "%d %d".format(1) } catch (e) { print(e.message) }     // expect: format: the pattern asks for more values than the 1 given

@@ -93,11 +93,13 @@ external fun string.upper() : string
 // The text in lower case as Kotlin's lowercase() gives it: Unicode's full mappings ("İ" is "i̇"),
 // and a Σ that ends a word as ς: "ΟΔΟΣ" is "οδος".
 external fun string.lower() : string
-// The text without the spaces, tabs and line ends at its start and at its end.
+// The text without the whitespace at its start and at its end: whitespace as Kotlin's
+// Char.isWhitespace has it, the spaces of every script (the no-break ones too), tabs and line
+// ends, the same on every system.
 external fun string.trim() : string
-// The text without the spaces, tabs and line ends at its start.
+// The text without the whitespace (as trim's) at its start.
 external fun string.trimStart() : string
-// The text without the spaces, tabs and line ends at its end.
+// The text without the whitespace (as trim's) at its end.
 external fun string.trimEnd() : string
 // For text written over several lines in the source: the indentation shared by all the lines
 // with something on them taken away, and a first and a last line that are blank dropped.
@@ -106,7 +108,8 @@ external fun string.trimIndent() : string
 // `marginPrefix` and the prefix itself taken away, and a first and a last line that are blank
 // dropped. A line without the prefix is kept as it is.
 external fun string.trimMargin(marginPrefix : string = "|") : string
-// The words of the text: the parts between runs of whitespace, none of them empty, as a new list.
+// The words of the text: the parts between runs of whitespace (as trim's), none of them empty,
+// as a new list.
 //   " a  b ".split()      // ["a", "b"]
 external fun string.split() : open List<string>
 // The parts of the text between the places where `delimiter` is, as a new list; an empty
@@ -115,8 +118,8 @@ external fun string.split() : open List<string>
 external fun string.split(delimiter : string) : open List<string>
 // The parts of the text between the places where the character `delimiter` is, as a new list.
 external fun string.split(delimiter : char) : open List<string>
-// The lines of the text without their line ends ("\n" or "\r\n"), as a new list. Text that ends
-// in a line end gives an empty last line.
+// The lines of the text without their line ends ("\r\n", "\n", or "\r" alone, as Kotlin's), as a
+// new list. Text that ends in a line end gives an empty last line.
 external fun string.lines() : open List<string>
 // The text `times` times over; "" for 0. An IllegalArgumentException for a negative `times`.
 external fun string.repeat(times : int) : string
@@ -206,8 +209,9 @@ external fun string.toFloatOrNull() : float?
 // `%[n$][flags][width][.precision]kind`. The kinds are d (a whole number), x X o (in hex or
 // octal), f e E g G (a fraction), s S (anything, as print shows it), c (a character), b (true
 // or false), `%%` and `%n`; the flags `-` (to the left), `0`, `+`, a space, and `,` (thousands).
-// A fraction is rounded half up from the digits print shows ("%.1f" of 0.35 is 0.4), and %g keeps
-// its zeros ("%.4g" of 1.0 is 1.000), as Kotlin writes them.
+// A fraction is rounded from its exact binary value, a half to even, as C's printf rounds it:
+// "%.1f" of 0.35 is 0.3 (0.35 is 0.34999... in binary) and "%.0f" of 2.5 is 2. %g keeps its zeros
+// ("%.4g" of 1.0 is 1.000), as Kotlin writes them.
 // An IllegalArgumentException for a bad item or too few values.
 //   "%d items, %.2f each".format(3, 1.5)   // "3 items, 1.50 each"
 external fun string.format(vararg values : any?) : string
@@ -557,7 +561,8 @@ external fun char.upper() : char
 // The character in lower case, one for one as Java's Character.toLowerCase gives it.
 external fun char.lower() : char
 // The number the digit stands for in base `radix`: '7' is 7, and in base 16, 'f' is 15. A
-// NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a
+// decimal digit of any script counts ('٣', Arabic-Indic three, is 3), and so do the fullwidth
+// letters, as Kotlin's digitToInt. A NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a
 // radix outside 2 to 36.
 external fun char.digitToInt(radix : int = 10) : int
 // A byte holds 0 to 255 (D19); arithmetic on bytes gives an int.
@@ -807,6 +812,6 @@ external object Math {
   // greater than `high`.
   fun randomInt(low : int, high : int) : int
   // Starts random() and randomInt() again from `value`: after the same seed, they give the same
-  // numbers in the same order.
+  // numbers in the same order, on every system.
   fun seed(value : int)
 }

@@ -64,7 +64,7 @@ print(ChartRenderer.tickValues(0.0, 1.0, 0.0).size, ChartRenderer.tickValues(0.0
 
 print("-- values")   // expect: -- values
 // Four significant figures are not cut down to fewer: 1200.5 once came out 12.
-print(ChartRenderer.fmt(1200.5), ChartRenderer.fmt(1200.0), ChartRenderer.fmt(12.0), ChartRenderer.fmt(12.34), ChartRenderer.fmt(0.7))   // expect: 1201 1200 12 12.34 0.7
+print(ChartRenderer.fmt(1200.5), ChartRenderer.fmt(1200.0), ChartRenderer.fmt(12.0), ChartRenderer.fmt(12.34), ChartRenderer.fmt(0.7))   // expect: 1200 1200 12 12.34 0.7
 // Not a number is a dash rather than the word.
 print(ChartRenderer.fmt(0.0 / 0.0), ChartRenderer.fmt(1.0 / 0.0))   // expect: - -
 

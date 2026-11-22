@@ -38,6 +38,10 @@ bool isAlphabetic(uint32_t c);      // Alphabetic
 bool isWhitespace(uint32_t c);      // Java's: the separators but the no-break ones, \t to \r, \x1C to \x1F
 bool isSpaceChar(uint32_t c);       // Z*
 
+// The value of a decimal digit (category Nd, UnicodeData's decimal digit): 0 to 9 ('٣' is 3), -1
+// for any other character, as Java's Character.digit(c, 10) gives it for those.
+int decimalValue(uint32_t c);
+
 // The simple mappings (one character for one; the character itself where it has none), as
 // Java's Character.toUpperCase, toLowerCase and toTitleCase give them.
 uint32_t toUpper(uint32_t c);
