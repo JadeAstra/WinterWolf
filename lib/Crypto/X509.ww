@@ -211,8 +211,7 @@ class Certificate {
   val signatureAlgorithm : string
   val issuer : DistinguishedName
   val subject : DistinguishedName
-  // When it starts and stops being good. A time after 2262 (9999-12-31 is RFC 5280's "no end")
-  // is the last moment an Instant holds.
+  // When it starts and stops being good (9999-12-31T23:59:59Z is RFC 5280's "no end").
   val notBefore : Instant
   val notAfter : Instant
   // The subject's public key as SubjectPublicKeyInfo DER (the key itself is publicKey).
@@ -1068,13 +1067,9 @@ fun __escapeName(value : string) : string {
   return out.toString()
 }
 
-// Seconds since 1970 as an Instant; beyond what an Instant holds (2262, either way from 1970), its
-// last or first moment.
-fun __instantOf(seconds : int) : Instant {
-  if (seconds >= 9223372036) { return Instant(9223372036854775807) }
-  if (seconds <= -9223372036) { return Instant(-9223372036854775807 - 1) }
-  return Instant.fromEpochSeconds(seconds)
-}
+// Seconds since 1970 as an Instant (a certificate's years, 0 to 9999, are well inside what one
+// holds).
+fun __instantOf(seconds : int) : Instant => Instant(seconds, 0)
 
 // Why a certificate is not in RFC 5280's form as a whole, or null: its subject, and what its
 // extensions say together.

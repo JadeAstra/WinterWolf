@@ -151,7 +151,7 @@ value LocalDateTime(val year : int, val month : int, val dayOfMonth : int, val h
 // The date and time this moment is in the system's time zone.
 fun Instant.toLocalDateTime() : LocalDateTime {
   val seconds = epochSeconds
-  val nanos = epochNanoseconds - seconds * 1000000000
+  val nanos = nanosecondOfSecond
   val local = seconds + __localOffset(seconds)
   val days = __floorDiv(local, 86400)
   val ofDay = local - days * 86400
@@ -162,10 +162,14 @@ fun Instant.toLocalDateTime() : LocalDateTime {
 // How many seconds the system's time zone is ahead of UTC at a moment (seconds since 1970).
 external fun __localOffset(epochSeconds : int) : int
 
-fun __floorMod(a : int, b : int) : int => a - __floorDiv(a, b) * b
+// `a` mod `b` with the sign of `b`, as Math.floorMod (the remainder moved, so no step overflows).
+fun __floorMod(a : int, b : int) : int {
+  val r = a % b
+  return r != 0 and (r < 0) != (b < 0) ? r + b : r
+}
 fun __timeNanos(hour : int, minute : int, second : int, nanos : int) : int => ((hour * 60 + minute) * 60 + second) * 1000000000 + nanos
 
-fun __isoDate(year : int, month : int, day : int) : string => __digits(year, 4) + "-" + __digits(month, 2) + "-" + __digits(day, 2)
+fun __isoDate(year : int, month : int, day : int) : string => __isoYear(year) + "-" + __digits(month, 2) + "-" + __digits(day, 2)
 
 fun __isoTime(hour : int, minute : int, second : int, nanos : int) : string {
   var text = __digits(hour, 2) + ":" + __digits(minute, 2)

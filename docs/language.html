@@ -514,7 +514,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#Dither"><code>Dither</code></a> (1)</li>
 <li><a href="#Dns"><code>Dns</code></a> (4)</li>
 <li><a href="#Drawable"><code>Drawable</code></a> (3)</li>
-<li><a href="#Duration"><code>Duration</code></a> (25)</li>
+<li><a href="#Duration"><code>Duration</code></a> (26)</li>
 <li><a href="#Environment"><code>Environment</code></a> (8)</li>
 <li><a href="#Error"><code>Error</code></a> (1)</li>
 <li><a href="#EventLoop"><code>EventLoop</code></a> (6)</li>
@@ -8609,8 +8609,8 @@ job.get(timeout = 2.seconds)
 val frame = 1.seconds / 60          // 16.666666ms
 </pre>
 <p>Every call that waits or times takes one: delay, Thread.sleep, join, Job.get, a channel's receive, Countdown.await, waitUntil, EventLoop.after and every, a pool's after and every.</p>
-<div class="entry" id="Duration"><code class="sig">value Duration(val inNanoseconds : int)</code><a class="anchor" href="#Duration">#</a>
-<p>A length of time, <code>inNanoseconds</code> nanoseconds long, positive, zero or negative; usually made as 5.seconds, 16.milliseconds and the like. It reaches about 292 years either way: a length past that is an ArithmeticException.</p>
+<div class="entry" id="Duration"><code class="sig">value Duration(internal val seconds : int, internal val nanos : int)</code><a class="anchor" href="#Duration">#</a>
+<p>A length of time, positive, zero or negative; usually made as 5.seconds, 16.milliseconds and the like. Kept as Java's Duration keeps it, whole seconds (rounded down) and the nanoseconds past them, so it reaches as far as an int of seconds, about 292 billion years either way; a length past that is an ArithmeticException. Duration(seconds, nanoseconds) makes one from the two, the nanoseconds 0 to 999999999; Duration(n) one n nanoseconds long.</p>
 </div>
 <div class="entry member" id="Duration.+"><code class="sig">op +(other : Duration) : Duration</code><a class="anchor" href="#Duration.+">#</a>
 <p>The two lengths added together.</p>
@@ -8650,6 +8650,9 @@ val frame = 1.seconds / 60          // 16.666666ms
 </div>
 <div class="entry member" id="Duration.compareTo"><code class="sig">fun compareTo(other : Duration) : int</code><a class="anchor" href="#Duration.compareTo">#</a>
 <p>-1, 0 or 1 as this length is shorter than the other, as long, or longer.</p>
+</div>
+<div class="entry member" id="Duration.inNanoseconds"><code class="sig">val inNanoseconds : int</code><a class="anchor" href="#Duration.inNanoseconds">#</a>
+<p>The length in nanoseconds: an ArithmeticException past what an int holds, about 292 years either way.</p>
 </div>
 <div class="entry member" id="Duration.inMicroseconds"><code class="sig">val inMicroseconds : float</code><a class="anchor" href="#Duration.inMicroseconds">#</a>
 <p>The length in each unit, with what is less than a whole one as a fraction.</p>
@@ -8727,14 +8730,14 @@ val frame = 1.seconds / 60          // 16.666666ms
 <p>This many days, rounded to the nearest nanosecond, as a Duration.</p>
 </div>
 <h3>Moments in time</h3>
-<p>A moment, kept as the nanoseconds since the start of 1970 in UTC, as Java's Instant and Kotlin's count them (leap seconds left out), in a value of its own:</p>
+<p>A moment, kept as Java's Instant keeps it: the whole seconds since the start of 1970 in UTC (rounded down; leap seconds left out, as Java and Kotlin count them) and the nanoseconds past that second, in a value of its own:</p>
 <pre>val started = Instant.now()
 val took : Duration = Instant.now() - started
 print(path.lastModified())                  // 2026-11-02T14:05:31.250Z
 </pre>
-<p>It reaches from 1677 to 2262; past that is an ArithmeticException. Dates in a calendar and time zones are not part of it.</p>
-<div class="entry" id="Instant"><code class="sig">value Instant(val epochNanoseconds : int)</code><a class="anchor" href="#Instant">#</a>
-<p>The moment <code>epochNanoseconds</code> nanoseconds after the start of 1970, UTC (before it where negative).</p>
+<p>It reaches as Java's does, from the year -1000000000 to 1000000000; past that is an ArithmeticException. Dates in a calendar and time zones are not part of it.</p>
+<div class="entry" id="Instant"><code class="sig">value Instant(val epochSeconds : int, val nanosecondOfSecond : int)</code><a class="anchor" href="#Instant">#</a>
+<p>The moment <code>epochSeconds</code> seconds and <code>nanosecondOfSecond</code> nanoseconds (0 to 999999999) after the start of 1970, UTC (before it where negative); Instant(n) is the moment n nanoseconds after.</p>
 </div>
 <div class="entry member" id="Instant.+"><code class="sig">op +(time : Duration) : Instant</code><a class="anchor" href="#Instant.+">#</a>
 <p>The moment a Duration later, or earlier for a negative one.</p>
@@ -8760,14 +8763,14 @@ print(path.lastModified())                  // 2026-11-02T14:05:31.250Z
 <div class="entry member" id="Instant.compareTo"><code class="sig">fun compareTo(other : Instant) : int</code><a class="anchor" href="#Instant.compareTo">#</a>
 <p>Negative, zero or positive as this is before, at or after <code>other</code>.</p>
 </div>
-<div class="entry member" id="Instant.epochMilliseconds"><code class="sig">val epochMilliseconds : int</code><a class="anchor" href="#Instant.epochMilliseconds">#</a>
-<p>The whole milliseconds since the start of 1970, rounded down, as Java's toEpochMilli.</p>
+<div class="entry member" id="Instant.epochNanoseconds"><code class="sig">val epochNanoseconds : int</code><a class="anchor" href="#Instant.epochNanoseconds">#</a>
+<p>The nanoseconds since the start of 1970: an ArithmeticException past what an int holds, before 1677 or after 2262.</p>
 </div>
-<div class="entry member" id="Instant.epochSeconds"><code class="sig">val epochSeconds : int</code><a class="anchor" href="#Instant.epochSeconds">#</a>
-<p>The whole seconds since the start of 1970, rounded down.</p>
+<div class="entry member" id="Instant.epochMilliseconds"><code class="sig">val epochMilliseconds : int</code><a class="anchor" href="#Instant.epochMilliseconds">#</a>
+<p>The whole milliseconds since the start of 1970, rounded down, as Java's toEpochMilli (an ArithmeticException past what an int holds, 292 million years either way).</p>
 </div>
 <div class="entry member" id="Instant.toString"><code class="sig">fun toString() : string</code><a class="anchor" href="#Instant.toString">#</a>
-<p>The moment in ISO 8601, in UTC: 2026-11-02T14:05:31Z, with the fraction of a second where there is one, in 3, 6 or 9 digits as it needs, as Java writes it (2026-11-02T14:05:31.250Z).</p>
+<p>The moment in ISO 8601, in UTC: 2026-11-02T14:05:31Z, with the fraction of a second where there is one, in 3, 6 or 9 digits as it needs, as Java writes it (2026-11-02T14:05:31.250Z). A year past 9999 has a + in front (+10000-01-01T00:00:00Z), one before 1 a - (-0001 is the year before 0000).</p>
 </div>
 <div class="entry member" id="Instant.now"><code class="sig">fun now() : Instant</code><a class="anchor" href="#Instant.now">#</a>
 <p>The moment it is now, by the system's clock (which may be set back or forward; to time something, clock() and Durations go only forward).</p>
@@ -8776,10 +8779,10 @@ print(path.lastModified())                  // 2026-11-02T14:05:31.250Z
 <p>The moment <code>milliseconds</code> after the start of 1970, as Java's ofEpochMilli.</p>
 </div>
 <div class="entry member" id="Instant.fromEpochSeconds"><code class="sig">fun fromEpochSeconds(seconds : int, nanoseconds : int = 0) : Instant</code><a class="anchor" href="#Instant.fromEpochSeconds">#</a>
-<p>The moment <code>seconds</code> and <code>nanoseconds</code> after the start of 1970.</p>
+<p>The moment <code>seconds</code> and <code>nanoseconds</code> after the start of 1970 (any number of nanoseconds, before or after, as Java's ofEpochSecond).</p>
 </div>
 <div class="entry member" id="Instant.parse"><code class="sig">fun parse(text : string) : Instant</code><a class="anchor" href="#Instant.parse">#</a>
-<p>The moment ISO 8601 text gives, as toString writes it: a date, a time to the second with up to nine digits of fraction, and Z or an offset from UTC (+01:00). An IllegalArgumentException for anything else.</p>
+<p>The moment ISO 8601 text gives, as toString writes it: a date, a time to the second with up to nine digits of fraction, and Z or an offset from UTC (+01:00). The year is four digits, or more after a + (+10000), or four or more after a - (-0001), as Java reads it. An IllegalArgumentException for anything else.</p>
 </div>
 </section>
 <section class="file" id="file-values-ww">

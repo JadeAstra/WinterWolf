@@ -8,91 +8,129 @@
 // Every call that waits or times takes one: delay, Thread.sleep, join, Job.get, a channel's
 // receive, Countdown.await, waitUntil, EventLoop.after and every, a pool's after and every.
 
-// A length of time, `inNanoseconds` nanoseconds long, positive, zero or negative; usually made
-// as 5.seconds, 16.milliseconds and the like. It reaches about 292 years either way: a length
-// past that is an ArithmeticException.
-value Duration(val inNanoseconds : int) {
+// A length of time, positive, zero or negative; usually made as 5.seconds, 16.milliseconds and
+// the like. Kept as Java's Duration keeps it, whole seconds (rounded down) and the nanoseconds
+// past them, so it reaches as far as an int of seconds, about 292 billion years either way; a
+// length past that is an ArithmeticException. Duration(seconds, nanoseconds) makes one from
+// the two, the nanoseconds 0 to 999999999; Duration(n) one n nanoseconds long.
+value Duration(internal val seconds : int, internal val nanos : int) {
+  init {
+    if (nanos < 0 or nanos > 999999999) { throw IllegalArgumentException("a Duration's nanoseconds past its seconds are 0 to 999999999, not $nanos") }
+  }
+  // A length `inNanoseconds` nanoseconds long.
+  constructor(inNanoseconds : int) : this(__floorDiv(inNanoseconds, 1000000000), __floorMod(inNanoseconds, 1000000000))
+
   // The two lengths added together.
-  op +(other : Duration) : Duration => Duration(inNanoseconds + other.inNanoseconds)
+  op +(other : Duration) : Duration => __duration(seconds + other.seconds, nanos + other.nanos)
   // This length with the other taken off.
-  op -(other : Duration) : Duration => Duration(inNanoseconds - other.inNanoseconds)
+  op -(other : Duration) : Duration => __duration(seconds - other.seconds, nanos - other.nanos)
   // The same length the other way: -(2.seconds) is -2s.
-  op -() : Duration => Duration(-inNanoseconds)
+  op -() : Duration => nanos == 0 ? Duration(-seconds, 0) : Duration(-seconds - 1, 1000000000 - nanos)
   // This length `times` over.
-  op *(times : int) : Duration => Duration(inNanoseconds * times)
+  op *(times : int) : Duration {
+    if (times >= -1000000000 and times <= 1000000000) {
+      val n = nanos * times
+      return Duration(seconds * times + __floorDiv(n, 1000000000), __floorMod(n, 1000000000))
+    }
+    // Past a billion times: the billions as seconds, the rest as above (a length that does not
+    // fit in an int of nanoseconds, times a billion, is past the reach anyway).
+    val billions = __floorDiv(times, 1000000000)
+    return this * (times - billions * 1000000000) + Duration(inNanoseconds * billions, 0)
+  }
   // This length `times` over, rounded to the nearest nanosecond.
-  op *(times : float) : Duration => Duration(Math.round(inNanoseconds * times))
+  op *(times : float) : Duration => fitsNanoseconds ? __durationOfNanoseconds(inNanoseconds * times) : __durationOfSeconds(inSeconds * times)
   // This length in `by` parts, what is less than a nanosecond left out: 1.seconds / 3 is
   // 333.333333ms. By 0 is an ArithmeticException.
-  op /(by : int) : Duration => Duration(inNanoseconds / by)
+  op /(by : int) : Duration => fitsNanoseconds ? Duration(inNanoseconds / by) : __durationOfBig(bigNanoseconds / by)
   // This length in `by` parts, rounded to the nearest nanosecond. By 0.0 is an
   // ArithmeticException.
-  op /(by : float) : Duration => Duration(Math.round(inNanoseconds / by))
+  op /(by : float) : Duration => fitsNanoseconds ? __durationOfNanoseconds(inNanoseconds / by) : __durationOfSeconds(inSeconds / by)
   // How many times the other fits in this one.
-  op /(other : Duration) : float => inNanoseconds.toFloat() / other.inNanoseconds.toFloat()
+  op /(other : Duration) : float {
+    if (fitsNanoseconds and other.fitsNanoseconds) { return inNanoseconds.toFloat() / other.inNanoseconds.toFloat() }
+    return inSeconds / other.inSeconds
+  }
 
   // Whether this length is shorter than the other.
-  op <(other : Duration) : bool => inNanoseconds < other.inNanoseconds
+  op <(other : Duration) : bool => compareTo(other) < 0
   // Whether this length is shorter than the other or as long.
-  op <=(other : Duration) : bool => inNanoseconds <= other.inNanoseconds
+  op <=(other : Duration) : bool => compareTo(other) <= 0
   // Whether this length is longer than the other.
-  op >(other : Duration) : bool => inNanoseconds > other.inNanoseconds
+  op >(other : Duration) : bool => compareTo(other) > 0
   // Whether this length is longer than the other or as long.
-  op >=(other : Duration) : bool => inNanoseconds >= other.inNanoseconds
+  op >=(other : Duration) : bool => compareTo(other) >= 0
   // -1, 0 or 1 as this length is shorter than the other, as long, or longer.
-  fun compareTo(other : Duration) : int => inNanoseconds < other.inNanoseconds ? -1 : inNanoseconds > other.inNanoseconds ? 1 : 0
+  fun compareTo(other : Duration) : int {
+    if (seconds != other.seconds) { return seconds < other.seconds ? -1 : 1 }
+    return nanos < other.nanos ? -1 : nanos > other.nanos ? 1 : 0
+  }
 
+  // The length in nanoseconds: an ArithmeticException past what an int holds, about 292 years
+  // either way.
+  val inNanoseconds : int
+    get() {
+      if (seconds < -9223372037 or seconds > 9223372036) { throw ArithmeticException("$this is past what an int of nanoseconds holds, about 292 years either way") }
+      return seconds < 0 ? (seconds + 1) * 1000000000 + (nanos - 1000000000) : seconds * 1000000000 + nanos
+    }
   // The length in each unit, with what is less than a whole one as a fraction.
   val inMicroseconds : float
-    get() => inNanoseconds / 1000.0
+    get() => fitsNanoseconds ? inNanoseconds / 1000.0 : seconds * 1000000.0 + nanos / 1000.0
   // The length in milliseconds, with what is less than a whole one as a fraction.
   val inMilliseconds : float
-    get() => inNanoseconds / 1000000.0
+    get() => fitsNanoseconds ? inNanoseconds / 1000000.0 : seconds * 1000.0 + nanos / 1000000.0
   // The length in seconds, with what is less than a whole one as a fraction.
   val inSeconds : float
-    get() => inNanoseconds / 1000000000.0
+    get() => fitsNanoseconds ? inNanoseconds / 1000000000.0 : seconds.toFloat() + nanos / 1000000000.0
   // The length in minutes, with what is less than a whole one as a fraction: 90.seconds is 1.5.
   val inMinutes : float
-    get() => inNanoseconds / 60000000000.0
+    get() => fitsNanoseconds ? inNanoseconds / 60000000000.0 : inSeconds / 60.0
   // The length in hours, with what is less than a whole one as a fraction.
   val inHours : float
-    get() => inNanoseconds / 3600000000000.0
+    get() => fitsNanoseconds ? inNanoseconds / 3600000000000.0 : inSeconds / 3600.0
   // The length in days, with what is less than a whole one as a fraction.
   val inDays : float
-    get() => inNanoseconds / 86400000000000.0
+    get() => fitsNanoseconds ? inNanoseconds / 86400000000000.0 : inSeconds / 86400.0
   // In whole milliseconds, what is less than one left out.
   val inWholeMilliseconds : int
-    get() => inNanoseconds / 1000000
+    get() => fitsNanoseconds ? inNanoseconds / 1000000 : (bigNanoseconds / 1000000).toInt()
   // What waiting for it is counted in: whole milliseconds, but one at least for any time above
   // none, as Kotlin's delay counts it (8.7m): sleep(0.5.milliseconds) waits, and a timeout of
-  // half a millisecond is not 0, which for a socket means no limit.
+  // half a millisecond is not 0, which for a socket means no limit. A wait of more than 285,000
+  // years is taken as that long.
   internal val waitMilliseconds : int
-    get() => inNanoseconds <= 0 ? 0 : Math.max(inNanoseconds / 1000000, 1)
+    get() => seconds < 0 or (seconds == 0 and nanos == 0) ? 0 : seconds >= 9000000000000 ? 9000000000000000 : Math.max(seconds * 1000 + nanos / 1000000, 1)
 
   // Whether it is less than no time.
   val isNegative : bool
-    get() => inNanoseconds < 0
+    get() => seconds < 0
   // Whether it is no time at all.
   val isZero : bool
-    get() => inNanoseconds == 0
+    get() => seconds == 0 and nanos == 0
+
+  // Whether inNanoseconds holds it (a band a little narrower than all it holds).
+  internal val fitsNanoseconds : bool
+    get() => seconds >= -9223372036 and seconds <= 9223372035
+  // The length in nanoseconds as a BigInt, however long.
+  internal val bigNanoseconds : BigInt
+    get() => BigInt.of(seconds) * 1000000000 + nanos
 
   // As Kotlin writes it: 1.7s, 16ms, 250us, 1m 30s, 2h 5m, 3d.
   fun toString() : string {
-    if (inNanoseconds == 0) { return "0s" }
-    if (inNanoseconds < 0) { return "-" + Duration(-inNanoseconds).toString() }
-    val n = inNanoseconds
-    if (n >= 60000000000) {
+    if (isZero) { return "0s" }
+    if (seconds < 0) { return "-" + (-this).toString() }
+    if (seconds >= 60) {
       val parts : open List<string> = []
-      var left = n
-      for ((unit, size) in ["d" to 86400000000000, "h" to 3600000000000, "m" to 60000000000]) {
+      var left = seconds
+      for ((unit, size) in ["d" to 86400, "h" to 3600, "m" to 60]) {
         if (left >= size) {
           parts.add("${left / size}$unit")
           left = left % size
         }
       }
-      if (left > 0) { parts.add(Duration(left).toString()) }
+      if (left > 0 or nanos > 0) { parts.add(Duration(left, nanos).toString()) }
       return parts.join(" ")
     }
+    val n = inNanoseconds
     if (n >= 1000000000) { return __durationPart(n, 1000000000) + "s" }
     if (n >= 1000000) { return __durationPart(n, 1000000) + "ms" }
     if (n >= 1000) { return __durationPart(n, 1000) + "us" }
@@ -101,9 +139,31 @@ value Duration(val inNanoseconds : int) {
 
   static {
     // No time at all: 0s.
-    val zero = Duration(0)
+    val zero = Duration(0, 0)
   }
 }
+
+// A Duration of `seconds` and `nanos` nanoseconds, `nanos` from -999999999 to 1999999998.
+fun __duration(seconds : int, nanos : int) : Duration {
+  if (nanos >= 1000000000) { return Duration(seconds + 1, nanos - 1000000000) }
+  if (nanos < 0) { return Duration(seconds - 1, nanos + 1000000000) }
+  return Duration(seconds, nanos)
+}
+
+// A Duration `n` nanoseconds long, rounded to the nearest one.
+fun __durationOfNanoseconds(n : float) : Duration => Math.abs(n) < 9.0e18 ? Duration(Math.round(n)) : __durationOfSeconds(n / 1.0e9)
+
+// A Duration `s` seconds long, rounded to the nearest nanosecond; an ArithmeticException past
+// what it holds, or for NaN.
+fun __durationOfSeconds(s : float) : Duration {
+  if (!s.isFinite() or Math.abs(s) >= 9.2e18) { throw ArithmeticException("a Duration of $s seconds is past what one holds") }
+  if (Math.abs(s) < 9.0e9) { return Duration(Math.round(s * 1.0e9)) }
+  val whole = s.floor()
+  return __duration(whole.toInt(), Math.round((s - whole) * 1.0e9))
+}
+
+// A Duration `n` nanoseconds long.
+fun __durationOfBig(n : BigInt) : Duration => Duration(n.floorDiv(1000000000).toInt(), n.floorMod(1000000000).toInt())
 
 // `n` in units of `size`, with up to six figures after the point and none that are 0 at the end.
 fun __durationPart(n : int, size : int) : string {
@@ -119,92 +179,109 @@ val int.nanoseconds : Duration
   get() => Duration(this)
 // This many microseconds, as a Duration.
 val int.microseconds : Duration
-  get() => Duration(this * 1000)
+  get() => Duration(__floorDiv(this, 1000000), __floorMod(this, 1000000) * 1000)
 // This many milliseconds, as a Duration.
 val int.milliseconds : Duration
-  get() => Duration(this * 1000000)
+  get() => Duration(__floorDiv(this, 1000), __floorMod(this, 1000) * 1000000)
 // This many seconds, as a Duration.
 val int.seconds : Duration
-  get() => Duration(this * 1000000000)
+  get() => Duration(this, 0)
 // This many minutes, as a Duration.
 val int.minutes : Duration
-  get() => Duration(this * 60000000000)
+  get() => Duration(this * 60, 0)
 // This many hours, as a Duration.
 val int.hours : Duration
-  get() => Duration(this * 3600000000000)
+  get() => Duration(this * 3600, 0)
 // This many days, as a Duration.
 val int.days : Duration
-  get() => Duration(this * 86400000000000)
+  get() => Duration(this * 86400, 0)
 
 // This many nanoseconds, rounded to the nearest one, as a Duration: 2.6.nanoseconds is 3ns.
 val float.nanoseconds : Duration
-  get() => Duration(Math.round(this))
+  get() => __durationOfNanoseconds(this)
 // This many microseconds, rounded to the nearest nanosecond, as a Duration.
 val float.microseconds : Duration
-  get() => Duration(Math.round(this * 1000.0))
+  get() => __durationOfNanoseconds(this * 1000.0)
 // This many milliseconds, rounded to the nearest nanosecond, as a Duration: 1.5.milliseconds.
 val float.milliseconds : Duration
-  get() => Duration(Math.round(this * 1000000.0))
+  get() => __durationOfNanoseconds(this * 1000000.0)
 // This many seconds, rounded to the nearest nanosecond, as a Duration: 0.25.seconds is 250ms.
 val float.seconds : Duration
-  get() => Duration(Math.round(this * 1000000000.0))
+  get() => __durationOfNanoseconds(this * 1000000000.0)
 // This many minutes, rounded to the nearest nanosecond, as a Duration.
 val float.minutes : Duration
-  get() => Duration(Math.round(this * 60000000000.0))
+  get() => __durationOfNanoseconds(this * 60000000000.0)
 // This many hours, rounded to the nearest nanosecond, as a Duration.
 val float.hours : Duration
-  get() => Duration(Math.round(this * 3600000000000.0))
+  get() => __durationOfNanoseconds(this * 3600000000000.0)
 // This many days, rounded to the nearest nanosecond, as a Duration.
 val float.days : Duration
-  get() => Duration(Math.round(this * 86400000000000.0))
+  get() => __durationOfNanoseconds(this * 86400000000000.0)
 
 // ---- Moments in time (G54) ----
-// A moment, kept as the nanoseconds since the start of 1970 in UTC, as Java's Instant and
-// Kotlin's count them (leap seconds left out), in a value of its own:
+// A moment, kept as Java's Instant keeps it: the whole seconds since the start of 1970 in UTC
+// (rounded down; leap seconds left out, as Java and Kotlin count them) and the nanoseconds past
+// that second, in a value of its own:
 //
 //   val started = Instant.now()
 //   val took : Duration = Instant.now() - started
 //   print(path.lastModified())                  // 2026-11-02T14:05:31.250Z
 //
-// It reaches from 1677 to 2262; past that is an ArithmeticException. Dates in a calendar and
-// time zones are not part of it.
+// It reaches as Java's does, from the year -1000000000 to 1000000000; past that is an
+// ArithmeticException. Dates in a calendar and time zones are not part of it.
 
-// The moment `epochNanoseconds` nanoseconds after the start of 1970, UTC (before it where
-// negative).
-value Instant(val epochNanoseconds : int) {
+// The moment `epochSeconds` seconds and `nanosecondOfSecond` nanoseconds (0 to 999999999) after
+// the start of 1970, UTC (before it where negative); Instant(n) is the moment n nanoseconds after.
+value Instant(val epochSeconds : int, val nanosecondOfSecond : int) {
+  init {
+    if (nanosecondOfSecond < 0 or nanosecondOfSecond > 999999999) { throw IllegalArgumentException("an Instant's nanoseconds past its second are 0 to 999999999, not $nanosecondOfSecond") }
+    if (epochSeconds < -31557014167219200 or epochSeconds > 31556889864403199) { throw ArithmeticException("$epochSeconds seconds from 1970 is past the moments an Instant holds, the years -1000000000 to 1000000000") }
+  }
+  // The moment `epochNanoseconds` nanoseconds after the start of 1970.
+  constructor(epochNanoseconds : int) : this(__floorDiv(epochNanoseconds, 1000000000), __floorMod(epochNanoseconds, 1000000000))
+
   // The moment a Duration later, or earlier for a negative one.
-  op +(time : Duration) : Instant => Instant(epochNanoseconds + time.inNanoseconds)
+  op +(time : Duration) : Instant => __instant(epochSeconds + time.seconds, nanosecondOfSecond + time.nanos)
   // The moment a Duration earlier.
-  op -(time : Duration) : Instant => Instant(epochNanoseconds - time.inNanoseconds)
+  op -(time : Duration) : Instant => __instant(epochSeconds - time.seconds, nanosecondOfSecond - time.nanos)
   // How long after `other` this is: negative where it is before.
-  op -(other : Instant) : Duration => Duration(epochNanoseconds - other.epochNanoseconds)
+  op -(other : Instant) : Duration => __duration(epochSeconds - other.epochSeconds, nanosecondOfSecond - other.nanosecondOfSecond)
   // Whether this is before `other`.
-  op <(other : Instant) : bool => epochNanoseconds < other.epochNanoseconds
+  op <(other : Instant) : bool => compareTo(other) < 0
   // Whether this is before `other` or the same moment.
-  op <=(other : Instant) : bool => epochNanoseconds <= other.epochNanoseconds
+  op <=(other : Instant) : bool => compareTo(other) <= 0
   // Whether this is after `other`.
-  op >(other : Instant) : bool => epochNanoseconds > other.epochNanoseconds
+  op >(other : Instant) : bool => compareTo(other) > 0
   // Whether this is after `other` or the same moment.
-  op >=(other : Instant) : bool => epochNanoseconds >= other.epochNanoseconds
+  op >=(other : Instant) : bool => compareTo(other) >= 0
   // Negative, zero or positive as this is before, at or after `other`.
-  fun compareTo(other : Instant) : int => epochNanoseconds < other.epochNanoseconds ? -1 : epochNanoseconds > other.epochNanoseconds ? 1 : 0
+  fun compareTo(other : Instant) : int {
+    if (epochSeconds != other.epochSeconds) { return epochSeconds < other.epochSeconds ? -1 : 1 }
+    return nanosecondOfSecond < other.nanosecondOfSecond ? -1 : nanosecondOfSecond > other.nanosecondOfSecond ? 1 : 0
+  }
 
-  // The whole milliseconds since the start of 1970, rounded down, as Java's toEpochMilli.
+  // The nanoseconds since the start of 1970: an ArithmeticException past what an int holds,
+  // before 1677 or after 2262.
+  val epochNanoseconds : int
+    get() {
+      if (epochSeconds < -9223372037 or epochSeconds > 9223372036) { throw ArithmeticException("$this is past what an int of nanoseconds from 1970 holds, 1677 to 2262") }
+      return epochSeconds < 0 ? (epochSeconds + 1) * 1000000000 + (nanosecondOfSecond - 1000000000) : epochSeconds * 1000000000 + nanosecondOfSecond
+    }
+  // The whole milliseconds since the start of 1970, rounded down, as Java's toEpochMilli (an
+  // ArithmeticException past what an int holds, 292 million years either way).
   val epochMilliseconds : int
-    get() => __floorDiv(epochNanoseconds, 1000000)
-  // The whole seconds since the start of 1970, rounded down.
-  val epochSeconds : int
-    get() => __floorDiv(epochNanoseconds, 1000000000)
+    get() => epochSeconds * 1000 + nanosecondOfSecond / 1000000
 
   // The moment in ISO 8601, in UTC: 2026-11-02T14:05:31Z, with the fraction of a second where
   // there is one, in 3, 6 or 9 digits as it needs, as Java writes it (2026-11-02T14:05:31.250Z).
+  // A year past 9999 has a + in front (+10000-01-01T00:00:00Z), one before 1 a - (-0001 is
+  // the year before 0000).
   fun toString() : string {
-    val seconds = epochSeconds
-    val nanos = epochNanoseconds - seconds * 1000000000
-    val days = __floorDiv(seconds, 86400)
-    val ofDay = seconds - days * 86400
+    val nanos = nanosecondOfSecond
+    val days = __floorDiv(epochSeconds, 86400)
+    val ofDay = epochSeconds - days * 86400
     val date = __civilDate(days)
-    var text = __digits(date[0], 4) + "-" + __digits(date[1], 2) + "-" + __digits(date[2], 2) + "T" +
+    var text = __isoYear(date[0]) + "-" + __digits(date[1], 2) + "-" + __digits(date[2], 2) + "T" +
                __digits(ofDay / 3600, 2) + ":" + __digits(ofDay / 60 % 60, 2) + ":" + __digits(ofDay % 60, 2)
     if (nanos != 0) {
       text += "." + (nanos % 1000000 == 0 ? __digits(nanos / 1000000, 3) : nanos % 1000 == 0 ? __digits(nanos / 1000, 6) : __digits(nanos, 9))
@@ -217,13 +294,15 @@ value Instant(val epochNanoseconds : int) {
     // something, clock() and Durations go only forward).
     fun now() : Instant => Instant(__epochNanoseconds())
     // The moment `milliseconds` after the start of 1970, as Java's ofEpochMilli.
-    fun fromEpochMilliseconds(milliseconds : int) : Instant => Instant(milliseconds * 1000000)
-    // The moment `seconds` and `nanoseconds` after the start of 1970.
-    fun fromEpochSeconds(seconds : int, nanoseconds : int = 0) : Instant => Instant(seconds * 1000000000 + nanoseconds)
+    fun fromEpochMilliseconds(milliseconds : int) : Instant => Instant(__floorDiv(milliseconds, 1000), __floorMod(milliseconds, 1000) * 1000000)
+    // The moment `seconds` and `nanoseconds` after the start of 1970 (any number of
+    // nanoseconds, before or after, as Java's ofEpochSecond).
+    fun fromEpochSeconds(seconds : int, nanoseconds : int = 0) : Instant => Instant(seconds + __floorDiv(nanoseconds, 1000000000), __floorMod(nanoseconds, 1000000000))
 
     // The moment ISO 8601 text gives, as toString writes it: a date, a time to the second
-    // with up to nine digits of fraction, and Z or an offset from UTC (+01:00). An
-    // IllegalArgumentException for anything else.
+    // with up to nine digits of fraction, and Z or an offset from UTC (+01:00). The year is four
+    // digits, or more after a + (+10000), or four or more after a - (-0001), as Java reads it.
+    // An IllegalArgumentException for anything else.
     fun parse(text : string) : Instant {
       fun bad() : nothing => throw IllegalArgumentException("not a moment in ISO 8601 (2026-11-02T14:05:31Z): '$text'")
       fun number(from : int, count : int) : int {
@@ -239,18 +318,26 @@ value Instant(val epochNanoseconds : int) {
       fun expect(at : int, c : char) {
         if (at >= text.size or text[at] != c) { bad() }
       }
-      val year = number(0, 4)
-      expect(4, '-')
-      val month = number(5, 2)
-      expect(7, '-')
-      val day = number(8, 2)
-      if (text.size < 11 or (text[10] != 'T' and text[10] != 't')) { bad() }
-      val hour = number(11, 2)
-      expect(13, ':')
-      val minute = number(14, 2)
-      expect(16, ':')
-      val second = number(17, 2)
-      var at = 19
+      // The year: its digits run to the first '-' after them.
+      val signed = text.size > 0 and (text[0] == '+' or text[0] == '-')
+      val yearStart = signed ? 1 : 0
+      var yearEnd = yearStart
+      while (yearEnd < text.size and text[yearEnd] >= '0' and text[yearEnd] <= '9') { yearEnd += 1 }
+      val yearDigits = yearEnd - yearStart
+      if (yearDigits < 4 or yearDigits > 10 or (!signed and yearDigits != 4) or (signed and text[0] == '+' and yearDigits == 4)) { bad() }
+      val year = (signed and text[0] == '-' ? -1 : 1) * number(yearStart, yearDigits)
+      val d = yearEnd - 4   // where the rest is, as for a year of four digits
+      expect(d + 4, '-')
+      val month = number(d + 5, 2)
+      expect(d + 7, '-')
+      val day = number(d + 8, 2)
+      if (text.size < d + 11 or (text[d + 10] != 'T' and text[d + 10] != 't')) { bad() }
+      val hour = number(d + 11, 2)
+      expect(d + 13, ':')
+      val minute = number(d + 14, 2)
+      expect(d + 16, ':')
+      val second = number(d + 17, 2)
+      var at = d + 19
       var nanos = 0
       if (at < text.size and text[at] == '.') {
         at += 1
@@ -280,7 +367,8 @@ value Instant(val epochNanoseconds : int) {
       if (at != text.size) { bad() }
       if (month < 1 or month > 12 or day < 1 or day > __monthDays(year, month) or hour > 23 or minute > 59 or second > 59) { bad() }
       val seconds = __civilDays(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offset
-      return Instant(seconds * 1000000000 + nanos)
+      if (seconds < -31557014167219200 or seconds > 31556889864403199) { bad() }
+      return Instant(seconds, nanos)
     }
   }
 }
@@ -296,6 +384,21 @@ fun __floorDiv(a : int, b : int) : int {
 
 // `n` in `width` digits, zeros in front.
 fun __digits(n : int, width : int) : string => "$n".padStart(width, '0')
+
+// A year as ISO 8601 and Java write it: four digits at least, a + in front past 9999 and a -
+// before 1 (-0001 is the year before 0000).
+fun __isoYear(year : int) : string {
+  if (year > 9999) { return "+$year" }
+  if (year < 0) { return "-" + __digits(-year, 4) }
+  return __digits(year, 4)
+}
+
+// A moment of `seconds` and `nanos` nanoseconds, `nanos` from -999999999 to 1999999998.
+fun __instant(seconds : int, nanos : int) : Instant {
+  if (nanos >= 1000000000) { return Instant(seconds + 1, nanos - 1000000000) }
+  if (nanos < 0) { return Instant(seconds - 1, nanos + 1000000000) }
+  return Instant(seconds, nanos)
+}
 
 // The year, month and day `days` days after 1970-01-01 (H. Hinnant's civil_from_days).
 fun __civilDate(days : int) : List<int> {

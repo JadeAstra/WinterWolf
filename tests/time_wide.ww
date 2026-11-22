@@ -1,0 +1,64 @@
+// Instant and Duration kept as Java keeps them, whole seconds and the nanoseconds past them (D2
+// of docs/snippy-ww-checklist.html): an Instant reaches the years -1000000000 to 1000000000, a
+// Duration as far as an int of seconds. The values are Java 21's (Instant, Duration, LocalDate);
+// a Duration is written as Kotlin writes one.
+
+// The years past 9999 and before 1, written and read as Java does.
+print(Instant.fromEpochSeconds(253402300800), Instant.fromEpochSeconds(-62135596800), Instant.fromEpochSeconds(-62135596801))
+// expect: +10000-01-01T00:00:00Z 0001-01-01T00:00:00Z 0000-12-31T23:59:59Z
+print(Instant.fromEpochSeconds(-62167219200, 5), Instant.fromEpochSeconds(-62167219201), Instant.fromEpochSeconds(-377705116801))
+// expect: 0000-01-01T00:00:00.000000005Z -0001-12-31T23:59:59Z -10000-12-31T23:59:59Z
+print(Instant.parse("+10000-01-01T00:00:00Z").epochSeconds, Instant.parse("-0001-12-31T23:59:59Z").epochSeconds, Instant.parse("0001-01-01T00:00:00.5Z").nanosecondOfSecond, Instant.parse("-10000-01-01T00:00:00Z").epochSeconds)
+// expect: 253402300800 -62167219201 500000000 -377736739200
+for (text in ["10000-01-01T00:00:00Z", "+0100-01-01T00:00:00Z", "+1000000001-01-01T00:00:00Z", "-01-01-01T00:00:00Z"]) {
+  try { print(Instant.parse(text)) } catch (e : IllegalArgumentException) { print("not a moment:", text) }
+}
+// expect: not a moment: 10000-01-01T00:00:00Z
+// expect: not a moment: +0100-01-01T00:00:00Z
+// expect: not a moment: +1000000001-01-01T00:00:00Z
+// expect: not a moment: -01-01-01T00:00:00Z
+print(Instant.parse("-1000000000-01-01T00:00:00Z").epochSeconds, Instant.parse(Instant.fromEpochSeconds(-377705116801, 123).toString()) == Instant.fromEpochSeconds(-377705116801, 123))
+// expect: -31557014167219200 true
+
+// Java's first and last moments; past them an ArithmeticException.
+print(Instant(-31557014167219200, 0), Instant(31556889864403199, 999999999))
+// expect: -1000000000-01-01T00:00:00Z +1000000000-12-31T23:59:59.999999999Z
+try { print(Instant(31556889864403200, 0)) } catch (e : ArithmeticException) { print("past the last moment") }
+// expect: past the last moment
+try { print(Instant(0, 1000000000)) } catch (e : IllegalArgumentException) { print("nanoseconds 0 to 999999999") }
+// expect: nanoseconds 0 to 999999999
+
+// Made from nanoseconds as before; the nanoseconds of a moment only between 1677 and 2262.
+print(Instant(-1), Instant(-1).epochSeconds, Instant(-1).nanosecondOfSecond, Instant(-1).epochNanoseconds, Instant.fromEpochSeconds(-1, -5))
+// expect: 1969-12-31T23:59:59.999999999Z -1 999999999 -1 1969-12-31T23:59:58.999999995Z
+print(Instant.fromEpochSeconds(-1).epochMilliseconds, Instant.fromEpochSeconds(-1, 999999999).epochMilliseconds, Instant.fromEpochMilliseconds(-1))
+// expect: -1000 -1 1969-12-31T23:59:59.999Z
+print(Instant(9223372036854775807), Instant(-9223372036854775807 - 1).epochNanoseconds)
+// expect: 2262-04-11T23:47:16.854775807Z -9223372036854775808
+try { print(Instant.parse("1500-01-01T00:00:00Z").epochNanoseconds) } catch (e : ArithmeticException) { print("1500 has no int of nanoseconds") }
+// expect: 1500 has no int of nanoseconds
+
+// A thousand years on, and between two moments two thousand years apart.
+print(Instant.parse("2026-01-01T00:00:00Z") + 365000.days)   // expect: 3025-05-04T00:00:00Z
+val apart = Instant.parse("3000-01-01T00:00:00Z") - Instant.parse("1000-01-01T00:00:00Z")
+print(apart, apart.inDays, apart > 1.days, Instant.parse("1000-01-01T00:00:00Z") + apart)
+// expect: 730485d 730485.0 true 3000-01-01T00:00:00Z
+try { print(apart.inNanoseconds) } catch (e : ArithmeticException) { print("too long for an int of nanoseconds") }
+// expect: too long for an int of nanoseconds
+print(Instant.parse("1000-01-01T00:00:00Z") < Instant.parse("3000-01-01T00:00:00Z"), Instant.fromEpochSeconds(5, 1) > Instant.fromEpochSeconds(5))
+// expect: true true
+
+// Durations past 292 years: multiplied, divided (toward zero, as Java's dividedBy), negated.
+print(100000.days / 3, 100000.days * 1000 / 7, 100000.days * -1000 / 7)
+// expect: 33333d 8h 14285714d 6h 51m 25.714285s -14285714d 6h 51m 25.714285s
+print(1.nanoseconds * 5000000000000, (-1500).milliseconds * 3000000000, 1000000.days / 1000.days, 1000.days * 2.5)
+// expect: 1h 23m 20s -52083d 8h 1000.0 2500d
+print(1e12.seconds, -(1e12.seconds), 1e12.seconds.inSeconds, (1000000.days + 1.nanoseconds).inWholeMilliseconds)
+// expect: 11574074d 1h 46m 40s -11574074d 1h 46m 40s 1e+12 86400000000000
+print(-(1.5.seconds), (-1).nanoseconds, Duration(-1500000000), Duration(-1500000000) == -(1.5.seconds), (-2).milliseconds + 1.seconds)
+// expect: -1.5s -1ns -1.5s true 998ms
+try { print(Duration(5, 1000000000)) } catch (e : IllegalArgumentException) { print("nanoseconds 0 to 999999999") }
+// expect: nanoseconds 0 to 999999999
+
+// LocalDate writes its year as Java does.
+print(LocalDate(12000, 1, 1), LocalDate(-5, 3, 1), LocalDate(0, 1, 1))   // expect: +12000-01-01 -0005-03-01 0000-01-01
