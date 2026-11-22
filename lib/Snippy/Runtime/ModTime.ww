@@ -479,10 +479,20 @@ fun pyTimeModule() : PyModule {
     val o = __pyOffsetAt(s)
     pyStructTime(pyTmFromSeconds(s, o, __pyZoneName(o)))
   }
+  // As C's mktime, which CPython calls: the year, month and day are read, tm_wday and tm_yday
+  // not; each number past its range is carried on (month 13 is the next January, day 0 the last
+  // of the month before, hour 25 the next day's first).
   m["mktime"] = __pyB("mktime") { a ->
-    val t = pyTmOf(a.pos[0])
-    val days = pyYmdToOrd(t.year, 1, 1) + t.yday - 1 - 719163
-    val local = days * 86400 + t.hour * 3600 + t.min * 60 + t.sec
+    val x = a.pos[0]
+    val isStruct = pyIsInstance(x, __pyStructTimeType)
+    if (!(x is PyTuple) and !isStruct) { throw pyTypeError("Tuple or struct_time argument required") }
+    val items = pyIterable(x)
+    if (!isStruct and items.size != 9) { throw pyTypeError("mktime(): illegal time tuple argument") }
+    val v = items.take(9).map { pyIndex(it) as int }
+    val month0 = v[1] - 1
+    val years = month0 >= 0 ? month0 / 12 : -((11 - month0) / 12)
+    val days = pyYmdToOrd(v[0] + years, month0 - years * 12 + 1, 1) + v[2] - 1 - 719163
+    val local = days * 86400 + v[3] * 3600 + v[4] * 60 + v[5]
     var s = local - __pyOffsetAt(local)
     s = local - __pyOffsetAt(s)
     s.toFloat()

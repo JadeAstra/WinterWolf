@@ -118,34 +118,40 @@ ul.check > li.done::before { content: "☑"; color: var(--accent); }
 
 <h2 id="bugs">1. Snippy's bugs: different from CPython today</h2>
 <ul class="check">
-<li><span class="id">S1</span>int / int rounds twice <span class="tag checked">checked</span><br>
+<li class="done"><span class="id">S1</span>int / int rounds twice <span class="tag checked">done, 0.9.5072</span><br>
 <span class="where">Runtime/Ops.ww:420 <code>__pyBigTrueDiv</code></span><br>
 Where an int is 2<sup>53</sup> or more and the quotient is not whole, it is <code>p.toFloat() / q.toFloat()</code>: each int rounded to a float, then the quotient rounded again, where CPython rounds once (<code>long_true_divide</code>). So the last digit can be off: <code>896756281784094569167941 / 826325471441701108669</code> is 1085.2337399445184 in Snippy, 1085.2337399445182 in CPython (two more cases found the same way). And an int past about 1.8×10<sup>308</sup> becomes infinity before the division: <code>(10**400 + 1) / 10**399</code> is an OverflowError ("integer division result too large for a float") in Snippy, 10.0 in CPython. Fix: since 0.9.5067, <code>BigInt.divideToFloat</code> (A1) is this division rounded once, as CPython's; <code>__pyBigTrueDiv</code> can be <code>p.divideToFloat(q)</code>, with an OverflowError where it gives an infinity.<br>
-<span class="owner">Owner: Snippy session; easiest after A1.</span></li>
-<li><span class="id">S2</span><code>time.mktime</code> reads <code>tm_yday</code> and leaves out the month and day <span class="tag checked">checked</span><br>
+<span class="owner">Owner: Snippy session; easiest after A1.</span><br>
+<em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> <code>__pyBigTrueDiv</code> is <code>p.divideToFloat(q)</code> (A1), an OverflowError only where the rounded quotient is past the largest float: 896756281784094569167941 / 826325471441701108669 is 1085.2337399445182 and (10**400 + 1) / 10**399 is 10.0, as CPython gives them.</li>
+<li class="done"><span class="id">S2</span><code>time.mktime</code> reads <code>tm_yday</code> and leaves out the month and day <span class="tag checked">done, 0.9.5072</span><br>
 <span class="where">Runtime/ModTime.ww:482-489</span><br>
 The date is <code>pyYmdToOrd(year, 1, 1) + yday - 1</code>; C's <code>mktime</code> uses year, month and day (normalising them) and ignores <code>tm_yday</code>, so <code>mktime((2024, 3, 1, 0, 0, 0, 0, 0, -1))</code> gives 1 January.<br>
-<span class="owner">Owner: Snippy session.</span></li>
-<li><span class="id">S3</span><code>str.isidentifier</code> goes by category <span class="tag checked">checked</span><br>
+<span class="owner">Owner: Snippy session.</span><br>
+<em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> <code>mktime</code> reads the nine numbers itself, as C's mktime: year, month and day, each carried past its range (month 13 the next January, month 0 the December before, day 0 the month before's last, hour 25 the next day), <code>tm_wday</code> and <code>tm_yday</code> not read; CPython's TypeErrors for a list or a tuple of other than nine.</li>
+<li class="done"><span class="id">S3</span><code>str.isidentifier</code> goes by category <span class="tag checked">done, 0.9.5072</span><br>
 <span class="where">Runtime/Methods.ww:767-778 <code>pyIsIdentifier</code></span><br>
 CPython goes by XID_Start and XID_Continue, which take in Other_ID_Start and Other_ID_Continue: <code>'℘'.isidentifier()</code> and <code>'a·'.isidentifier()</code> are True there (CPython asked), False in Snippy. <code>src/regex_unicode.inc</code> already holds CPython's answers for identifier characters; reading them from there (or from W1's data) fixes it.<br>
-<span class="owner">Owner: Snippy session; with W1, or the regex table now.</span></li>
+<span class="owner">Owner: Snippy session; with W1, or the regex table now.</span><br>
+<em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> <code>pyIsIdentifier</code> goes by XID_Start (or <code>_</code>) and XID_Continue, from a new table, <code>lib/Snippy/Text/Classes.ww</code>, made by <code>tools/snippy/classes.py</code> by asking CPython 3.14's own methods for every code point (as Unicode.ww and Case.ww are made); <code>pyCharClasses</code> in Text/Repr.ww reads it. collections.namedtuple and re's group names use it too.</li>
 <li><span class="id">S4</span><code>str.isupper</code> and <code>islower</code> go by category <span class="tag checked">checked</span><br>
 <span class="where">Runtime/Methods.ww:621-640</span><br>
 CPython goes by the Uppercase and Lowercase properties: <code>'ª'.islower()</code> and <code>'Ⓐ'.isupper()</code> are True there (CPython asked), False in Snippy. <code>pyCharUpperCase</code> and <code>pyCharLowerCase</code> in <code>lib/Snippy/Text/Casing.ww:147-148</code> already answer these right.<br>
 <span class="owner">Owner: Snippy session.</span></li>
-<li><span class="id">S5</span><code>NormalDist.samples</code> without a seed makes a Random of its own <span class="tag checked">checked</span><br>
+<li class="done"><span class="id">S5</span><code>NormalDist.samples</code> without a seed makes a Random of its own <span class="tag checked">done, 0.9.5072</span><br>
 <span class="where">Runtime/ModStatistics.ww:300-307</span><br>
 CPython's is <code>rnd = random.random if seed is None else random.Random(seed).random</code>: without a seed it draws from the module's generator, so <code>random.seed(1)</code> before it gives CPython's numbers; Snippy's does not.<br>
-<span class="owner">Owner: Snippy session.</span></li>
-<li><span class="id">S6</span><code>statistics</code>' own fsum <span class="tag reported">reported</span><br>
+<span class="owner">Owner: Snippy session.</span><br>
+<em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> <code>samples()</code> without a seed draws from the random module's <code>random</code> (looked up when it is called, as CPython's), so <code>random.seed(1)</code> before it gives CPython's numbers; with a seed, a Random of its own as before.</li>
+<li class="done"><span class="id">S6</span><code>statistics</code>' own fsum <span class="tag checked">done, 0.9.5072</span><br>
 <span class="where">Runtime/ModStatistics.ww:111-124 <code>pyFsum</code> (and <code>__pySumprodF</code> 129-138, <code>__pyFloats2</code> 126)</span><br>
 A second copy of <code>math.fsum</code> (ModMath.ww:640-657) that gives NaN before it looks for both infinities (CPython raises "-inf + inf in fsum" for <code>[nan, inf, -inf]</code>, so <code>fmean</code> differs) and lacks ModMath's -0.0. Use ModMath's.<br>
-<span class="owner">Owner: Snippy session.</span></li>
-<li><span class="id">S7</span><code>str.isdigit</code> and <code>isnumeric</code> from lists by hand <span class="tag reported">reported</span><br>
+<span class="owner">Owner: Snippy session.</span><br>
+<em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> statistics' <code>pyFsum</code>, <code>__pySumprodF</code> and <code>__pyFloats2</code> are gone; it uses math's, now <code>pyFsum</code> and <code>pySumprodFloats</code> in ModMath.ww. Checking against CPython showed the "-0.0" above was wrong: CPython 3.14's fsum gives 0.0 for <code>[-0.0]</code>, and raises "intermediate overflow in fsum" where a partial sum passes the largest float though the exact sum does not (<code>[1e308, 1e308, -1e308]</code>), which math.fsum's exact sum missed. So <code>pyFsum</code> is now CPython's math_fsum step for step (Shewchuk's partials and the half-way correction); 3000 lists of every kind give CPython's results bit for bit.</li>
+<li class="done"><span class="id">S7</span><code>str.isdigit</code> and <code>isnumeric</code> from lists by hand <span class="tag checked">done, 0.9.5072</span><br>
 <span class="where">Runtime/Methods.ww:758-765</span><br>
 The lists miss characters (the Ethiopic digits U+1369 to U+1371, most CJK numerals); CPython goes by Numeric_Type. A table made from Unicode's data (or from CPython, as Snippy's case tables are) would be whole.<br>
-<span class="owner">Owner: Snippy session; with W1's data.</span></li>
+<span class="owner">Owner: Snippy session; with W1's data.</span><br>
+<em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> <code>isdecimal</code>, <code>isdigit</code> and <code>isnumeric</code> go by Numeric_Type from the same table (S3); the lists by hand are gone. <code>isalnum</code> is CPython's too: a letter or any of the three.</li>
 </ul>
 
 <h2 id="use">2. Snippy could use ww's code now, with the same results</h2>

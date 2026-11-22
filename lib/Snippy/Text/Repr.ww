@@ -58,6 +58,58 @@ fun pyIsPrintable(cp : int) : bool {
   return !(c[0] == 'C' or c[0] == 'Z')
 }
 
+// ---- Python's character classes (Classes.ww's table) ----
+
+// The classes pyCharClasses gives, as bits: CPython's isdecimal, isdigit and isnumeric
+// (Numeric_Type), and isidentifier's XID_Start (with '_') and XID_Continue.
+internal val pyClassDecimal = 1
+internal val pyClassDigit = 2
+internal val pyClassNumeric = 4
+internal val pyClassIdStart = 8
+internal val pyClassIdContinue = 16
+
+// Where each run of one value starts, and the value. Read on first use, as __pyRuns.
+internal var __pyClassRunsRead : Pair<List<int>, List<int>>? = null
+internal fun __pyClassRuns() : Pair<List<int>, List<int>> {
+  if (__pyClassRunsRead == null) {
+    val letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!#%&*+"
+    val starts : open List<int> = []
+    val values : open List<int> = []
+    var start = 0
+    var i = 0
+    val t = __pyClassesTable
+    while (i < t.size) {
+      val value = letters.indexOf(t[i])
+      i += 1
+      var delta = 0
+      while (i < t.size and letters.indexOf(t[i]) < 0) {
+        val c = t[i]
+        delta = delta * 32 + (c <= '9' ? c.code - '0'.code : c.code - 'a'.code + 10)
+        i += 1
+      }
+      start += delta
+      starts.add(start)
+      values.add(value)
+    }
+    __pyClassRunsRead = Pair(starts, values)
+  }
+  return __pyClassRunsRead!!
+}
+
+// The classes of the code point `cp`, as CPython 3.14 answers for it: pyClassDecimal and the
+// rest, together. 0 outside the code points.
+fun pyCharClasses(cp : int) : int {
+  if (cp < 0 or cp > 0x10FFFF) { return 0 }
+  val runs = __pyClassRuns()
+  var lo = 0
+  var hi = runs.first.size - 1
+  while (lo < hi) {
+    val mid = (lo + hi + 1) / 2
+    if (runs.first[mid] <= cp) { lo = mid } else { hi = mid - 1 }
+  }
+  return runs.second[lo]
+}
+
 // ---- Surrogates ----
 // A str (in Python) may hold a lone surrogate (U+D800 to U+DFFF: '\udc80', as os keeps a file name's
 // undecodable bytes), which a WinterWolf string cannot. Snippy keeps each as a code point of

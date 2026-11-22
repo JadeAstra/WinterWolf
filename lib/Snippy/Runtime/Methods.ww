@@ -604,18 +604,12 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
       found
     }
     "isdigit", "isdecimal", "isnumeric" -> {
-      if (s.isEmpty()) { false } else {
-        var ok = true
-        for c in s {
-          val cat = pyCategory(pyOrd(c))
-          val good = name == "isdecimal" ? cat == "Nd" : name == "isdigit" ? (cat == "Nd" or (cat == "No" and __pyIsDigitNo(pyOrd(c)))) : (cat == "Nd" or cat == "Nl" or cat == "No" or __pyIsNumericOther(pyOrd(c)))
-          if (!good) { ok = false; break }
-        }
-        ok
-      }
+      // By Numeric_Type, as CPython: Decimal; Decimal or Digit; any (Text/Classes.ww).
+      val want = name == "isdecimal" ? pyClassDecimal : name == "isdigit" ? pyClassDigit : pyClassNumeric
+      s.isNotEmpty() and s.all { (pyCharClasses(pyOrd(it)) & want) != 0 }
     }
     "isalpha" -> s.isNotEmpty() and s.all { pyCategory(pyOrd(it)).startsWith("L") }
-    "isalnum" -> s.isNotEmpty() and s.all { val cat = pyCategory(pyOrd(it)); cat.startsWith("L") or cat == "Nd" or cat == "Nl" or cat == "No" }
+    "isalnum" -> s.isNotEmpty() and s.all { pyCategory(pyOrd(it)).startsWith("L") or (pyCharClasses(pyOrd(it)) & pyClassNumeric) != 0 }
     "isspace" -> s.isNotEmpty() and s.all { pyIsSpace(it) }
     "isascii" -> s.all { pyOrd(it) < 128 }
     "isupper" -> {
@@ -755,24 +749,12 @@ internal fun __pyTranslateOne(table : any?, cp : int) : any? {
   }
 }
 
-internal fun __pyIsDigitNo(cp : int) : bool => (cp >= 0xB2 and cp <= 0xB3) or cp == 0xB9 or (cp >= 0x2070 and cp <= 0x2079) or
-  (cp >= 0x2080 and cp <= 0x2089) or (cp >= 0x2460 and cp <= 0x2468) or (cp >= 0x2474 and cp <= 0x247C) or
-  (cp >= 0x2488 and cp <= 0x2490) or (cp >= 0x24F5 and cp <= 0x24FD) or cp == 0x24EA or cp == 0x24FF or
-  (cp >= 0x2776 and cp <= 0x277E) or (cp >= 0x2780 and cp <= 0x2788) or (cp >= 0x278A and cp <= 0x2792)
-
-internal fun __pyIsNumericOther(cp : int) : bool => (cp >= 0x4E00 and cp <= 0x9FFF and
-  (cp == 0x4E00 or cp == 0x4E8C or cp == 0x4E09 or cp == 0x56DB or cp == 0x4E94 or cp == 0x516D or cp == 0x4E03 or cp == 0x516B or
-   cp == 0x4E5D or cp == 0x5341 or cp == 0x767E or cp == 0x5343 or cp == 0x4E07 or cp == 0x5104 or cp == 0x96F6))
-
+// Whether the text is a name, as CPython's str.isidentifier: XID_Start (or '_') first, then
+// XID_Continue (Text/Classes.ww), so '℘' and 'a·' are names too.
 fun pyIsIdentifier(s : string) : bool {
   if (s.isEmpty()) { return false }
   for i in 0..<s.size {
-    val c = s[i]
-    val cp = pyOrd(c)
-    val cat = pyCategory(cp)
-    val start = c == '_' or cat == "Lu" or cat == "Ll" or cat == "Lt" or cat == "Lm" or cat == "Lo" or cat == "Nl"
-    val cont = start or cat == "Mn" or cat == "Mc" or cat == "Nd" or cat == "Pc"
-    if (i == 0 ? !start : !cont) { return false }
+    if ((pyCharClasses(pyOrd(s[i])) & (i == 0 ? pyClassIdStart : pyClassIdContinue)) == 0) { return false }
   }
   return true
 }

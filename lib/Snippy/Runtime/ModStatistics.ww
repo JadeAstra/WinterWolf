@@ -108,35 +108,6 @@ internal fun __pySS(data : List<any?>, c : any?) : PyStatSS {
   return PyStatSS(kind, g.isZero ? num : num / g, g.isZero ? den : den / g, sxN, sxD * cnt, count, null)
 }
 
-fun pyFsum(values : List<float>) : float {
-  var plus = false
-  var minus = false
-  for v in values {
-    if (v.isNaN()) { return v }
-    if (v == pyInf) { plus = true }
-    if (v == -pyInf) { minus = true }
-  }
-  if (plus and minus) { throw pyValueError("-inf + inf in fsum") }
-  if (plus) { return pyInf }
-  if (minus) { return -pyInf }
-  val s = __pyExactSum(values.map { pyFloatExact(it) })
-  return pyExactToFloat(s.first, s.second)
-}
-
-internal fun __pyFloats2(x : any?) : List<float> => pyIterable(x).map { pyRealArg(it) }
-
-// sumprod of floats, exactly and rounded once (math.sumprod's float case).
-internal fun __pySumprodF(p : List<float>, q : List<float>) : float {
-  val parts : open List<Pair<BigInt, int>> = []
-  for i in p.indices {
-    val x = pyFloatExact(p[i])
-    val y = pyFloatExact(q[i])
-    parts.add(Pair(x.first * y.first, x.second + y.second))
-  }
-  val s = __pyExactSum(parts)
-  return pyExactToFloat(s.first, s.second)
-}
-
 internal fun __pySorted(data : any?) : open List<any?> => pySortedBy(pyIterable(data).toOpenList(), { x -> x }, false)
 
 // sqrt(x * y) with care, as CPython's _sqrtprod.
@@ -156,7 +127,7 @@ internal fun __pySqrtProd(x : float, y : float) : float {
     }
     return h
   }
-  val d = __pySumprodF([x, h], [y, -h])
+  val d = pySumprodFloats([x, h], [y, -h])
   return h + d / (2.0 * h)
 }
 
@@ -297,12 +268,18 @@ internal fun __pyMakeNormalDist() : PyType {
              Math.abs(__pyNDCdf(y.first, y.second, x2) - __pyNDCdf(x.first, x.second, x2)))
     }
   }
+  // As CPython's: random.random (the random module's, looked up now) without a seed, so that
+  // random.seed() before it gives CPython's numbers; a Random of its own with one.
   m["samples"] = pyLibMethod("NormalDist", "samples") { self, a ->
     val p = __pyND(self)
     val seed = a.get("seed", null)
-    val rng = pyCall1(__pyRandomType, seed)
+    val rng = seed == null ? null : pyCall1(__pyRandomType, seed)
+    val draw = seed == null ? pyGetAttr(__pyRandomModuleNow(), "random") : null
     val out : open List<any?> = []
-    for i in 0..<pyIndex(a.pos[0]) { out.add(pyNormalInvCdf(__pyRand(rng), p.first, p.second)) }
+    for i in 0..<pyIndex(a.pos[0]) {
+      val r = rng != null ? __pyRand(rng) : pyToFloat(pyCall0(draw))
+      out.add(pyNormalInvCdf(r, p.first, p.second))
+    }
     pyNewList(out)
   }
   m["__add__"] = pyLibMethod("NormalDist", "__add__") { self, a ->
@@ -352,17 +329,17 @@ fun pyStatisticsModule() : PyModule {
     if (s.special != null) { s.special!! } else { __pyConvert(s.n, s.d * BigInt.of(s.count), s.kind) }
   }
   m["fmean"] = __pyB("fmean") { a ->
-    val data = __pyFloats2(a.pos[0])
+    val data = __pyFloats(a.pos[0])
     val weights = a.pos.size > 1 ? a.pos[1] : a.get("weights", null)
     if (weights == null) {
       if (data.isEmpty()) { throw __pyStatError("fmean requires at least one data point") }
       pyFsum(data) / data.size.toFloat()
     } else {
-      val w = __pyFloats2(weights)
+      val w = __pyFloats(weights)
       if (w.size != data.size) { throw __pyStatError("data and weights must be the same length") }
       val den = pyFsum(w)
       if (den == 0.0) { throw __pyStatError("sum of weights must be non-zero") }
-      __pySumprodF(data, w) / den
+      pySumprodFloats(data, w) / den
     }
   }
   m["geometric_mean"] = __pyB("geometric_mean") { a ->
@@ -512,19 +489,19 @@ fun pyStatisticsModule() : PyModule {
     pyNewList(out)
   }
   m["covariance"] = __pyB("covariance") { a ->
-    val x = __pyFloats2(a.pos[0])
-    val y = __pyFloats2(a.pos[1])
+    val x = __pyFloats(a.pos[0])
+    val y = __pyFloats(a.pos[1])
     val n = x.size
     if (y.size != n) { throw __pyStatError("covariance requires that both inputs have same number of data points") }
     if (n < 2) { throw __pyStatError("covariance requires at least two data points") }
     val xbar = pyFsum(x) / n.toFloat()
     val ybar = pyFsum(y) / n.toFloat()
-    __pySumprodF(x.map { it - xbar }, y.map { it - ybar }) / (n - 1).toFloat()
+    pySumprodFloats(x.map { it - xbar }, y.map { it - ybar }) / (n - 1).toFloat()
   }
   m["correlation"] = __pyB("correlation") { a ->
     a.only(["method"])
-    var x = __pyFloats2(a.pos[0])
-    var y = __pyFloats2(a.pos[1])
+    var x = __pyFloats(a.pos[0])
+    var y = __pyFloats(a.pos[1])
     val n = x.size
     if (y.size != n) { throw __pyStatError("correlation requires that both inputs have same number of data points") }
     if (n < 2) { throw __pyStatError("correlation requires at least two data points") }
@@ -540,17 +517,17 @@ fun pyStatisticsModule() : PyModule {
       x = x.map { it - xbar }
       y = y.map { it - ybar }
     }
-    val sxy = __pySumprodF(x, y)
-    val sxx = __pySumprodF(x, x)
-    val syy = __pySumprodF(y, y)
+    val sxy = pySumprodFloats(x, y)
+    val sxx = pySumprodFloats(x, x)
+    val syy = pySumprodFloats(y, y)
     val den = __pySqrtProd(sxx, syy)
     if (den == 0.0) { throw __pyStatError("at least one of the inputs is constant") }
     sxy / den
   }
   m["linear_regression"] = __pyB("linear_regression") { a ->
     a.only(["proportional"])
-    var x = __pyFloats2(a.pos[0])
-    var y = __pyFloats2(a.pos[1])
+    var x = __pyFloats(a.pos[0])
+    var y = __pyFloats(a.pos[1])
     val n = x.size
     if (y.size != n) { throw __pyStatError("linear regression requires that both inputs have same number of data points") }
     if (n < 2) { throw __pyStatError("linear regression requires at least two data points") }
@@ -563,8 +540,8 @@ fun pyStatisticsModule() : PyModule {
       x = x.map { it - xbar }
       y = y.map { it - ybar }
     }
-    val sxy = __pySumprodF(x, y) + 0.0
-    val sxx = __pySumprodF(x, x)
+    val sxy = pySumprodFloats(x, y) + 0.0
+    val sxx = pySumprodFloats(x, x)
     if (sxx == 0.0) { throw __pyStatError("x is constant") }
     val slope = sxy / sxx
     val intercept = proportional ? 0.0 : ybar - slope * xbar
@@ -573,4 +550,13 @@ fun pyStatisticsModule() : PyModule {
   m["LinearRegression"] = __pyLinearRegressionType
   m["NormalDist"] = __pyNormalDistType
   return pyNativeModule("statistics", m)
+}
+
+// The random module, as `import random` gives it (made now if no program has imported it yet).
+internal fun __pyRandomModuleNow() : any? {
+  val had = pyModules.get("random", pyUnbound)
+  if (had !== pyUnbound) { return had }
+  val m = __pyModuleMakers()["random"]!!()
+  pyModules.set("random", m)
+  return m
 }

@@ -417,12 +417,11 @@ internal fun __pyNumberOp(a : any?, b : any?, op : int) : any? {
   }
 }
 
+// p / q as CPython's long_true_divide gives it: the exact quotient rounded once to the nearest
+// float (BigInt.divideToFloat), an OverflowError where that is past the largest float.
 internal fun __pyBigTrueDiv(p : BigInt, q : BigInt) : float {
-  // Exact where the quotient is whole; otherwise as near as the two floats give.
-  val qr = p.divRem(q)
-  if (qr.second == BigInt.of(0)) { return qr.first.toFloat() }
-  val f = p.toFloat() / q.toFloat()
-  if (f.isNaN() or f.isInfinite()) { throw pyOverflowError("integer division result too large for a float") }
+  val f = p.divideToFloat(q)
+  if (f.isInfinite()) { throw pyOverflowError("integer division result too large for a float") }
   return f
 }
 

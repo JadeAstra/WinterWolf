@@ -412,6 +412,92 @@ internal fun __pyNorm(values : List<float>) : float {
 
 internal fun __pyFloats(x : any?) : List<float> => pyIterable(x).map { pyRealArg(it) }
 
+// math.fsum of floats, step for step as CPython's math_fsum (Shewchuk's partials, then its
+// correction where the rest is exactly half way): the sum rounded once; NaN where one is NaN,
+// "-inf + inf in fsum" where both infinities are there, and "intermediate overflow in fsum"
+// where a partial sum passes the largest float though the numbers are finite (as CPython's
+// does: [1e308, 1e308, -1e308]); 0.0, not -0.0, for nothing or only zeros. statistics' fmean
+// and the rest add up with this too, as CPython's call math.fsum.
+fun pyFsum(values : List<float>) : float {
+  val partials : open List<float> = []
+  var specialSum = 0.0
+  var infSum = 0.0
+  for xsave in values {
+    var x = xsave
+    var i = 0
+    for j in 0..<partials.size {
+      var y = partials[j]
+      if (Math.abs(x) < Math.abs(y)) { val t = x; x = y; y = t }
+      val hi = x + y
+      val yr = hi - x
+      val lo = y - yr
+      if (lo != 0.0) { partials[i] = lo; i += 1 }
+      x = hi
+    }
+    var n = i
+    if (x != 0.0) {
+      if (x.isNaN() or x.isInfinite()) {
+        // From a NaN or an infinity among the numbers, or from a sum that overflowed.
+        if (!xsave.isNaN() and !xsave.isInfinite()) { throw pyOverflowError("intermediate overflow in fsum") }
+        if (xsave.isInfinite()) { infSum += xsave }
+        specialSum += xsave
+        n = 0
+      } else {
+        if (n < partials.size) { partials[n] = x } else { partials.add(x) }
+        n += 1
+      }
+    }
+    while (partials.size > n) { partials.removeAt(partials.size - 1) }
+  }
+  if (specialSum != 0.0) {
+    if (infSum.isNaN()) { throw pyValueError("-inf + inf in fsum") }
+    return specialSum
+  }
+  var hi = 0.0
+  var n = partials.size
+  if (n > 0) {
+    n -= 1
+    hi = partials[n]
+    var lo = 0.0
+    while (n > 0) {
+      val x = hi
+      n -= 1
+      val y = partials[n]
+      hi = x + y
+      val yr = hi - x
+      lo = y - yr
+      if (lo != 0.0) { break }
+    }
+    // Make half-way cases round as they would with the rest of the partials (to even).
+    if (n > 0 and ((lo < 0.0 and partials[n - 1] < 0.0) or (lo > 0.0 and partials[n - 1] > 0.0))) {
+      val y = lo * 2.0
+      val x = hi + y
+      val yr = x - hi
+      if (y == yr) { hi = x }
+    }
+  }
+  return hi
+}
+
+// math.sumprod of two lists of floats as CPython's: the exact sum of the products rounded once;
+// where one is NaN or infinite, the products added one by one, as CPython falls back to then.
+// statistics' covariance, correlation and linear_regression use it too, as CPython's do.
+fun pySumprodFloats(p : List<float>, q : List<float>) : float {
+  if (p.all { it.isFinite() } and q.all { it.isFinite() }) {
+    val parts : open List<Pair<BigInt, int>> = []
+    for i in p.indices {
+      val x = pyFloatExact(p[i])
+      val y = pyFloatExact(q[i])
+      parts.add(Pair(x.first * y.first, x.second + y.second))
+    }
+    val sum = __pyExactSum(parts)
+    return pyExactToFloat(sum.first, sum.second)
+  }
+  var total = 0.0
+  for i in p.indices { total = total + p[i] * q[i] }
+  return total
+}
+
 // ---- floor, ceil, trunc ----
 
 // A float made an int, toward minus infinity, plus infinity or zero (`way` -1, 1, 0).
@@ -637,24 +723,7 @@ fun pyMathModule() : PyModule {
     if (p.size != q.size) { throw pyValueError("both points must have the same number of dimensions") }
     __pyNorm(p.indices.map { Math.abs(p[it] - q[it]) })
   }
-  m["fsum"] = __pyB("fsum") { a ->
-    val values = __pyFloats(a.pos[0])
-    var plus = false
-    var minus = false
-    var nan = false
-    for v in values {
-      if (v.isNaN()) { nan = true }
-      if (v == pyInf) { plus = true }
-      if (v == -pyInf) { minus = true }
-    }
-    if (plus and minus) { throw pyValueError("-inf + inf in fsum") }
-    if (nan) { 0.0 / 0.0 } else if (plus) { pyInf } else if (minus) { -pyInf } else {
-      val sum = __pyExactSum(values.map { pyFloatExact(it) })
-      val r = pyExactToFloat(sum.first, sum.second)
-      if (r.isInfinite()) { throw pyOverflowError("intermediate overflow in fsum") }
-      r == 0.0 and values.isNotEmpty() and values.all { __pySignBit(it) } ? -0.0 : r
-    }
-  }
+  m["fsum"] = __pyB("fsum") { a -> pyFsum(__pyFloats(a.pos[0])) }
   m["sumprod"] = __pyB("sumprod") { a ->
     __pyCheckCount("sumprod", a, 2, 2)
     val p = pyIterable(a.pos[0])
@@ -667,14 +736,7 @@ fun pyMathModule() : PyModule {
       for i in p.indices { total = total + pyBig(pyIndexValue(p[i])) * pyBig(pyIndexValue(q[i])) }
       pyNorm(total)
     } else if (reals and p.indices.all { !(p[it] is float and ((p[it] as float).isNaN() or (p[it] as float).isInfinite())) and !(q[it] is float and ((q[it] as float).isNaN() or (q[it] as float).isInfinite())) }) {
-      val parts : open List<Pair<BigInt, int>> = []
-      for i in p.indices {
-        val x = pyFloatExact(pyRealArg(p[i]))
-        val y = pyFloatExact(pyRealArg(q[i]))
-        parts.add(Pair(x.first * y.first, x.second + y.second))
-      }
-      val sum = __pyExactSum(parts)
-      pyExactToFloat(sum.first, sum.second)
+      pySumprodFloats(p.map { pyRealArg(it) }, q.map { pyRealArg(it) })
     } else {
       var total : any? = 0
       for i in p.indices { total = pyAdd(total, pyMul(p[i], q[i])) }

@@ -1,0 +1,32 @@
+1085.2337399445182
+10.0 -0.0 3.333333333333333e+29 1.2676506002282294e+30
+OverflowError: integer division result too large for a float
+(2024, 3, 1, 0, 0, 0) (2024, 3, 1, 0, 0, 0)
+(2025, 1, 1, 12, 0, 0) (2023, 12, 1, 12, 0, 0) (2024, 2, 29, 12, 0, 0)
+(2024, 3, 1, 12, 0, 0) (2024, 2, 28, 13, 0, 59) (2023, 11, 1, 12, 0, 0)
+True
+TypeError: mktime(): illegal time tuple argument
+TypeError: Tuple or struct_time argument required
+TypeError: Tuple or struct_time argument required
+True True False True True False
+True False True True True
+'7' True True True True
+'٣' True True True True
+'፩' False True True True
+'²' False True True True
+'①' False True True True
+'½' False False True True
+'五' False False True True
+'Ⅳ' False False True True
+'〇' False False True True
+'𝟗' True True True True
+'a' False False False True
+[112, 132, 285, 20173, 20644, 20416]
+[7.788009097538039, 12.050977944681108, 11.436994437882863]
+True
+[10.626221268116417, 11.29772881729844]
+ValueError: -inf + inf in fsum
+0.0
+OverflowError: intermediate overflow in fsum
+nan 0.1 0.9484206140366036
+2074985545693589140 {'value': 1927, 'overflow': 961, 'zero': 112} 0.0 0.0 1.0
