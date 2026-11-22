@@ -1,0 +1,73 @@
+// WinterWolf's case methods give Python's answers (CPython 3.14, Unicode 16.0.0), so that Snippy
+// has none of its own: upper, lower, foldCase (casefold), title, swapCase, isUpper, isLower and
+// isTitle, for every code point, each folded into one number as tools/unicode/python_case.py
+// folds CPython's (its output is the two lists below). A number that differs means WinterWolf's
+// Unicode data and CPython's have parted (one moved to a newer Unicode): make the two the same
+// again. Quick (WW_TEST_QUICK=1, under GC stress, where all of them take many minutes): every
+// 401st code point.
+
+// CPython 3.14.4, Unicode 16.0.0
+val python = [559350766, 511273711, 522189978, 218855630, 565036990, 884478634, 894287463, 942619288]
+val pythonQuick = [430852805, 71887936, 539015532, 430852805, 95232739, 415536946, 634825363, 415536946]
+
+val quick = Program.environment["WW_TEST_QUICK"] == "1"
+val m = 1000000007
+fun fold(h0 : int, text : string) : int {
+  var h = h0
+  for (ch in text) { h = (h * 1000003 + ch.code + 1) % m }
+  return (h * 1000003) % m
+}
+fun flag(b : bool) : string => b ? "\u{1}" : "\u{0}"
+
+val names = ["upper", "lower", "foldCase", "title", "swapCase", "isUpper", "isLower", "isTitle"]
+val hashes : open List<int> = List(8) { 0 }
+var cp = 0
+while (cp <= 0x10FFFF) {
+  if (cp < 0xD800 or cp > 0xDFFF) {
+    val c = cp.char.toString()
+    hashes[0] = fold(hashes[0], c.upper())
+    hashes[1] = fold(hashes[1], c.lower())
+    hashes[2] = fold(hashes[2], c.foldCase())
+    hashes[3] = fold(hashes[3], c.title())
+    hashes[4] = fold(hashes[4], c.swapCase())
+    hashes[5] = fold(hashes[5], flag(c.isUpper()))
+    hashes[6] = fold(hashes[6], flag(c.isLower()))
+    hashes[7] = fold(hashes[7], flag(c.isTitle()))
+  }
+  cp += quick ? 401 : 1
+}
+val want = quick ? pythonQuick : python
+for (k in names.indices) { print(names[k], hashes[k] == want[k] ? "as CPython's" : "differs: ${hashes[k]}") }
+// expect: upper as CPython's
+// expect: lower as CPython's
+// expect: foldCase as CPython's
+// expect: title as CPython's
+// expect: swapCase as CPython's
+// expect: isUpper as CPython's
+// expect: isLower as CPython's
+// expect: isTitle as CPython's
+
+// In words: title, capitalize, swapCase and foldCase, the final sigma among them, as CPython gives them.
+for (s in ["hello wORLD", "they're bill's friends", "ǆemal ǈubljana", "ßtraße ﬁsh", "ΟΔΟΣ ΟΔΟΣ.", "ὈΔΥΣΣΕΎΣ", "ΣΑΣ Σ", "aΣ",
+           "İstanbul", "ŉ", "Ꭰꭰ", "ﬃ ǰ", "hELLO wORLD ΣΑΣ"]) {
+  print(s.title(), "|", s.capitalize(), "|", s.swapCase(), "|", s.foldCase(), "|", s.isTitle())
+}
+// expect: Hello World | Hello world | HELLO World | hello world | false
+// expect: They'Re Bill'S Friends | They're bill's friends | THEY'RE BILL'S FRIENDS | they're bill's friends | false
+// expect: ǅemal ǈubljana | ǅemal ǉubljana | ǄEMAL ǈUBLJANA | ǆemal ǉubljana | false
+// expect: Sstraße Fish | Sstraße ﬁsh | SSTRASSE FISH | sstrasse fish | false
+// expect: Οδος Οδος. | Οδος οδος. | οδος οδος. | οδοσ οδοσ. | false
+// expect: Ὀδυσσεύς | Ὀδυσσεύς | ὀδυσσεύς | ὀδυσσεύσ | false
+// expect: Σας Σ | Σας σ | σας σ | σασ σ | false
+// expect: Aς | Aς | Aς | aσ | false
+// expect: İstanbul | İstanbul | i̇STANBUL | i̇stanbul | true
+// expect: ʼN | ʼN | ʼN | ʼn | false
+// expect: Ꭰꭰ | Ꭰꭰ | ꭰᎠ | ᎠᎠ | true
+// expect: Ffi J̌ | Ffi ǰ | FFI J̌ | ffi ǰ | false
+// expect: Hello World Σας | Hello world σας | Hello World σας | hello world σασ | false
+print(["Hello World", "HeLLo", "hello", "", "A1b", "ǅemal", "Ⓐⓑ Ⓒⓓ", "123", "Hello  World!"].map { it.isTitle() })
+// expect: [true, false, false, false, false, true, true, false, true]
+
+// A char's own: title case one for one, and what has a case.
+print('ǆ'.title(), 'a'.title(), 'ǅ'.isTitleCase(), 'A'.isTitleCase(), 'ª'.isCased(), '1'.isCased(), '\''.isCaseIgnorable(), 'a'.isCaseIgnorable())
+// expect: ǅ A true false true false true false

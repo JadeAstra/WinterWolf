@@ -455,9 +455,10 @@ internal fun __pyIsLineBreak(c : char) : bool {
 internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
   val p = a.pos
   return when (name) {
-    "upper" -> pyStrUpper(s)
-    "lower" -> pyStrLower(s)
-    "casefold" -> pyStrCasefold(s)
+    // Case: WinterWolf's own, which gives CPython's answers (tests/case_python.ww).
+    "upper" -> s.upper()
+    "lower" -> s.lower()
+    "casefold" -> s.foldCase()
     "strip" -> __pyStrip(s, __pyStripChars(a, "strip"), true, true)
     "lstrip" -> __pyStrip(s, __pyStripChars(a, "lstrip"), true, false)
     "rstrip" -> __pyStrip(s, __pyStripChars(a, "rstrip"), false, true)
@@ -612,51 +613,14 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
     "isalnum" -> s.isNotEmpty() and s.all { pyCategory(pyOrd(it)).startsWith("L") or (pyCharClasses(pyOrd(it)) & pyClassNumeric) != 0 }
     "isspace" -> s.isNotEmpty() and s.all { pyIsSpace(it) }
     "isascii" -> s.all { pyOrd(it) < 128 }
-    "isupper" -> {
-      var cased = false
-      var ok = true
-      for c in s {
-        val cat = pyCategory(pyOrd(c))
-        if (cat == "Ll" or cat == "Lt") { ok = false }
-        if (cat == "Lu") { cased = true }
-      }
-      ok and cased
-    }
-    "islower" -> {
-      var cased = false
-      var ok = true
-      for c in s {
-        val cat = pyCategory(pyOrd(c))
-        if (cat == "Lu" or cat == "Lt") { ok = false }
-        if (cat == "Ll") { cased = true }
-      }
-      ok and cased
-    }
-    "istitle" -> {
-      var cased = false
-      var previousCased = false
-      var ok = true
-      for c in s {
-        val cat = pyCategory(pyOrd(c))
-        if (cat == "Lu" or cat == "Lt") {
-          if (previousCased) { ok = false }
-          previousCased = true
-          cased = true
-        } else if (cat == "Ll") {
-          if (!previousCased) { ok = false }
-          previousCased = true
-          cased = true
-        } else {
-          previousCased = false
-        }
-      }
-      ok and cased
-    }
+    "isupper" -> s.isUpper()
+    "islower" -> s.isLower()
+    "istitle" -> s.isTitle()
     "isidentifier" -> pyIsIdentifier(s)
     "isprintable" -> s.all { pyIsPrintable(pyOrd(it)) }
-    "capitalize" -> pyStrCapitalize(s)
-    "title" -> pyStrTitle(s)
-    "swapcase" -> pyStrSwapcase(s)
+    "capitalize" -> s.capitalize()
+    "title" -> s.title()
+    "swapcase" -> s.swapCase()
     "center", "ljust", "rjust" -> {
       val width = pyIndex(p[0])
       val fill = p.size > 1 ? p[1] : " "

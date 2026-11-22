@@ -114,7 +114,7 @@ int radixOf(VM& vm, int argc, const Value* args, int i) {
     return static_cast<int>(radix);
 }
 
-enum class CharacterClass { Letter, Digit, LetterOrDigit, Whitespace, Upper, Lower };
+enum class CharacterClass { Letter, Digit, LetterOrDigit, Whitespace, Upper, Lower, Title, Cased, CaseIgnorable };
 
 // What kind a character is, as Java's Character methods say (unicode.h): the same on every system.
 bool characterIs(uint32_t c, CharacterClass which) {
@@ -125,6 +125,9 @@ bool characterIs(uint32_t c, CharacterClass which) {
         case CharacterClass::Whitespace: return unicode::isWhitespace(c);
         case CharacterClass::Upper: return unicode::isUpperCase(c);
         case CharacterClass::Lower: return unicode::isLowerCase(c);
+        case CharacterClass::Title: return unicode::isTitleCase(c);
+        case CharacterClass::Cased: return unicode::isCased(c);
+        case CharacterClass::CaseIgnorable: return unicode::isCaseIgnorable(c);
     }
     return false;
 }
@@ -151,6 +154,26 @@ bool casedAre(const std::string& s, bool upper) {
         seen = seen || (upper ? isUpper : isLower);
     }
     return seen;
+}
+
+// Python's istitle(): every run of cased letters starts with one in upper or title case and goes on
+// in lower case, and there is one at least: "Hello World" is, "HeLLo", "hello" and "" are not.
+bool isTitled(const std::string& s) {
+    bool cased = false, previousCased = false;
+    const Characters text = Characters::fromUtf8(s);
+    for (size_t i = 0; i < text.size(); i++) {
+        const uint32_t c = text[i];
+        if (unicode::isUpperCase(c) || unicode::isTitleCase(c)) {
+            if (previousCased) return false;
+            previousCased = cased = true;
+        } else if (unicode::isLowerCase(c)) {
+            if (!previousCased) return false;
+            previousCased = cased = true;
+        } else {
+            previousCased = false;
+        }
+    }
+    return cased;
 }
 
 // Thousands separators for the digits of a whole number: 1234567 -> 1,234,567.
@@ -644,6 +667,12 @@ void registerStringMethods(VM& vm) {
 #undef WW_CHARACTER_TEST
     vm.defineMethod(T, "isUpper", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::boolean(casedAre(asString(self)->utf8(), true)); });
     vm.defineMethod(T, "isLower", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::boolean(casedAre(asString(self)->utf8(), false)); });
+    vm.defineMethod(T, "isTitle", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::boolean(isTitled(asString(self)->utf8())); });
+    // Python's case methods, from WinterWolf's own Unicode data (unicode.h).
+    vm.defineMethod(T, "foldCase", 0, 0, [](VM& vm, Value self, int, Value*) -> Value { return vm.str(unicode::foldCase(asString(self)->utf8())); });
+    vm.defineMethod(T, "title", 0, 0, [](VM& vm, Value self, int, Value*) -> Value { return vm.str(unicode::title(asString(self)->utf8())); });
+    vm.defineMethod(T, "capitalize", 0, 0, [](VM& vm, Value self, int, Value*) -> Value { return vm.str(unicode::capitalize(asString(self)->utf8())); });
+    vm.defineMethod(T, "swapCase", 0, 0, [](VM& vm, Value self, int, Value*) -> Value { return vm.str(unicode::swapCase(asString(self)->utf8())); });
 }
 
 // ---- Numbers ----
@@ -824,6 +853,9 @@ void registerCharMethods(VM& vm) {
     CHARACTER_CLASS("isWhitespace", Whitespace)
     CHARACTER_CLASS("isUpperCase", Upper)
     CHARACTER_CLASS("isLowerCase", Lower)
+    CHARACTER_CLASS("isTitleCase", Title)
+    CHARACTER_CLASS("isCased", Cased)
+    CHARACTER_CLASS("isCaseIgnorable", CaseIgnorable)
 #undef CHARACTER_CLASS
     // The same letter in the other case, as Java's Character.toUpperCase and toLowerCase give it: one
     // character for one, the char itself where it has none.
@@ -832,6 +864,9 @@ void registerCharMethods(VM& vm) {
     });
     vm.defineMethod(T, "lower", 0, 0, [](VM&, Value self, int, Value*) -> Value {
         return Value::character(unicode::toLower(static_cast<uint32_t>(self.as.i)));
+    });
+    vm.defineMethod(T, "title", 0, 0, [](VM&, Value self, int, Value*) -> Value {
+        return Value::character(unicode::toTitle(static_cast<uint32_t>(self.as.i)));
     });
     // The number a digit stands for: '7' is 7, and with a radix past 10, 'f' is 15. As Java's
     // Character.digit (Kotlin's digitToInt): a decimal digit of any script ('٣' is 3), and the

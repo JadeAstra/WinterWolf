@@ -183,6 +183,24 @@ external fun string.isUpper() : bool
 // True when the text has a letter that has a case and every such letter is lower case, as in
 // Python: "a1" and "hello world" are, "Hello", "123" and "" are not.
 external fun string.isLower() : bool
+// True when each run of letters that have a case starts upper case (or title case, as ǅ) and goes
+// on lower case, and there is one at least, as Python's istitle: "Hello World" and "A1b" are,
+// "HeLLo", "hello" and "" are not.
+external fun string.isTitle() : bool
+// The text with its case folded, for comparing without case, as Python's casefold: Unicode's
+// full case folding, so "Straße" and "STRASSE" both fold to "strasse" and "ς" folds as "σ". Not
+// for showing: some folds are not lower case (Cherokee's fold to its capitals).
+external fun string.foldCase() : string
+// The text in title case as Python's title(): the first letter of each run of letters that have
+// a case in title case, the rest lower case ("hello wORLD" is "Hello World", "ǆemal" is "ǅemal",
+// "ß" is "Ss"). A word is a run of cased letters, so "they're" is "They'Re", as in Python.
+external fun string.title() : string
+// The first character in title case and the rest in lower case, as Python's capitalize():
+// "hELLO wORLD" is "Hello world". (Kotlin's old capitalize() changed only the first.)
+external fun string.capitalize() : string
+// The text with upper case lowered and lower case raised, by the full mappings, as Python's
+// swapcase(): "Hello ß" is "hELLO SS"; what has no case stays.
+external fun string.swapCase() : string
 // The text made `size` characters long with `padChar` put before it; the text as it is when it
 // is that long already.
 //   "7".padStart(3, '0')   // "007"
@@ -560,6 +578,16 @@ external fun char.isLowerCase() : bool
 external fun char.upper() : char
 // The character in lower case, one for one as Java's Character.toLowerCase gives it.
 external fun char.lower() : char
+// The character in title case, one for one as Java's Character.toTitleCase gives it: 'ǆ' is
+// 'ǅ', and a letter with no title case of its own its upper case ('a' is 'A').
+external fun char.title() : char
+// True when the character is title case (Lt: ǅ, ǈ, ᾈ and the like), as Kotlin's isTitleCase.
+external fun char.isTitleCase() : bool
+// True when the character has a case: upper, lower or title case (Unicode's Cased).
+external fun char.isCased() : bool
+// True when the character is passed over in looking for a word's case (Unicode's Case_Ignorable:
+// ' . : ^ and the combining marks), as the final sigma rule and Python's title() pass it.
+external fun char.isCaseIgnorable() : bool
 // The number the digit stands for in base `radix`: '7' is 7, and in base 16, 'f' is 15. A
 // decimal digit of any script counts ('٣', Arabic-Indic three, is 3), and so do the fullwidth
 // letters, as Kotlin's digitToInt. A NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a

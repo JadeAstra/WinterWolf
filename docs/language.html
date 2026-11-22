@@ -701,10 +701,10 @@ addButton(widgets)</pre></dd>
 <li><a href="#XmlText"><code>XmlText</code></a> (4)</li>
 <li><a href="#any.toString"><code>any</code></a> (5)</li>
 <li><a href="#byte.toInt"><code>byte</code></a> (1)</li>
-<li><a href="#char.code"><code>char</code></a> (11)</li>
+<li><a href="#char.code"><code>char</code></a> (15)</li>
 <li><a href="#float.toBigInt"><code>float</code></a> (30)</li>
 <li><a href="#int.toBigInt"><code>int</code></a> (45)</li>
-<li><a href="#string.hexToBytes"><code>string</code></a> (112)</li>
+<li><a href="#string.hexToBytes"><code>string</code></a> (117)</li>
 </ul>
 <section class="file" id="file-base64-ww">
 <h2>base64.ww</h2>
@@ -1259,6 +1259,21 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <div class="entry" id="string.isLower"><code class="sig">fun string.isLower() : bool</code><a class="anchor" href="#string.isLower">#</a>
 <p>True when the text has a letter that has a case and every such letter is lower case, as in Python: &quot;a1&quot; and &quot;hello world&quot; are, &quot;Hello&quot;, &quot;123&quot; and &quot;&quot; are not.</p>
 </div>
+<div class="entry" id="string.isTitle"><code class="sig">fun string.isTitle() : bool</code><a class="anchor" href="#string.isTitle">#</a>
+<p>True when each run of letters that have a case starts upper case (or title case, as ǅ) and goes on lower case, and there is one at least, as Python's istitle: &quot;Hello World&quot; and &quot;A1b&quot; are, &quot;HeLLo&quot;, &quot;hello&quot; and &quot;&quot; are not.</p>
+</div>
+<div class="entry" id="string.foldCase"><code class="sig">fun string.foldCase() : string</code><a class="anchor" href="#string.foldCase">#</a>
+<p>The text with its case folded, for comparing without case, as Python's casefold: Unicode's full case folding, so &quot;Straße&quot; and &quot;STRASSE&quot; both fold to &quot;strasse&quot; and &quot;ς&quot; folds as &quot;σ&quot;. Not for showing: some folds are not lower case (Cherokee's fold to its capitals).</p>
+</div>
+<div class="entry" id="string.title"><code class="sig">fun string.title() : string</code><a class="anchor" href="#string.title">#</a>
+<p>The text in title case as Python's title(): the first letter of each run of letters that have a case in title case, the rest lower case (&quot;hello wORLD&quot; is &quot;Hello World&quot;, &quot;ǆemal&quot; is &quot;ǅemal&quot;, &quot;ß&quot; is &quot;Ss&quot;). A word is a run of cased letters, so &quot;they're&quot; is &quot;They'Re&quot;, as in Python.</p>
+</div>
+<div class="entry" id="string.capitalize"><code class="sig">fun string.capitalize() : string</code><a class="anchor" href="#string.capitalize">#</a>
+<p>The first character in title case and the rest in lower case, as Python's capitalize(): &quot;hELLO wORLD&quot; is &quot;Hello world&quot;. (Kotlin's old capitalize() changed only the first.)</p>
+</div>
+<div class="entry" id="string.swapCase"><code class="sig">fun string.swapCase() : string</code><a class="anchor" href="#string.swapCase">#</a>
+<p>The text with upper case lowered and lower case raised, by the full mappings, as Python's swapcase(): &quot;Hello ß&quot; is &quot;hELLO SS&quot;; what has no case stays.</p>
+</div>
 <div class="entry" id="string.padStart"><code class="sig">fun string.padStart(size : int, padChar : char = ' ') : string</code><a class="anchor" href="#string.padStart">#</a>
 <p>The text made <code>size</code> characters long with <code>padChar</code> put before it; the text as it is when it is that long already.</p>
 <pre>&quot;7&quot;.padStart(3, '0')   // &quot;007&quot;
@@ -1689,6 +1704,18 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 </div>
 <div class="entry" id="char.lower"><code class="sig">fun char.lower() : char</code><a class="anchor" href="#char.lower">#</a>
 <p>The character in lower case, one for one as Java's Character.toLowerCase gives it.</p>
+</div>
+<div class="entry" id="char.title"><code class="sig">fun char.title() : char</code><a class="anchor" href="#char.title">#</a>
+<p>The character in title case, one for one as Java's Character.toTitleCase gives it: 'ǆ' is 'ǅ', and a letter with no title case of its own its upper case ('a' is 'A').</p>
+</div>
+<div class="entry" id="char.isTitleCase"><code class="sig">fun char.isTitleCase() : bool</code><a class="anchor" href="#char.isTitleCase">#</a>
+<p>True when the character is title case (Lt: ǅ, ǈ, ᾈ and the like), as Kotlin's isTitleCase.</p>
+</div>
+<div class="entry" id="char.isCased"><code class="sig">fun char.isCased() : bool</code><a class="anchor" href="#char.isCased">#</a>
+<p>True when the character has a case: upper, lower or title case (Unicode's Cased).</p>
+</div>
+<div class="entry" id="char.isCaseIgnorable"><code class="sig">fun char.isCaseIgnorable() : bool</code><a class="anchor" href="#char.isCaseIgnorable">#</a>
+<p>True when the character is passed over in looking for a word's case (Unicode's Case_Ignorable: ' . : ^ and the combining marks), as the final sigma rule and Python's title() pass it.</p>
 </div>
 <div class="entry" id="char.digitToInt"><code class="sig">fun char.digitToInt(radix : int = 10) : int</code><a class="anchor" href="#char.digitToInt">#</a>
 <p>The number the digit stands for in base <code>radix</code>: '7' is 7, and in base 16, 'f' is 15. A decimal digit of any script counts ('٣', Arabic-Indic three, is 3), and so do the fullwidth letters, as Kotlin's digitToInt. A NumberFormatException for a char that is not a digit there; an IllegalArgumentException for a radix outside 2 to 36.</p>

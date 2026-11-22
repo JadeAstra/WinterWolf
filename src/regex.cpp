@@ -12,7 +12,12 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "builtins.h"
 #include "unicode.h"
@@ -46,16 +51,64 @@ const SnippyRecord& snippyRecord(uint32_t c) {
     return kSnippyRecord[kSnippyEntry[static_cast<size_t>(kSnippyBlock[c >> 7]) * 128 + (c & 127)]];
 }
 bool snippyIs(uint32_t c, uint8_t flag) { return (snippyRecord(c).flags & flag) != 0; }
-// CPython's lowercase of a character (_sre.unicode_tolower).
-uint32_t snippyLower(uint32_t c) { return c > 0x10FFFF ? c : static_cast<uint32_t>(static_cast<int64_t>(c) + snippyRecord(c).lower); }
-// The one form of the characters that are the same without case, as CPython's re compares them:
-// the lowercase, with the lowercase letters that share an uppercase one (re._casefix) as one.
-uint32_t snippyForm(uint32_t c) { return c > 0x10FFFF ? c : static_cast<uint32_t>(static_cast<int64_t>(c) + snippyRecord(c).form); }
+
+// ---- How CPython's re compares without case, from WinterWolf's own case data ----
+// _sre's lowercase is the simple one (unicode::toLower gives CPython's for every code point), and
+// re._casefix makes one of the characters that are their own lowercase and have the same full
+// uppercase (i and ı are both I; s and ſ are both S): exactly that, 50 of them in Unicode 16, as
+// CPython's Tools/build/generate_re_casefix.py makes it. A character's form is the smallest of its
+// lowercase and those; two characters are the same without case when their forms are.
+struct SnippyCases {
+    std::unordered_map<uint32_t, uint32_t> shared;      // a lowercase letter -> its group's form, where it has one
+    std::vector<std::array<uint32_t, 2>> groups;        // (form, character), sorted, where a form has more than one
+};
+
+uint32_t snippyLower(uint32_t c) { return c > 0x10FFFF ? c : unicode::toLower(c); }
+
+const SnippyCases& snippyCases();
+
+uint32_t snippyForm(uint32_t c) {
+    const uint32_t lower = snippyLower(c);
+    const auto& shared = snippyCases().shared;
+    const auto it = shared.find(lower);
+    return it == shared.end() ? lower : it->second;
+}
+
+const SnippyCases& snippyCases() {
+    static const SnippyCases cases = [] {
+        SnippyCases out;
+        std::map<std::u32string, std::vector<uint32_t>> byUpper;
+        for (uint32_t c : unicode::casedCodePoints()) {
+            if (unicode::toLower(c) != c) continue;
+            const std::u32string up = unicode::upper(std::u32string(1, static_cast<char32_t>(c)));
+            if (up.size() == 1 && static_cast<uint32_t>(up[0]) == c) continue;
+            byUpper[up].push_back(c);
+        }
+        for (const auto& [up, members] : byUpper)
+            if (members.size() > 1)
+                for (uint32_t m : members) out.shared[m] = members.front();  // the smallest: found in order
+        std::set<uint32_t> forms;
+        for (uint32_t c : unicode::casedCodePoints()) {  // any other is its own form, alone
+            const uint32_t lower = unicode::toLower(c);
+            const auto it = out.shared.find(lower);
+            const uint32_t form = it == out.shared.end() ? lower : it->second;
+            if (form == c) continue;
+            out.groups.push_back({form, c});
+            forms.insert(form);
+        }
+        for (uint32_t form : forms) out.groups.push_back({form, form});
+        std::sort(out.groups.begin(), out.groups.end());
+        return out;
+    }();
+    return cases;
+}
+
 // The characters of the form `form` where they are more than one: [first, last).
-std::pair<const uint32_t (*)[2], const uint32_t (*)[2]> snippyCaseGroup(uint32_t form) {
-    const auto* begin = std::begin(kSnippyCaseGroup);
-    const auto* end = std::end(kSnippyCaseGroup);
-    const auto* lo = std::lower_bound(begin, end, form, [](const uint32_t(&e)[2], uint32_t f) { return e[0] < f; });
+std::pair<const std::array<uint32_t, 2>*, const std::array<uint32_t, 2>*> snippyCaseGroup(uint32_t form) {
+    const auto& groups = snippyCases().groups;
+    const auto* begin = groups.data();
+    const auto* end = begin + groups.size();
+    const auto* lo = std::lower_bound(begin, end, form, [](const std::array<uint32_t, 2>& e, uint32_t f) { return e[0] < f; });
     const auto* hi = lo;
     while (hi != end && (*hi)[0] == form) hi++;
     return {lo, hi};
@@ -1526,7 +1579,7 @@ private:
                 if (r.second - r.first < 0x400) {
                     for (uint32_t x = r.first; x <= r.second && !cased; x++) cased = snippyCased(x);
                 } else {
-                    for (const auto& e : kSnippyCaseGroup) cased = cased || (e[1] >= r.first && e[1] <= r.second);
+                    for (const auto& e : snippyCases().groups) cased = cased || (e[1] >= r.first && e[1] <= r.second);
                 }
             }
         }

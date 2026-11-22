@@ -127,6 +127,13 @@ fun pyOrd(c : char) : int {
   return cp >= __pySurrogateBase ? cp - __pySurrogateBase + 0xD800 : cp
 }
 
+// The code points of a Snippy str, each as ord() gives it.
+internal fun __pyCodePoints(s : string) : List<int> {
+  val out : open List<int> = []
+  for c in s { out.add(pyOrd(c)) }
+  return out
+}
+
 // ---- repr ----
 
 internal val __pyHexDigits = "0123456789abcdef"

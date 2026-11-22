@@ -276,7 +276,7 @@ fun pyStringModule() : PyModule {
   m["capwords"] = __pyB("capwords") { a ->
     val sep = a.pos.size > 1 ? a.pos[1] : a.get("sep", null)
     val words = sep == null ? pySplitWhitespace(a.pos[0] as string, -1) : pyIterable(pyCallMethodV(a.pos[0], "split", [sep], null))
-    val joined = words.map { pyStrCapitalize(it as string) }.join(sep == null ? " " : sep as string)
+    val joined = words.map { (it as string).capitalize() }.join(sep == null ? " " : sep as string)
     joined
   }
   m["Template"] = __pyTemplateType
