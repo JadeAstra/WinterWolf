@@ -807,7 +807,7 @@ void registerStringMethods(VM& vm) {
         return vm.str(std::move(out));
     });
 
-    vm.defineMethod(T, "split", 0, 1, [](VM& vm, Value self, int argc, Value* args) -> Value {
+    vm.defineMethod(T, "split", 0, 2, [](VM& vm, Value self, int argc, Value* args) -> Value {
         if (argc > 0 && args[0].isChar()) args[0] = vm.characterString(static_cast<uint32_t>(args[0].as.i));  // split(',') (D25)
         // On the characters themselves, each part at the width it needs (D20).
         const ObjString* text = asString(self);
@@ -826,11 +826,18 @@ void registerStringMethods(VM& vm) {
             }
         } else {
             const ObjString* separator = vm.toText(args[0], "separator");
+            // At most `limit` parts, the last holding the rest, as Kotlin's split(limit); 0 for no limit.
+            int64_t limit = 0;
+            if (argc > 1 && !args[1].isNull()) limit = vm.toInt(args[1], "limit");
+            if (limit < 0) throw vm.runtimeError(Thrown::IllegalArgumentException, "a split's limit is 0 (none) or more, not " + std::to_string(limit));
+            const auto room = [&] { return limit == 0 || static_cast<int64_t>(parts.size()) < limit - 1; };
             if (separator->length == 0) {
-                for (size_t i = 0; i < length; i++) parts.push_back(vm.characterString(text->at(i)));
+                size_t i = 0;
+                for (; i < length && room(); i++) parts.push_back(vm.characterString(text->at(i)));
+                if (i < length) parts.push_back(vm.str(text->slice(i, length)));
             } else {
                 size_t begin = 0;
-                for (;;) {
+                while (room()) {
                     const int64_t at = text->find(separator, begin);
                     if (at < 0) break;
                     parts.push_back(vm.str(text->slice(begin, static_cast<size_t>(at))));

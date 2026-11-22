@@ -744,9 +744,7 @@ internal fun __pyPercentInt(n : BigInt, base : int, flags : string, precision : 
 }
 
 fun pyPercentBytes(fmt : Bytes, args : any?) : any? {
-  val s = StringBuilder()
-  for i in 0..<fmt.size { s.append((fmt[i] + 0).char) }
-  val text = pyPercentFormat(s.toString(), args, true)
+  val text = pyPercentFormat(fmt.decodeToString(Charset.latin1), args, true)
   return pyBytesOfLatin1(text)
 }
 

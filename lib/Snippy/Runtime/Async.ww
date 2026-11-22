@@ -231,9 +231,9 @@ class PyLoop : PyIdentified() {
   var timerSeq = 0
   var current : PyTask? = null
   val tasks : open List<PyTask> = []
-  val start = __epochNanoseconds()
+  val start = Instant.now().epochNanoseconds
 
-  fun time() : float => (__epochNanoseconds() - start).toFloat() / 1.0e9
+  fun time() : float => (Instant.now().epochNanoseconds - start).toFloat() / 1.0e9
 
   fun callSoon(cb : () -> unit) {
     ready.add(cb)
@@ -569,10 +569,11 @@ internal lazy val __pyQueueType : PyType = pyNativeType("Queue", "asyncio",
   ["put", "get", "put_nowait", "get_nowait", "empty", "full", "qsize", "task_done", "join"],
   { t, args, kw -> PyQueue(args.isNotEmpty() ? pyIndex(args[0]) : PyArgs(args, kw, "Queue()").get("maxsize", 0).let { pyIndex(it) }) })
 
+// Its items and waiters are ww's Decks (U25): taken from the front without moving the rest.
 class PyQueue(val maxsize : int) : PyNative() {
-  val items : open List<any?> = []
-  val getters : open List<PyFuture> = []
-  val putters : open List<PyFuture> = []
+  val items = Deck<any?>()
+  val getters = Deck<PyFuture>()
+  val putters = Deck<PyFuture>()
   var unfinished = 0
   var finished : PyFuture? = null
 
@@ -580,9 +581,9 @@ class PyQueue(val maxsize : int) : PyNative() {
 
   fun full() : bool => maxsize > 0 and items.size >= maxsize
 
-  private fun wakeOne(waiters : open List<PyFuture>) {
+  private fun wakeOne(waiters : Deck<PyFuture>) {
     while (waiters.isNotEmpty()) {
-      val w = waiters.removeAt(0)
+      val w = waiters.removeFirst()
       if (!w.done()) {
         w.setResult(null)
         return
@@ -592,14 +593,14 @@ class PyQueue(val maxsize : int) : PyNative() {
 
   fun putNow(item : any?) {
     if (full()) { throw PyError(pyNewException(__pyQueueFullType, [])) }
-    items.add(item)
+    items.addLast(item)
     unfinished += 1
     wakeOne(getters)
   }
 
   fun getNow() : any? {
     if (items.isEmpty()) { throw PyError(pyNewException(__pyQueueEmptyType, [])) }
-    val item = items.removeAt(0)
+    val item = items.removeFirst()
     wakeOne(putters)
     return item
   }
@@ -617,7 +618,7 @@ class PyQueue(val maxsize : int) : PyNative() {
         pyNativeCoroutine("put", { g ->
           while (q.full()) {
             val f = PyFuture(__pyRunningLoop())
-            q.putters.add(f)
+            q.putters.addLast(f)
             pyAwaitFuture(g, f)
           }
           q.putNow(item)
@@ -629,7 +630,7 @@ class PyQueue(val maxsize : int) : PyNative() {
         pyNativeCoroutine("get", { g ->
           while (q.items.isEmpty()) {
             val f = PyFuture(__pyRunningLoop())
-            q.getters.add(f)
+            q.getters.addLast(f)
             pyAwaitFuture(g, f)
           }
           q.getNow()

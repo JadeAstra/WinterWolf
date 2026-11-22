@@ -331,17 +331,9 @@ class PySet(var frozen : bool) : PyIdentified() {
 
 internal fun __pyShuffleBits(h : int) : int => ((h ^ 89869747) ^ (h << 16)) &* 3644798167
 
-internal fun __pySetBlank(n : int) : open List<any?> {
-  val l : open List<any?> = []
-  for i in 0..<n { l.add(PySetEmptyT) }
-  return l
-}
+internal fun __pySetBlank(n : int) : open List<any?> => List<any?>(n) { PySetEmptyT }
 
-internal fun __pySetZeros(n : int) : open List<int> {
-  val l : open List<int> = []
-  for i in 0..<n { l.add(0) }
-  return l
-}
+internal fun __pySetZeros(n : int) : open List<int> => List(n) { 0 }
 
 class PySetIter(val set : PySet) : PyIterator() {
   var i = 0

@@ -1,77 +1,27 @@
 import Snippy.Text.*
 // textwrap (the Snippy plan, part 5.3, step 3), in WinterWolf, after CPython's textwrap.py: the
-// words split as its wordsep_re splits them (by hand, the regular expression read as it runs),
-// then wrapped, cut short and given a placeholder by its own steps, in its order.
+// words split by its own wordsep_re, wordsep_simple_re and sentence_end_re (the class's
+// attributes, which a subclass may replace), compiled by Snippy's re on ww's Regex (U15), then
+// wrapped, cut short and given a placeholder by its own steps, in its order.
 
 internal fun __pyTwSpace(c : char) : bool => c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\u{B}' or c == '\u{C}'
-internal fun __pyTwWord(c : char) : bool {
-  if (c == '_') { return true }
-  val cat = pyCategory(pyOrd(c))
-  return cat.startsWith("L") or cat == "Nd" or cat == "Nl" or cat == "No"
-}
-// [^\d\W]: a word character that is not a decimal digit.
-internal fun __pyTwLetter(c : char) : bool => __pyTwWord(c) and pyCategory(pyOrd(c)) != "Nd"
-// [\w!"'&.,?]
-internal fun __pyTwPunct(c : char) : bool => __pyTwWord(c) or c == '!' or c == '"' or c == '\'' or c == '&' or c == '.' or c == ',' or c == '?'
 internal fun __pyTwBlank(s : string) : bool => s.all { pyIsSpace(it) }
 
-// At `at`: two or more '-' and then a word character (?=-{2,}\w).
-internal fun __pyTwDashes(s : string, at : int) : int {
-  var e = at
-  while (e < s.size and s[e] == '-') { e += 1 }
-  return e - at >= 2 and e < s.size and __pyTwWord(s[e]) ? e : -1
-}
+// CPython 3.14's patterns, word for word (textwrap.TextWrapper's).
+internal val __pyTwWordsep = "\n        ( # any whitespace\n          [\\\t\\\n\\\u{B}\\\u{C}\\\r\\ ]+\n        | # em-dash between words\n          (?<=[\\w!\"\\'&.,?]) -{2,} (?=\\w)\n        | # word, possibly hyphenated\n          [^\\\t\\\n\\\u{B}\\\u{C}\\\r\\ ]+? (?:\n            # hyphenated word\n              -(?: (?<=[^\\d\\W]{2}-) | (?<=[^\\d\\W]-[^\\d\\W]-))\n              (?= [^\\d\\W] -? [^\\d\\W])\n            | # end of word\n              (?=[\\\t\\\n\\\u{B}\\\u{C}\\\r\\ ]|\\z)\n            | # em-dash\n              (?<=[\\w!\"\\'&.,?]) (?=-{2,}\\w)\n            )\n        )"
+internal val __pyTwWordsepSimple = "([\\\t\\\n\\\u{B}\\\u{C}\\\r\\ ]+)"
+internal val __pyTwSentenceEndPattern = "[a-z][\\.\\!\\?][\\\"\\']?\\z"
 
-// The chunks wordsep_re (break_on_hyphens) or wordsep_simple_re gives, the empty ones left out.
-internal fun __pyTwSplit(s : string, hyphens : bool) : open List<string> {
+// _split: the chunks the wordsep pattern gives (wordsep_re only where break_on_hyphens is True
+// itself), the empty ones left out.
+internal fun __pyTwSplit(w : any?, s : string) : open List<string> {
+  val hyphens = __pyTwOpt(w, "break_on_hyphens")
+  val pattern = pyGetAttr(w, hyphens is bool and (hyphens as bool) ? "wordsep_re" : "wordsep_simple_re")
   val out : open List<string> = []
-  var p = 0
-  val n = s.size
-  while (p < n) {
-    if (__pyTwSpace(s[p])) {
-      var e = p
-      while (e < n and __pyTwSpace(s[e])) { e += 1 }
-      out.add(s[p..<e])
-      p = e
-      continue
-    }
-    if (!hyphens) {
-      var e = p
-      while (e < n and !__pyTwSpace(s[e])) { e += 1 }
-      out.add(s[p..<e])
-      p = e
-      continue
-    }
-    // An em-dash between words: (?<=wp) -{2,} (?=\w).
-    if (p > 0 and s[p] == '-' and __pyTwPunct(s[p - 1])) {
-      val e = __pyTwDashes(s, p)
-      if (e > 0) { out.add(s[p..<e]); p = e; continue }
-    }
-    // A word, the shortest that ends at a hyphen inside it, at whitespace or the end, or before an em-dash.
-    var e = p + 1
-    while (true) {
-      if (e < n and s[e] == '-') {
-        val behind = (e >= 2 and __pyTwLetter(s[e - 2]) and __pyTwLetter(s[e - 1])) or
-          (e >= 3 and __pyTwLetter(s[e - 3]) and s[e - 2] == '-' and __pyTwLetter(s[e - 1]))
-        val ahead = e + 1 < n and __pyTwLetter(s[e + 1]) and
-          ((e + 2 < n and __pyTwLetter(s[e + 2])) or (e + 3 < n and s[e + 2] == '-' and __pyTwLetter(s[e + 3])))
-        if (behind and ahead) { e += 1; break }
-      }
-      if (e >= n or __pyTwSpace(s[e])) { break }
-      if (__pyTwPunct(s[e - 1]) and __pyTwDashes(s, e) > 0) { break }
-      e += 1
-    }
-    out.add(s[p..<e])
-    p = e
+  for c in pyIterable(pyCallMethodV(pattern, "split", [s], null)) {
+    if (c is string and (c as string).isNotEmpty()) { out.add(c as string) }
   }
   return out
-}
-
-// [a-z][.!?]["']?\Z
-internal fun __pyTwSentenceEnd(s : string) : bool {
-  var k = s.size - 1
-  if (k >= 0 and (s[k] == '"' or s[k] == '\'')) { k -= 1 }
-  return k >= 1 and (s[k] == '.' or s[k] == '!' or s[k] == '?') and s[k - 1] >= 'a' and s[k - 1] <= 'z'
 }
 
 internal fun __pyTwOpt(w : any?, name : string) : any? => pyGetAttr(w, name)
@@ -85,11 +35,12 @@ internal fun __pyTwChunks(w : any?, text0 : string) : open List<string> {
     for c in text { sb.append(__pyTwSpace(c) ? ' ' : c) }
     text = sb.toString()
   }
-  val chunks = __pyTwSplit(text, pyTruth(__pyTwOpt(w, "break_on_hyphens")))
+  val chunks = __pyTwSplit(w, text)
   if (pyTruth(__pyTwOpt(w, "fix_sentence_endings"))) {
+    val ending = pyGetAttr(w, "sentence_end_re")
     var i = 0
     while (i < chunks.size - 1) {
-      if (chunks[i + 1] == " " and __pyTwSentenceEnd(chunks[i])) { chunks[i + 1] = "  "; i += 2 } else { i += 1 }
+      if (chunks[i + 1] == " " and pyTruth(pyCallMethodV(ending, "search", [chunks[i]], null))) { chunks[i + 1] = "  "; i += 2 } else { i += 1 }
     }
   }
   return chunks
@@ -192,6 +143,9 @@ internal val __pyTwNames = ["width", "initial_indent", "subsequent_indent", "exp
 internal val __pyTwDefaults : List<any?> = [70, "", "", true, true, false, true, true, true, 8]
 
 internal lazy val __pyTextWrapperType : PyType = pyLibClass("TextWrapper", "textwrap", [pyObjectType], {
+  "wordsep_re": __pyReCompile(__pyTwWordsep, 96),
+  "wordsep_simple_re": __pyReCompile(__pyTwWordsepSimple, 32),
+  "sentence_end_re": __pyReCompile(__pyTwSentenceEndPattern, 32),
   "__init__": pyLibMethod("TextWrapper", "__init__") { self, a ->
     a.only(__pyTwNames + ["max_lines", "placeholder"])
     if (a.pos.size > __pyTwNames.size) {

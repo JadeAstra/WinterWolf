@@ -36,14 +36,10 @@ internal fun __pyMostCommon(self : any?) : open List<any?> {
 
 // A sort of Python values by key, stable, `reverse` keeping ties in order as Python's does.
 fun pySortedBy(items : open List<any?>, key : (any?) -> any?, reverse : bool) : open List<any?> {
-  val keyed = items.map { Pair(key(it), it) }
-  val indices : open List<int> = items.indices.toOpenList()
-  val sorted = indices.sortedWith { i, j ->
-    val a = keyed[i].first
-    val b = keyed[j].first
-    if (pyTruth(pyLt(a, b))) { reverse ? 1 : -1 } else if (pyTruth(pyLt(b, a))) { reverse ? -1 : 1 } else { 0 }
-  }
-  return sorted.map { keyed[it].second }.toOpenList()
+  val keys = items.map { key(it) }
+  val order : open List<int> = items.indices.toOpenList()
+  order.sort { i, j -> pyTruth(reverse ? pyLt(keys[j], keys[i]) : pyLt(keys[i], keys[j])) ? -1 : 0 }
+  return order.map { items[it] }.toOpenList()
 }
 
 internal fun __pyNewCounter(cls : any?) : any? => pyCall0(cls)
@@ -244,14 +240,20 @@ internal lazy val __pyDequeType : PyType = pyNativeType("deque", "collections", 
   d
 })
 
+// Its items are ww's Deck (U25), quick at both ends as CPython's deque is.
 class PyDeque(val maxlen : int) : PyNative() {
-  val items : open List<any?> = []
+  val items = Deck<any?>()
   override fun pyType() : PyType => __pyDequeType
   // Added at one end, an item falling off the other where it is full.
   fun push(x : any?, right : bool) {
     if (maxlen == 0) { return }
-    if (right) { items.add(x) } else { items.add(0, x) }
-    if (maxlen >= 0 and items.size > maxlen) { if (right) { items.removeAt(0) } else { items.removeAt(items.size - 1) } }
+    if (right) { items.addLast(x) } else { items.addFirst(x) }
+    if (maxlen >= 0 and items.size > maxlen) { if (right) { items.removeFirst() } else { items.removeLast() } }
+  }
+  // Where the first item equal to `x` (Python's ==) is, or -1.
+  fun find(x : any?) : int {
+    for i in 0..<items.size { if (pyEqB(items[i], x)) { return i } }
+    return -1
   }
   fun at(k : any?) : int {
     var i = pyIndex(k)
@@ -267,23 +269,25 @@ class PyDeque(val maxlen : int) : PyNative() {
       "appendleft" -> { push(p[0], false); null }
       "pop", "popleft" -> {
         if (items.isEmpty()) { throw pyIndexError("pop from an empty deque") }
-        name == "pop" ? items.removeAt(items.size - 1) : items.removeAt(0)
+        name == "pop" ? items.removeLast() : items.removeFirst()
       }
       "extend" -> { val xs = pyIterable(p[0]).toList(); for x in xs { push(x, true) }; null }
       "extendleft" -> { val xs = pyIterable(p[0]).toList(); for x in xs { push(x, false) }; null }
       "rotate" -> {
+        // As CPython's: the shorter way round, an item at a time from one end to the other.
         val n = items.size
         if (n > 0) {
-          var k = p.isEmpty() ? 1 : pyIndex(p[0])
-          k = ((k % n) + n) % n
-          val moved = items[(n - k)..] + items[..<(n - k)]
-          items.clear()
-          items.addAll(moved)
+          val k = (p.isEmpty() ? 1 : pyIndex(p[0])).mod(n)
+          if (k <= n / 2) {
+            for i in 0..<k { items.addFirst(items.removeLast()) }
+          } else {
+            for i in 0..<(n - k) { items.addLast(items.removeFirst()) }
+          }
         }
         null
       }
       "remove" -> {
-        val i = items.indexOfFirst { pyEqB(it, p[0]) }
+        val i = find(p[0])
         if (i < 0) { throw pyValueError("deque.remove(x): x not in deque") }
         items.removeAt(i)
         null
@@ -297,14 +301,19 @@ class PyDeque(val maxlen : int) : PyNative() {
         null
       }
       "index" -> {
-        val i = items.indexOfFirst { pyEqB(it, p[0]) }
+        val i = find(p[0])
         if (i < 0) { throw pyValueError("deque.index(x): x not in deque") }
         i
       }
       "count" -> items.count { pyEqB(it, p[0]) }
       "clear" -> { items.clear(); null }
-      "copy", "__copy__" -> { val d = PyDeque(maxlen); d.items.addAll(items); d }
-      "reverse" -> { items.reverse(); null }
+      "copy", "__copy__" -> { val d = PyDeque(maxlen); d.items.addAll(items.toList()); d }
+      "reverse" -> {
+        val turned = items.reversed()
+        items.clear()
+        items.addAll(turned)
+        null
+      }
       "__len__" -> items.size
       "__bool__" -> items.isNotEmpty()
       "__getitem__" -> items[at(p[0])]
@@ -325,14 +334,15 @@ class PyDeque(val maxlen : int) : PyNative() {
       "__add__" -> {
         if (!(p[0] is PyDeque)) { throw pyTypeError("can only concatenate deque (not \"${pyTypeName(p[0])}\") to deque") }
         val d = PyDeque(maxlen)
-        for x in items { d.push(x, true) }
-        for x in (p[0] as PyDeque).items { d.push(x, true) }
+        for x in items.toList() { d.push(x, true) }
+        for x in (p[0] as PyDeque).items.toList() { d.push(x, true) }
         d
       }
       "__iadd__" -> { for x in pyIterable(p[0]).toList() { push(x, true) }; this }
       "__mul__" -> {
         val d = PyDeque(maxlen)
-        for i in 0..<Math.max(0, pyIndex(p[0])) { for x in items { d.push(x, true) } }
+        val xs = items.toList()
+        for i in 0..<Math.max(0, pyIndex(p[0])) { for x in xs { d.push(x, true) } }
         d
       }
       else -> throw pyAttributeError("'deque' object has no attribute '$name'", this, name)

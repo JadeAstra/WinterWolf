@@ -809,6 +809,20 @@ void registerNumberMethods(VM& vm) {
     vm.defineMethod(T, "floor", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::number(std::floor(self.toDouble())); });
     vm.defineMethod(T, "ceil", 0, 0, [](VM&, Value self, int, Value*) -> Value { return Value::number(std::ceil(self.toDouble())); });
 
+    // The quotient rounded down, as Kotlin's floorDiv and Python's //: (-7).floorDiv(2) is -4,
+    // where -7 / 2 is -3. With mod: a == a.floorDiv(b) * b + a.mod(b).
+    vm.defineMethod(T, "floorDiv", 1, 1, [](VM& vm, Value self, int, Value* args) -> Value {
+        const int64_t a = vm.toInt(self, "number");
+        const int64_t divisor = vm.toInt(args[0], "divisor");
+        if (divisor == 0) throw vm.runtimeError(Thrown::ArithmeticException, "division by zero");
+        if (divisor == -1) {
+            if (a == INT64_MIN) throw vm.runtimeError(Thrown::ArithmeticException, std::to_string(a) + ".floorDiv(-1) does not fit in an int");
+            return Value::integer(-a);
+        }
+        const int64_t q = a / divisor;
+        return Value::integer(a % divisor != 0 && ((a < 0) != (divisor < 0)) ? q - 1 : q);
+    });
+
     vm.defineMethod(T, "mod", 1, 1, [](VM& vm, Value self, int, Value* args) -> Value {
         if (self.isInt() && args[0].isInt()) {
             const int64_t divisor = args[0].as.i;

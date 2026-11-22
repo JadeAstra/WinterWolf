@@ -253,6 +253,17 @@ class Deck<T> {
     items[head] = item
   }
 
+  // Puts `item` in at `index` (0 to size), those from there on one further back, as Kotlin's
+  // ArrayDeque.add(index, element); an IndexOutOfBoundsException for an index past those.
+  fun add(index : int, item : T) {
+    if (index < 0 or index > items.size - head) { throw IndexOutOfBoundsException("index $index in a deck of ${items.size - head}") }
+    if (index == 0) {
+      addFirst(item)
+    } else {
+      items.add(head + index, item)
+    }
+  }
+
   // Takes out the front item and gives it; a NoSuchElementException when the deck is empty.
   fun removeFirst() : T {
     if (items.size == head) { throw NoSuchElementException("removeFirst() from an empty deck") }

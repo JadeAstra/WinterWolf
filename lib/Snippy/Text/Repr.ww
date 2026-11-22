@@ -136,17 +136,8 @@ internal fun __pyCodePoints(s : string) : List<int> {
 
 // ---- repr ----
 
-internal val __pyHexDigits = "0123456789abcdef"
 
-fun pyHex(n : int, width : int) : string {
-  val sb = StringBuilder()
-  var shift = (width - 1) * 4
-  while (shift >= 0) {
-    sb.append(__pyHexDigits[(n >> shift) & 15])
-    shift -= 4
-  }
-  return sb.toString()
-}
+fun pyHex(n : int, width : int) : string => n.toString(16).padStart(width, '0')
 
 // A str as Python's repr() writes it: in single quotes, or double where it holds a single quote
 // and no double; backslash, the quote, \t \n \r escaped, and what is not printable as \x, \u or \U.

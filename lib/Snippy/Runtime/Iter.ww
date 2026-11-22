@@ -342,19 +342,16 @@ fun pyIterSafe(v : any?, message : string) : any? {
 // ---- range ----
 
 class PyRange(val start : int, val stop : int, val step : int) : PyIdentified() {
-  fun length() : int {
-    if (step > 0) { return start < stop ? (stop - start - 1) / step + 1 : 0 }
-    return start > stop ? (start - stop - 1) / (-step) + 1 : 0
-  }
+  // ww's Range is Python's: stop left out, any step but 0 (U26). Only numbers below 2**62 come here.
+  internal val range : Range = Range(start, stop, step)
+  fun length() : int => range.size
   fun item(i : int) : int => start + i * step
   fun has(x : any?) : bool {
     if (!(x is int or x is bool)) {
       for v in pyIterable(this) { if (pyEqB(v, x)) { return true } }
       return false
     }
-    val n = x is bool ? ((x as bool) ? 1 : 0) : x as int
-    if (step > 0 ? (n < start or n >= stop) : (n > start or n <= stop)) { return false }
-    return (n - start) % step == 0
+    return range.contains(x is bool ? ((x as bool) ? 1 : 0) : x as int)
   }
   fun sameAs(o : PyRange) : bool {
     val n = length()

@@ -52,12 +52,7 @@ internal fun __pyReAsciiText(s : string) : string {
   }
   return sb.toString()
 }
-internal fun __pyReHex(n : int, digits : int) : string {
-  val hex = "0123456789abcdef"
-  val sb = StringBuilder()
-  for k in 0..<digits { sb.append(hex[(n >> (4 * (digits - 1 - k))) & 15]) }
-  return sb.toString()
-}
+internal fun __pyReHex(n : int, digits : int) : string => n.toString(16).padStart(digits, '0')
 
 // ---- Flags ----
 

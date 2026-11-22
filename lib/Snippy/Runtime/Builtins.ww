@@ -289,11 +289,7 @@ fun pyIntOf2(x : any?, base : any?) : any? {
   throw pyTypeError("int() can't convert non-string with explicit base")
 }
 
-fun pyBytesText(b : Bytes) : string {
-  val sb = StringBuilder()
-  for i in 0..<b.size { sb.append((b[i] + 0).char) }
-  return sb.toString()
-}
+fun pyBytesText(b : Bytes) : string => b.decodeToString(Charset.latin1)
 
 fun pyFloatOf0() : any? => 0.0
 fun pyFloatOf1(x : any?) : any? {
@@ -608,52 +604,12 @@ internal fun __pyRoundSpecial(x : any?, n : any?, withN : bool) : any? {
 fun pySortList(items : open List<any?>, key : any?, reverse : bool) {
   if (items.size < 2) { return }
   val keys : List<any?> = key == null ? items.toList() : items.map { pyCall1(key, it) }
-  val order : open List<int> = []
-  for i in 0..<items.size { order.add(i) }
-  val tmp : open List<int> = order.toOpenList()
-  __pyMergeSort(order, tmp, 0, order.size, keys, reverse)
+  // ww's sort (U24): stable, and asking only whether one goes before the other, as CPython's asks
+  // only <; reversed, the other way round, ties still in their order.
+  val order : open List<int> = items.indices.toOpenList()
+  order.sort { i, j -> (reverse ? pyLtB(keys[j], keys[i]) : pyLtB(keys[i], keys[j])) ? -1 : 0 }
   val copy = items.toList()
   for i in 0..<order.size { items[i] = copy[order[i]] }
-}
-
-internal fun __pyBefore(a : any?, b : any?, reverse : bool) : bool => reverse ? pyLtB(a, b) : pyLtB(b, a)
-
-internal fun __pyMergeSort(order : open List<int>, tmp : open List<int>, lo : int, hi : int, keys : List<any?>, reverse : bool) {
-  if (hi - lo < 2) { return }
-  if (hi - lo <= 8) {
-    // Insertion sort, stable: an item moves left past those it is less than.
-    for i in (lo + 1)..<hi {
-      val v = order[i]
-      var j = i - 1
-      while (j >= lo and (reverse ? pyLtB(keys[order[j]], keys[v]) : pyLtB(keys[v], keys[order[j]]))) {
-        order[j + 1] = order[j]
-        j -= 1
-      }
-      order[j + 1] = v
-    }
-    return
-  }
-  val mid = (lo + hi) / 2
-  __pyMergeSort(order, tmp, lo, mid, keys, reverse)
-  __pyMergeSort(order, tmp, mid, hi, keys, reverse)
-  if (!(reverse ? pyLtB(keys[order[mid - 1]], keys[order[mid]]) : pyLtB(keys[order[mid]], keys[order[mid - 1]]))) { return }
-  for i in lo..<hi { tmp[i] = order[i] }
-  var i = lo
-  var j = mid
-  var k = lo
-  while (i < mid and j < hi) {
-    val takeRight = reverse ? pyLtB(keys[tmp[i]], keys[tmp[j]]) : pyLtB(keys[tmp[j]], keys[tmp[i]])
-    if (takeRight) {
-      order[k] = tmp[j]
-      j += 1
-    } else {
-      order[k] = tmp[i]
-      i += 1
-    }
-    k += 1
-  }
-  while (i < mid) { order[k] = tmp[i]; i += 1; k += 1 }
-  while (j < hi) { order[k] = tmp[j]; j += 1; k += 1 }
 }
 
 // min() and max(): of an iterable or of the arguments, with key and default.

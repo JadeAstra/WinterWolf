@@ -53,12 +53,18 @@ internal fun __pyBUpper(v : int) : bool => v >= 65 and v <= 90
 internal fun __pyBDigit(v : int) : bool => v >= 48 and v <= 57
 internal fun __pyBAlpha(v : int) : bool => __pyBLower(v) or __pyBUpper(v)
 
-// Bytes from..<to of b, a copy.
-fun pyBytesPart(b : Bytes, from : int, to : int) : Bytes {
-  val out = Bytes(to > from ? to - from : 0)
-  if (to > from) { out.copyFrom(b, from, 1, 0, 1, to - from) }
-  return out
+// ASCII's cases as tables for Bytes.mapped (U11).
+internal fun __pyBTable(f : (int) -> int) : Bytes {
+  val t = Bytes(256)
+  for v in 0..<256 { t[v] = f(v).toByte() }
+  return t
 }
+internal lazy val __pyBUpperTable : Bytes = __pyBTable { v -> __pyBLower(v) ? v - 32 : v }
+internal lazy val __pyBLowerTable : Bytes = __pyBTable { v -> __pyBUpper(v) ? v + 32 : v }
+internal lazy val __pyBSwapTable : Bytes = __pyBTable { v -> __pyBLower(v) ? v - 32 : __pyBUpper(v) ? v + 32 : v }
+
+// Bytes from..<to of b, a copy.
+fun pyBytesPart(b : Bytes, from : int, to : int) : Bytes => to > from ? b[from..<to] : Bytes(0)
 
 internal fun __pyBytesCat(parts : List<Bytes>) : Bytes {
   var n = 0
@@ -235,10 +241,7 @@ internal fun __pyBTitled(b : Bytes) : Bytes {
 // positive count) or the left (a negative one).
 fun pyBytesHex(b : Bytes, sep : any?, perSep : any?) : string {
   val sb = StringBuilder()
-  if (sep == null) {
-    for i in 0..<b.size { sb.append(pyHex(b[i], 2)) }
-    return sb.toString()
-  }
+  if (sep == null) { return b.toHex() }
   var s = ""
   if (sep is string) { s = sep as string } else {
     val sb2 = pyBytesLike(sep)
@@ -366,9 +369,9 @@ fun pyBytesMethod(b : Bytes, name : string, a : PyArgs, array : PyByteArray?) : 
       }
       found
     }
-    "upper" -> out(__pyBMapped(b, { i, v -> __pyBLower(v) ? v - 32 : v }))
-    "lower" -> out(__pyBMapped(b, { i, v -> __pyBUpper(v) ? v + 32 : v }))
-    "swapcase" -> out(__pyBMapped(b, { i, v -> __pyBLower(v) ? v - 32 : __pyBUpper(v) ? v + 32 : v }))
+    "upper" -> out(b.mapped(__pyBUpperTable))
+    "lower" -> out(b.mapped(__pyBLowerTable))
+    "swapcase" -> out(b.mapped(__pyBSwapTable))
     "capitalize" -> out(__pyBMapped(b, { i, v -> i == 0 ? (__pyBLower(v) ? v - 32 : v) : (__pyBUpper(v) ? v + 32 : v) }))
     "title" -> out(__pyBTitled(b))
     "isalnum", "isalpha", "isdigit", "isspace" -> {
@@ -528,6 +531,7 @@ fun pyBytesMethod(b : Bytes, name : string, a : PyArgs, array : PyByteArray?) : 
       if (t != null and t!!.size != 256) { throw pyValueError("translation table must be 256 characters long") }
       val d = arg(1, "delete")
       val del = d == null ? Bytes(0) : __pyNeedBytes(d)
+      if (del.size == 0) { return out(t == null ? Bytes(b) : b.mapped(t!!)) }
       val kept : open List<int> = []
       for i in 0..<b.size {
         val v : int = b[i]

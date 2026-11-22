@@ -479,7 +479,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#Base64"><code>Base64</code></a> (3)</li>
 <li><a href="#BeforeAll"><code>BeforeAll</code></a> (1)</li>
 <li><a href="#BeforeTest"><code>BeforeTest</code></a> (1)</li>
-<li><a href="#BigInt"><code>BigInt</code></a> (69)</li>
+<li><a href="#BigInt"><code>BigInt</code></a> (71)</li>
 <li><a href="#BitOrder"><code>BitOrder</code></a> (1)</li>
 <li><a href="#BitReader"><code>BitReader</code></a> (9)</li>
 <li><a href="#BlendMode"><code>BlendMode</code></a> (1)</li>
@@ -509,7 +509,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#Datagram"><code>Datagram</code></a> (1)</li>
 <li><a href="#DatagramSocket"><code>DatagramSocket</code></a> (8)</li>
 <li><a href="#Dct"><code>Dct</code></a> (3)</li>
-<li><a href="#Deck"><code>Deck</code></a> (47)</li>
+<li><a href="#Deck"><code>Deck</code></a> (48)</li>
 <li><a href="#DirEntry"><code>DirEntry</code></a> (2)</li>
 <li><a href="#Dither"><code>Dither</code></a> (1)</li>
 <li><a href="#Dns"><code>Dns</code></a> (4)</li>
@@ -587,7 +587,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#LinearGradient"><code>LinearGradient</code></a> (2)</li>
 <li><a href="#List.size"><code>List</code></a> (194)</li>
 <li><a href="#ListView"><code>ListView</code></a> (11)</li>
-<li><a href="#LocalDate"><code>LocalDate</code></a> (11)</li>
+<li><a href="#LocalDate"><code>LocalDate</code></a> (16)</li>
 <li><a href="#LocalDateTime"><code>LocalDateTime</code></a> (14)</li>
 <li><a href="#LocalTime"><code>LocalTime</code></a> (9)</li>
 <li><a href="#Lock"><code>Lock</code></a> (2)</li>
@@ -703,7 +703,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#byte.toInt"><code>byte</code></a> (1)</li>
 <li><a href="#char.code"><code>char</code></a> (15)</li>
 <li><a href="#float.toBigInt"><code>float</code></a> (30)</li>
-<li><a href="#int.toBigInt"><code>int</code></a> (45)</li>
+<li><a href="#int.toBigInt"><code>int</code></a> (46)</li>
 <li><a href="#string.hexToBytes"><code>string</code></a> (117)</li>
 </ul>
 <section class="file" id="file-base64-ww">
@@ -753,6 +753,12 @@ print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 <div class="entry member" id="BigInt.parseOrNull"><code class="sig">fun parseOrNull(text : string, radix : int = 10) : BigInt?</code><a class="anchor" href="#BigInt.parseOrNull">#</a>
 <p>The same, null for text that is not one.</p>
 </div>
+<div class="entry member" id="BigInt.fromBytes"><code class="sig">fun fromBytes(bytes : Bytes, bigEndian : bool = true, signed : bool = false) : BigInt</code><a class="anchor" href="#BigInt.fromBytes">#</a>
+<p>The number the bytes spell, the most significant byte first (<code>bigEndian</code>) or last, as Python's int.from_bytes and C#'s BigInteger(bytes, isUnsigned, isBigEndian) read them: not <code>signed</code>, every bit counts; <code>signed</code>, two's complement, the top bit the sign, as Java's BigInteger(bytes). No bytes at all is 0.</p>
+<pre>BigInt.fromBytes(Bytes([1, 0]))                  // 256
+BigInt.fromBytes(Bytes([255]), signed = true)    // -1
+</pre>
+</div>
 <div class="entry member" id="BigInt.zero"><code class="sig">val zero : BigInt</code><a class="anchor" href="#BigInt.zero">#</a>
 <p>0.</p>
 </div>
@@ -764,6 +770,12 @@ print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 </div>
 <div class="entry member" id="BigInt.ten"><code class="sig">val ten : BigInt</code><a class="anchor" href="#BigInt.ten">#</a>
 <p>10.</p>
+</div>
+<div class="entry member" id="BigInt.toBytes"><code class="sig">fun toBytes(bigEndian : bool = true, signed : bool = false) : Bytes</code><a class="anchor" href="#BigInt.toBytes">#</a>
+<p>The number as bytes, the most significant first (<code>bigEndian</code>) or last, as few as hold it, as Java's toByteArray and C#'s ToByteArray(isUnsigned, isBigEndian) give them: <code>signed</code>, in two's complement with room for the sign (128 takes two bytes, 0 and 128); not <code>signed</code>, every bit its value, and an ArithmeticException for a negative number. One byte at least: 0 is [0]. BigInt.fromBytes reads them back.</p>
+<pre>BigInt.of(256).toBytes()                    // [1, 0]
+BigInt.of(-1).toBytes(signed = true)        // [255]
+</pre>
 </div>
 <div class="entry member" id="BigInt.signum"><code class="sig">val signum : int</code><a class="anchor" href="#BigInt.signum">#</a>
 <p>-1, 0 or 1, as the number is below, at or above zero.</p>
@@ -1170,13 +1182,14 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 <pre>&quot; a  b &quot;.split()      // [&quot;a&quot;, &quot;b&quot;]
 </pre>
 </div>
-<div class="entry" id="string.split-2"><code class="sig">fun string.split(delimiter : string) : open List&lt;string&gt;</code><a class="anchor" href="#string.split-2">#</a>
-<p>The parts of the text between the places where <code>delimiter</code> is, as a new list; an empty delimiter gives each character.</p>
-<pre>&quot;a,b,,c&quot;.split(&quot;,&quot;)   // [&quot;a&quot;, &quot;b&quot;, &quot;&quot;, &quot;c&quot;]
+<div class="entry" id="string.split-2"><code class="sig">fun string.split(delimiter : string, limit : int = 0) : open List&lt;string&gt;</code><a class="anchor" href="#string.split-2">#</a>
+<p>The parts of the text between the places where <code>delimiter</code> is, as a new list; an empty delimiter gives each character. With a <code>limit</code> above 0, at most that many parts, the last holding the rest, as Kotlin's split(limit) (Python's maxsplit is limit - 1); an IllegalArgumentException for a limit below 0.</p>
+<pre>&quot;a,b,,c&quot;.split(&quot;,&quot;)            // [&quot;a&quot;, &quot;b&quot;, &quot;&quot;, &quot;c&quot;]
+&quot;a,b,,c&quot;.split(&quot;,&quot;, limit = 2) // [&quot;a&quot;, &quot;b,,c&quot;]
 </pre>
 </div>
-<div class="entry" id="string.split-3"><code class="sig">fun string.split(delimiter : char) : open List&lt;string&gt;</code><a class="anchor" href="#string.split-3">#</a>
-<p>The parts of the text between the places where the character <code>delimiter</code> is, as a new list.</p>
+<div class="entry" id="string.split-3"><code class="sig">fun string.split(delimiter : char, limit : int = 0) : open List&lt;string&gt;</code><a class="anchor" href="#string.split-3">#</a>
+<p>The parts of the text between the places where the character <code>delimiter</code> is, as a new list; at most <code>limit</code> parts where it is above 0.</p>
 </div>
 <div class="entry" id="string.lines"><code class="sig">fun string.lines() : open List&lt;string&gt;</code><a class="anchor" href="#string.lines">#</a>
 <p>The lines of the text without their line ends (&quot;\r\n&quot;, &quot;\n&quot;, or &quot;\r&quot; alone, as Kotlin's), as a new list. Text that ends in a line end gives an empty last line.</p>
@@ -1759,6 +1772,9 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 </div>
 <div class="entry" id="int.mod"><code class="sig">fun int.mod(divisor : int) : int</code><a class="anchor" href="#int.mod">#</a>
 <p>The remainder after dividing by <code>divisor</code>, with the divisor's sign: (-7).mod(3) is 2, where <code>-7 % 3</code> is -1. An ArithmeticException for a divisor of 0.</p>
+</div>
+<div class="entry" id="int.floorDiv"><code class="sig">fun int.floorDiv(divisor : int) : int</code><a class="anchor" href="#int.floorDiv">#</a>
+<p>The quotient rounded down, as Kotlin's floorDiv and Python's //: (-7).floorDiv(2) is -4, where <code>-7 / 2</code> is -3; with mod, <code>a == a.floorDiv(b) * b + a.mod(b)</code>. An ArithmeticException for a divisor of 0, and for int.minValue.floorDiv(-1), which does not fit.</p>
 </div>
 <div class="entry" id="float.coerceIn"><code class="sig">fun float.coerceIn(minimumValue : float, maximumValue : float) : float</code><a class="anchor" href="#float.coerceIn">#</a>
 <p>The number itself where it lies from <code>minimumValue</code> to <code>maximumValue</code>, and otherwise the nearer of the two; an IllegalArgumentException where the maximum is the smaller.</p>
@@ -5139,6 +5155,18 @@ val local = path.lastModified()!!.toLocalDateTime()
 <div class="entry member" id="LocalDate.dayOfYear"><code class="sig">val dayOfYear : int</code><a class="anchor" href="#LocalDate.dayOfYear">#</a>
 <p>The day of the year, from 1.</p>
 </div>
+<div class="entry member" id="LocalDate.isLeapYear"><code class="sig">val isLeapYear : bool</code><a class="anchor" href="#LocalDate.isLeapYear">#</a>
+<p>Whether the year has 366 days: every fourth year but every hundredth, yet every four hundredth (2000 is, 1900 is not), as Java's LocalDate.isLeapYear.</p>
+</div>
+<div class="entry member" id="LocalDate.lengthOfMonth"><code class="sig">val lengthOfMonth : int</code><a class="anchor" href="#LocalDate.lengthOfMonth">#</a>
+<p>How many days the month has: 28 to 31, as Java's lengthOfMonth.</p>
+</div>
+<div class="entry member" id="LocalDate.lengthOfYear"><code class="sig">val lengthOfYear : int</code><a class="anchor" href="#LocalDate.lengthOfYear">#</a>
+<p>How many days the year has: 365 or 366, as Java's lengthOfYear.</p>
+</div>
+<div class="entry member" id="LocalDate.epochDays"><code class="sig">val epochDays : int</code><a class="anchor" href="#LocalDate.epochDays">#</a>
+<p>The days from 1970-01-01 to this date, negative before it, as kotlinx-datetime's toEpochDays and Java's toEpochDay; LocalDate.fromEpochDays goes back. The days between two dates are the difference of their epochDays.</p>
+</div>
 <div class="entry member" id="LocalDate.&lt;"><code class="sig">op &lt;(other : LocalDate) : bool</code><a class="anchor" href="#LocalDate.&lt;">#</a>
 <p>Whether this date comes before <code>other</code>.</p>
 </div>
@@ -5162,6 +5190,9 @@ val local = path.lastModified()!!.toLocalDateTime()
 </div>
 <div class="entry member" id="LocalDate.now"><code class="sig">fun now() : LocalDate</code><a class="anchor" href="#LocalDate.now">#</a>
 <p>Today, in the system's time zone.</p>
+</div>
+<div class="entry member" id="LocalDate.fromEpochDays"><code class="sig">fun fromEpochDays(days : int) : LocalDate</code><a class="anchor" href="#LocalDate.fromEpochDays">#</a>
+<p>The date <code>days</code> days after 1970-01-01 (before it where negative), as kotlinx-datetime's LocalDate.fromEpochDays and Java's ofEpochDay.</p>
 </div>
 <div class="entry" id="LocalTime"><code class="sig">value LocalTime(val hour : int, val minute : int, val second : int = 0, val nanosecond : int = 0)</code><a class="anchor" href="#LocalTime">#</a>
 <p>A time of day: its hour (0 to 23), minute, second and the nanoseconds past that second.</p>
@@ -7377,6 +7408,9 @@ print(squares.filter { it % 3 == 0 }.take(5).toList())     // [9, 36, 81, 144, 2
 </div>
 <div class="entry member" id="Deck.addFirst"><code class="sig">fun addFirst(item : T)</code><a class="anchor" href="#Deck.addFirst">#</a>
 <p>Adds <code>item</code> at the front, so that it is <code>deck[0]</code>.</p>
+</div>
+<div class="entry member" id="Deck.add-2"><code class="sig">fun add(index : int, item : T)</code><a class="anchor" href="#Deck.add-2">#</a>
+<p>Puts <code>item</code> in at <code>index</code> (0 to size), those from there on one further back, as Kotlin's ArrayDeque.add(index, element); an IndexOutOfBoundsException for an index past those.</p>
 </div>
 <div class="entry member" id="Deck.removeFirst"><code class="sig">fun removeFirst() : T</code><a class="anchor" href="#Deck.removeFirst">#</a>
 <p>Takes out the front item and gives it; a NoSuchElementException when the deck is empty.</p>

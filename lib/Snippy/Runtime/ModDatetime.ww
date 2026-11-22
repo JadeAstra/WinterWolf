@@ -491,7 +491,7 @@ internal fun __pyMakeDate() : PyType {
     val v = __pyYmd(self)
     pyStructTime(PyTm(v[0], v[1], v[2], 0, 0, 0, pyWeekday(v[0], v[1], v[2]), pyDaysBeforeMonth(v[0], v[1]) + v[2], -1, null, null))
   }
-  m["isoformat"] = pyLibMethod("date", "isoformat") { self, a -> val v = __pyYmd(self); __pyPadNum(v[0], 4, '0') + "-" + __pyPadNum(v[1], 2, '0') + "-" + __pyPadNum(v[2], 2, '0') }
+  m["isoformat"] = pyLibMethod("date", "isoformat") { self, a -> val v = __pyYmd(self); LocalDate(v[0], v[1], v[2]).toString() }
   m["__str__"] = m["isoformat"]
   m["ctime"] = pyLibMethod("date", "ctime") { self, a -> val v = __pyYmd(self); __pyDtStrftime("%a %b %e %H:%M:%S %Y", v[0], v[1], v[2], 0, 0, 0, 0, null, self) }
   m["strftime"] = pyLibMethod("date", "strftime") { self, a -> val v = __pyYmd(self); __pyDtStrftime(a.pos[0] as string, v[0], v[1], v[2], 0, 0, 0, 0, null, self) }

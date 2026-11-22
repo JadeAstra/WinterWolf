@@ -1,0 +1,55 @@
+[28, 29, 28, 29, 29] [365, 366, 366]
+738945 0001-01-01 9999-12-31 3 4 datetime.IsoCalendarDate(year=2024, week=9, weekday=4) 60
+0001-01-01 9999-12-31 8827 days, 0:00:00 2025-03-01
+1709164800.0 -1.0 1970-01-01
+True True
+(2024, 6, 15, 12, 30, 0) True
+abc*** éééabc abcdef   ünï ab ab ab
+['a', 'b', '', 'c'] ['a', 'b,,c'] ['a,b,,c'] ['a', 'b', '', 'c'] ['a', 'b', '', 'c'] [''] ['a', 'b', '']
+0 1 1 8 9 201 64
+000f1e2d3c4b5a69788796a5b4c3d2e1f0ff  b'\x00\x0f\x1e-<KZIX\x87\x96\xa5\xb4\xc3\xd2\xe1\xf0\xff' b'\xe9aZ' b'mixed 1'
+b'xxyyzz' b'xxzz' b'heo' b'hello'
+b'\x1e-<' b'' b'\xff\xd2\xa5xK\x1e' bytearray(b'bcd') True True True
+ValueError byte must be in range(0, 256)
+[9, 0, 1, 'a', 'b', 'c', 4, 5, 6, 7] [0, 1, 'a', 'b', 'c'] [] [9, 1, 'b', 4, 6]
+café b'caf\xe9' b'x 7 \xff'
+True 32 ([\	\
+\\\\ ]+)
+['A well-known', 'self-', 'contained', 'word--used', 'here. Then', 'more--and', 'more.']
+['Hello', 'there --', 'you', 'goof-ball,', 'use the -b', 'option!']
+End.  Next one!  Last?  Yes.
+['aa,bb,', 'cc,dd']
+tim likes tea; $5 1 $b True
+'$' Invalid placeholder in string: line 1, col 1
+'ab $' Invalid placeholder in string: line 1, col 4
+'x\ny $1' Invalid placeholder in string: line 2, col 3
+'a\rb $!' Invalid placeholder in string: line 2, col 3
+'$$${x' Invalid placeholder in string: line 1, col 3
+x and y and % and x ['a', 'B'] False
+$Who 1 2 ['a', 'b']
+1 $ 2 \[(?
+-0.0 5.0 -1.5 0.0 -3.08012634e-315
+ValueError math domain error
+ValueError math domain error
+1537228672809129301 -1537228672809129303 314159 658812288346769701
+3.141592653589793 -3.141592653589793 (5.0, 0.9272952180016122) (1-0j) (-0-0j) (1.0000000000000002+1.7320508075688772j) (inf+infj)
+(11+2j) (-0.2+0.4j) (-0.08800000000000001+0.016j) (237-3116j) 0j (1+1j)
+ZeroDivisionError division by zero
+2 -2 0 6 7 -1
+True 0 True
+0.7720246314157545 857763641927523104992306
+343569798639537224973896228088
+[(1, 'b'), (1, 'd'), (2, 'a'), (2, 'c'), (2, 'f'), (3, 'e')] [(3, 'e'), (2, 'a'), (2, 'c'), (2, 'f'), (1, 'b'), (1, 'd')]
+['the', 'fox', 'the', 'dog', 'over', 'lazy', 'quick', 'brown', 'jumps'] [('a', 5), ('b', 2), ('r', 2), ('c', 1), ('d', 1)]
+[Lt(1), Lt(1), Lt(2), Lt(3)] 9
+deque([4, 5, 0, 2, 3], maxlen=5)
+deque([2, 3, 4, 5, 0], maxlen=5) 3 0
+deque(['2', '1', 'b', 'z', 'a', 'e', 'd']) 7 2 d deque(['2', '1', 'b', 'z', 'a', 'e', 'd', '2', '1', 'b', 'z', 'a', 'e', 'd']) True
+[0, 1, 2, 3, 4, 5] True 0
+10 True False True False 9
+4 True False True False 1
+5 False True True False 3
+0 False False False False None
+0 False False False False None
+8 False False False True 1729382256910270464
+{1, 2, 3, 4} 1000

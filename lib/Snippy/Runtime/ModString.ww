@@ -37,83 +37,69 @@ fun pyAttrOr(o : any?, name : string, otherwise : any?) : any? => pyGetAttrOr(o,
 internal val __pyWhitespace = " \t\n\r\u{B}\u{C}"
 internal val __pyPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
-// Template.substitute and safe_substitute: $name, ${name}, $$, as CPython's pattern reads them,
-// with the class's (or the object's) own delimiter and identifier rules.
+// string.Template as CPython 3.14's (U16): its pattern built from the class's delimiter,
+// idpattern and braceidpattern (or the class's own pattern), compiled by Snippy's re on ww's Regex
+// with the class's flags (IGNORECASE where None) and VERBOSE, kept on the class once made, as
+// Template._compile_pattern keeps it; substitute, safe_substitute, get_identifiers and is_valid go
+// over its matches as CPython's do.
+internal fun __pyTemplatePattern(self : any?) : any? {
+  val cls = pyTypeOf(self)
+  val own = cls.dict.get("pattern", null)
+  if (own is PyRePattern) { return own }
+  var pattern = own
+  if (pattern == null) {
+    val delim = __pyReEscapeText(pyGetAttr(cls, "delimiter") as string)
+    val id = pyGetAttr(cls, "idpattern")
+    val braced = pyGetAttr(cls, "braceidpattern")
+    val bid = pyTruth(braced) ? braced : id
+    pattern = "\n            ${delim}(?:\n              (?P<escaped>${delim})  |   # Escape sequence of two delimiters\n" +
+      "              (?P<named>${pyStr(id)})       |   # delimiter and a Python identifier\n" +
+      "              {(?P<braced>${pyStr(bid)})} |   # delimiter and a braced identifier\n" +
+      "              (?P<invalid>)             # Other ill-formed delimiter exprs\n            )\n            "
+  }
+  val flags = pyGetAttr(cls, "flags")
+  val made = __pyReCompile(pattern, (flags == null ? 2 : __pyReFlagsOf(flags)) | 64)
+  pySetAttr(cls, "pattern", made)
+  return made
+}
+
+internal fun __pyGroup(mo : any?, name : string) : any? => pyCallMethodV(mo, "group", [name], null)
+internal fun __pyUnrecognized(self : any?) : PyError =>
+  PyError(pyNewException(pyValueErrorType, ["Unrecognized named group in pattern", __pyTemplatePattern(self)]))
+
 internal fun __pyTemplateSub(self : any?, mapping : any?, kw : Map<string, any?>, safe : bool) : string {
-  val template = pyGetAttr(self, "template") as string
-  val delimiter = pyGetAttr(self, "delimiter") as string
-  fun lookup(name : string) : any? {
-    if (name in kw.keys) { return kw[name] }
+  val template = pyGetAttr(self, "template")
+  fun lookup(name : any?) : any? {
+    if (name is string and (name as string) in kw.keys) { return kw[name as string] }
     if (mapping == null) { throw pyKeyError(name) }
     return pyGetItem(mapping, name)
   }
-  fun identStart(c : char) : bool => (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'
-  fun identPart(c : char) : bool => identStart(c) or (c >= '0' and c <= '9')
-  val sb = StringBuilder()
-  var i = 0
-  while (i < template.size) {
-    if (!template[i..].startsWith(delimiter)) {
-      sb.append(template[i])
-      i += 1
-      continue
-    }
-    val at = i
-    var j = i + delimiter.size
-    if (template[j..].startsWith(delimiter)) {
-      sb.append(delimiter)
-      i = j + delimiter.size
-      continue
-    }
-    if (j < template.size and identStart(template[j])) {
-      var k = j
-      while (k < template.size and identPart(template[k])) { k += 1 }
-      val name = template[j..<k]
-      if (safe) {
-        try {
-          sb.append(pyStr(lookup(name)))
-        } catch (e : PyError) {
-          if (!e.exc.cls.isSubtype(pyKeyErrorType)) { throw e }
-          sb.append(template[at..<k])
-        }
-      } else {
-        sb.append(pyStr(lookup(name)))
-      }
-      i = k
-      continue
-    }
-    if (j < template.size and template[j] == '{') {
-      var k = j + 1
-      if (k < template.size and identStart(template[k])) {
-        while (k < template.size and identPart(template[k])) { k += 1 }
-        if (k < template.size and template[k] == '}') {
-          val name = template[(j + 1)..<k]
-          if (safe) {
-            try {
-              sb.append(pyStr(lookup(name)))
-            } catch (e : PyError) {
-              if (!e.exc.cls.isSubtype(pyKeyErrorType)) { throw e }
-              sb.append(template[at..(k)])
-            }
-          } else {
-            sb.append(pyStr(lookup(name)))
-          }
-          i = k + 1
-          continue
-        }
+  fun convertMatch(mo : any?) : any? {
+    val n = __pyGroup(mo, "named")
+    val named = pyTruth(n) ? n : __pyGroup(mo, "braced")
+    if (named != null) {
+      if (!safe) { return pyStr(lookup(named)) }
+      try {
+        return pyStr(lookup(named))
+      } catch (e : PyError) {
+        if (!e.exc.cls.isSubtype(pyKeyErrorType)) { throw e }
+        return pyCallMethodV(mo, "group", [], null)
       }
     }
-    // Neither: an invalid placeholder, named by its line and column.
-    if (safe) {
-      sb.append(delimiter)
-      i = j
-      continue
+    if (__pyGroup(mo, "escaped") != null) { return pyGetAttr(self, "delimiter") }
+    if (__pyGroup(mo, "invalid") != null) {
+      if (safe) { return pyCallMethodV(mo, "group", [], null) }
+      // _invalid: the line and column of where the ill-formed placeholder's group starts.
+      val i = pyIndex(pyCallMethodV(mo, "start", ["invalid"], null))
+      val lines = pyIterable(pyCallMethodV((template as string)[..<i], "splitlines", [true], null))
+      val lineno = lines.isEmpty() ? 1 : lines.size
+      val colno = lines.isEmpty() ? 1 : i - lines[..<(lines.size - 1)].map { (it as string).size }.sum()
+      throw pyValueError("Invalid placeholder in string: line $lineno, col $colno")
     }
-    val before = template[..<at]
-    val line = before.count { it == '\n' } + 1
-    val col = at - (before.lastIndexOf("\n") + 1) + 1
-    throw pyValueError("Invalid placeholder in string: line $line, col $col")
+    throw __pyUnrecognized(self)
   }
-  return sb.toString()
+  val convert = __pyB("convert") { a -> convertMatch(a.pos[0]) }
+  return pyCallMethodV(__pyTemplatePattern(self), "sub", [convert, template], null) as string
 }
 
 // string.Formatter's parse(): (literal, field name, spec, conversion) for each piece, as
@@ -174,7 +160,7 @@ internal lazy val __pyTemplateType : PyType = pyLibClass("Template", "string", [
   "delimiter": "\$",
   "idpattern": "(?a:[_a-z][_a-z0-9]*)",
   "braceidpattern": null,
-  "flags": 2,
+  "flags": null,
   "__init__": pyLibMethod("Template", "__init__") { self, a ->
     pySetAttr(self, "template", a.pos.isNotEmpty() ? a.pos[0] : a.get("template", null))
     null
@@ -186,48 +172,27 @@ internal lazy val __pyTemplateType : PyType = pyLibClass("Template", "string", [
     __pyTemplateSub(self, a.pos.isNotEmpty() ? a.pos[0] : null, a.kw, true)
   },
   "get_identifiers": pyLibMethod("Template", "get_identifiers") { self, a ->
-    val names : open List<any?> = []
-    val template = pyGetAttr(self, "template") as string
-    val delimiter = pyGetAttr(self, "delimiter") as string
-    var i = 0
-    while (i < template.size) {
-      if (template[i..].startsWith(delimiter + delimiter)) { i += delimiter.size * 2; continue }
-      if (template[i..].startsWith(delimiter)) {
-        var j = i + delimiter.size
-        val braced = j < template.size and template[j] == '{'
-        if (braced) { j += 1 }
-        var k = j
-        while (k < template.size and ((template[k] >= 'a' and template[k] <= 'z') or (template[k] >= 'A' and template[k] <= 'Z') or (template[k] >= '0' and template[k] <= '9') or template[k] == '_')) { k += 1 }
-        if (k > j and !(template[j] >= '0' and template[j] <= '9') and (!braced or (k < template.size and template[k] == '}'))) {
-          val name = template[j..<k]
-          if (!(name in names)) { names.add(name) }
-        }
-        i = k
-        continue
+    val ids : open List<any?> = []
+    for mo in pyIterable(pyCallMethodV(__pyTemplatePattern(self), "finditer", [pyGetAttr(self, "template")], null)) {
+      val n = __pyGroup(mo, "named")
+      val named = pyTruth(n) ? n : __pyGroup(mo, "braced")
+      if (named != null) {
+        if (!ids.any { pyEqB(it, named) }) { ids.add(named) }
+      } else if (__pyGroup(mo, "invalid") == null and __pyGroup(mo, "escaped") == null) {
+        throw __pyUnrecognized(self)
       }
-      i += 1
     }
-    pyNewList(names)
+    pyNewList(ids)
   },
   "is_valid": pyLibMethod("Template", "is_valid") { self, a ->
-    try {
-      __pyTemplateSub(self, null, {:}, true)
-      val template = pyGetAttr(self, "template") as string
-      val delimiter = pyGetAttr(self, "delimiter") as string
-      var ok = true
-      var i = 0
-      while (i < template.size) {
-        if (template[i..].startsWith(delimiter + delimiter)) { i += delimiter.size * 2; continue }
-        if (template[i..].startsWith(delimiter)) {
-          val j = i + delimiter.size
-          if (j >= template.size or !(template[j] == '{' or template[j] == '_' or ((template[j] >= 'a' and template[j] <= 'z') or (template[j] >= 'A' and template[j] <= 'Z')))) { ok = false }
-          i = j
-          continue
-        }
-        i += 1
+    var valid = true
+    for mo in pyIterable(pyCallMethodV(__pyTemplatePattern(self), "finditer", [pyGetAttr(self, "template")], null)) {
+      if (__pyGroup(mo, "invalid") != null) { valid = false; break }
+      if (__pyGroup(mo, "named") == null and __pyGroup(mo, "braced") == null and __pyGroup(mo, "escaped") == null) {
+        throw __pyUnrecognized(self)
       }
-      ok
-    } catch (e : PyError) { false }
+    }
+    valid
   }
 })
 

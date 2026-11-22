@@ -473,17 +473,8 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
         if (sp.isEmpty()) { throw pyValueError("empty separator") }
         val out : open List<any?> = []
         if (name == "split") {
-          var start = 0
-          var splits = 0
-          while (true) {
-            if (maxsplit >= 0 and splits >= maxsplit) { break }
-            val i = s.indexOf(sp, start)
-            if (i < 0) { break }
-            out.add(s[start..<i])
-            start = i + sp.size
-            splits += 1
-          }
-          out.add(s[start..])
+          // ww's split, its limit the parts (maxsplit + 1; 0 for none).
+          out.addAll(s.split(sp, maxsplit < 0 or maxsplit >= s.size ? 0 : maxsplit + 1))
         } else {
           var end = s.size
           var splits = 0
@@ -628,8 +619,8 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
       if (width <= s.size) { s } else {
         val pad = width - s.size
         when (name) {
-          "ljust" -> s + (fill as string).repeat(pad)
-          "rjust" -> (fill as string).repeat(pad) + s
+          "ljust" -> s.padEnd(width, (fill as string)[0])
+          "rjust" -> s.padStart(width, (fill as string)[0])
           else -> {
             val left = pad / 2 + (pad & width & 1)
             (fill as string).repeat(left) + s + (fill as string).repeat(pad - left)
@@ -654,14 +645,8 @@ internal fun __pyStrMethod(s : string, name : string, a : PyArgs) : any? {
         PyTuple([s[..<i], sep, s[(i + sep.size)..]])
       }
     }
-    "removeprefix" -> {
-      val x = __pyStrArg(p[0], name)
-      s.startsWith(x) ? s[x.size..] : s
-    }
-    "removesuffix" -> {
-      val x = __pyStrArg(p[0], name)
-      x.isNotEmpty() and s.endsWith(x) ? s[..<(s.size - x.size)] : s
-    }
+    "removeprefix" -> s.removePrefix(__pyStrArg(p[0], name))
+    "removesuffix" -> s.removeSuffix(__pyStrArg(p[0], name))
     "expandtabs" -> {
       val tab = pyIndex(p.isNotEmpty() ? p[0] : a.get("tabsize", 8))
       val sb = StringBuilder()
@@ -1083,16 +1068,7 @@ internal fun __pyTupleMethod(t : PyTuple, name : string, a : PyArgs) : any? {
 internal fun __pyIntMethod(x : any?, name : string, a : PyArgs) : any? {
   val n = pyIndexValue(x)
   return when (name) {
-    "bit_length" -> {
-      val b = pyBig(n).abs()
-      var len = 0
-      var v = b
-      while (v > BigInt.of(0)) {
-        v = v >> 1
-        len += 1
-      }
-      len
-    }
+    "bit_length" -> pyBig(n).abs().bitLength
     "bit_count" -> {
       var v = pyBig(n).abs()
       var c = 0

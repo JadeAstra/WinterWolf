@@ -113,11 +113,15 @@ external fun string.trimMargin(marginPrefix : string = "|") : string
 //   " a  b ".split()      // ["a", "b"]
 external fun string.split() : open List<string>
 // The parts of the text between the places where `delimiter` is, as a new list; an empty
-// delimiter gives each character.
-//   "a,b,,c".split(",")   // ["a", "b", "", "c"]
-external fun string.split(delimiter : string) : open List<string>
-// The parts of the text between the places where the character `delimiter` is, as a new list.
-external fun string.split(delimiter : char) : open List<string>
+// delimiter gives each character. With a `limit` above 0, at most that many parts, the last
+// holding the rest, as Kotlin's split(limit) (Python's maxsplit is limit - 1); an
+// IllegalArgumentException for a limit below 0.
+//   "a,b,,c".split(",")            // ["a", "b", "", "c"]
+//   "a,b,,c".split(",", limit = 2) // ["a", "b,,c"]
+external fun string.split(delimiter : string, limit : int = 0) : open List<string>
+// The parts of the text between the places where the character `delimiter` is, as a new list;
+// at most `limit` parts where it is above 0.
+external fun string.split(delimiter : char, limit : int = 0) : open List<string>
 // The lines of the text without their line ends ("\r\n", "\n", or "\r" alone, as Kotlin's), as a
 // new list. Text that ends in a line end gives an empty last line.
 external fun string.lines() : open List<string>
@@ -630,6 +634,10 @@ external fun int.pow(exponent : Number) : Number
 // The remainder after dividing by `divisor`, with the divisor's sign: (-7).mod(3) is 2, where
 // `-7 % 3` is -1. An ArithmeticException for a divisor of 0.
 external fun int.mod(divisor : int) : int
+// The quotient rounded down, as Kotlin's floorDiv and Python's //: (-7).floorDiv(2) is -4, where
+// `-7 / 2` is -3; with mod, `a == a.floorDiv(b) * b + a.mod(b)`. An ArithmeticException for a
+// divisor of 0, and for int.minValue.floorDiv(-1), which does not fit.
+external fun int.floorDiv(divisor : int) : int
 // The number itself where it lies from `minimumValue` to `maximumValue`, and otherwise the nearer
 // of the two; an IllegalArgumentException where the maximum is the smaller.
 external fun float.coerceIn(minimumValue : float, maximumValue : float) : float

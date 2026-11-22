@@ -98,16 +98,10 @@ internal fun __pySeed(self : any?, a : any?) {
   val t = __pyTwisterOf(self)
   var n : BigInt? = null
   if (a == null) {
-    val b = SecureRandom.bytes(32)
-    var v = BigInt.of(0)
-    for i in 0..<b.size { v = (v << 8) + BigInt.of(b[i].toInt()) }
-    n = v
+    n = BigInt.fromBytes(SecureRandom.bytes(32))
   } else if (a is string or a is Bytes or a is PyByteArray) {
     val raw = a is string ? pyEncode(a as string, "utf-8", "surrogatepass") as Bytes : pyBytesLike(a)!!
-    val joined = raw + Sha512.hash(raw)
-    var v = BigInt.of(0)
-    for i in 0..<joined.size { v = (v << 8) + BigInt.of(joined[i].toInt()) }
-    n = v
+    n = BigInt.fromBytes(raw + Sha512.hash(raw))
   } else if (pyIsInt(a)) {
     n = pyBig(pyIndexValue(a)).abs()
   } else if (a is float) {
@@ -533,20 +527,12 @@ internal fun __pyMakeRandomType() : PyType {
 
 // SystemRandom: random() and getrandbits() from the system's randomness; seed() does nothing.
 internal lazy val __pySystemRandomType : PyType = pyLibClass("SystemRandom", "random", [__pyRandomType], {
-  "random": pyLibMethod("SystemRandom", "random") { self, a ->
-    val b = SecureRandom.bytes(7)
-    var v = 0
-    for i in 0..<7 { v = (v << 8) | b[i].toInt() }
-    (v >>> 3).toFloat() * (1.0 / 9007199254740992.0)
-  },
+  "random": pyLibMethod("SystemRandom", "random") { self, a -> SecureRandom.random() },
   "getrandbits": pyLibMethod("SystemRandom", "getrandbits") { self, a ->
     val k = pyIndex(a.pos[0])
     if (k < 0) { throw pyValueError("number of bits must be non-negative") }
     val n = (k + 7) / 8
-    val b = SecureRandom.bytes(n)
-    var v = BigInt.of(0)
-    for i in 0..<n { v = (v << 8) + BigInt.of(b[i].toInt()) }
-    pyNorm(v >> (n * 8 - k))
+    pyNorm(BigInt.fromBytes(SecureRandom.bytes(n)) >> (n * 8 - k))
   },
   "seed": pyLibMethod("SystemRandom", "seed") { self, a -> null },
   "getstate": pyLibMethod("SystemRandom", "getstate") { self, a -> throw pyError(pyNotImplementedErrorType, "System entropy source does not have state.") },

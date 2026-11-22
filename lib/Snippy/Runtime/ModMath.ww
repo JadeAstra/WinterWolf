@@ -348,16 +348,9 @@ internal fun __pySignBit(x : float) : bool {
 }
 
 // fmod as C's: exact, the sign of x.
-internal fun __pyFmodFloat(x : float, y : float) : float {
-  if (x.isNaN() or y.isNaN()) { return x + y }
-  if (x.isInfinite() or y == 0.0) { return 0.0 / 0.0 }
-  if (y.isInfinite()) { return x }
-  val px = pyFloatExact(Math.abs(x))
-  val py = pyFloatExact(Math.abs(y))
-  val e = px.second < py.second ? px.second : py.second
-  val r = (px.first << (px.second - e)) % (py.first << (py.second - e))
-  return pyCopySign(pyExactToFloat(r, e), x)
-}
+// C's fmod, which CPython's math.fmod is: ww's % of floats (U18), exact, with x's sign; NaN for
+// an infinite x or a zero y, x itself for an infinite y.
+internal fun __pyFmodFloat(x : float, y : float) : float => x % y
 
 // IEEE remainder: x - n*y, n the nearest integer to x/y, ties to even; exact.
 internal fun __pyRemainder(x : float, y : float) : float {

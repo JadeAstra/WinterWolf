@@ -44,6 +44,32 @@ class BigInt {
     }
     // The same, null for text that is not one.
     fun parseOrNull(text : string, radix : int = 10) : BigInt? => __bigParse(text, radix)
+    // The number the bytes spell, the most significant byte first (`bigEndian`) or last, as
+    // Python's int.from_bytes and C#'s BigInteger(bytes, isUnsigned, isBigEndian) read them: not
+    // `signed`, every bit counts; `signed`, two's complement, the top bit the sign, as Java's
+    // BigInteger(bytes). No bytes at all is 0.
+    //   BigInt.fromBytes(Bytes([1, 0]))                  // 256
+    //   BigInt.fromBytes(Bytes([255]), signed = true)    // -1
+    fun fromBytes(bytes : Bytes, bigEndian : bool = true, signed : bool = false) : BigInt {
+      val n = bytes.size
+      if (n == 0) { return zero }
+      val digits : open List<int> = []
+      var held = 0
+      var bits = 0
+      for (k in 0..<n) {
+        held = held | (bytes[bigEndian ? n - 1 - k : k].toInt() << bits)
+        bits += 8
+        if (bits >= 30) {
+          digits.add(held & 0x3FFFFFFF)
+          held = held >> 30
+          bits -= 30
+        }
+      }
+      if (bits > 0) { digits.add(held) }
+      val value = BigInt(1, __bigTrim(digits))
+      val top = bytes[bigEndian ? 0 : n - 1].toInt()
+      return signed and top >= 128 ? value - (one << (8 * n)) : value
+    }
     // 0.
     val zero : BigInt = BigInt(0, [])
     // 1.
@@ -52,6 +78,34 @@ class BigInt {
     val two : BigInt = BigInt(1, [2])
     // 10.
     val ten : BigInt = BigInt(1, [10])
+  }
+
+  // The number as bytes, the most significant first (`bigEndian`) or last, as few as hold it, as
+  // Java's toByteArray and C#'s ToByteArray(isUnsigned, isBigEndian) give them: `signed`, in two's
+  // complement with room for the sign (128 takes two bytes, 0 and 128); not `signed`, every bit
+  // its value, and an ArithmeticException for a negative number. One byte at least: 0 is [0].
+  // BigInt.fromBytes reads them back.
+  //   BigInt.of(256).toBytes()                    // [1, 0]
+  //   BigInt.of(-1).toBytes(signed = true)        // [255]
+  fun toBytes(bigEndian : bool = true, signed : bool = false) : Bytes {
+    if (!signed and sign < 0) { throw ArithmeticException("$this is negative: it has no bytes without a sign") }
+    val size = signed ? bitLength / 8 + 1 : Math.max((bitLength + 7) / 8, 1)
+    val value = sign < 0 ? this + (one << (8 * size)) : this
+    val out = Bytes(size)
+    var held = 0
+    var bits = 0
+    var d = 0
+    for (k in 0..<size) {
+      if (bits < 8 and d < value.mag.size) {
+        held = held | (value.mag[d] << bits)
+        bits += 30
+        d += 1
+      }
+      out[bigEndian ? size - 1 - k : k] = (held & 255).toByte()
+      held = held >> 8
+      bits = Math.max(bits - 8, 0)
+    }
+    return out
   }
 
   // -1, 0 or 1, as the number is below, at or above zero.

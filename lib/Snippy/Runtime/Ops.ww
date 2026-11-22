@@ -102,9 +102,7 @@ internal fun __pyFloorDivInt(a : int, b : int) : any? {
 
 internal fun __pyModInt(a : int, b : int) : any? {
   if (b == 0) { throw pyZeroDivisionError("division by zero") }
-  if (b == -1) { return 0 }
-  val r = a % b
-  return r != 0 and ((r < 0) != (b < 0)) ? r + b : r
+  return a.mod(b)
 }
 
 internal fun __pyBigFloorDiv(a : BigInt, b : BigInt) : any? {
@@ -1357,31 +1355,13 @@ fun pyContains(c : any?, item : any?) : bool {
   }
 }
 
-internal fun __pyComplexProd(a : Complex, b : Complex) : Complex => Complex(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re)
+// Complex products, whole powers and quotients are ww's Complex's, which are CPython's term for
+// term (c_prod, c_powu, and Smith's division in c_quot) (U21); a zero divisor is Python's error.
+internal fun __pyComplexProd(a : Complex, b : Complex) : Complex => a * b
 
-internal fun __pyComplexPowU(x : Complex, n : int) : Complex {
-  var r = Complex(1.0, 0.0)
-  var p = x
-  var mask = 1
-  while (mask > 0 and n >= mask) {
-    if ((n & mask) != 0) { r = __pyComplexProd(r, p) }
-    mask = mask << 1
-    p = __pyComplexProd(p, p)
-  }
-  return r
-}
+internal fun __pyComplexPowU(x : Complex, n : int) : Complex => x.pow(n)
 
-// a / b as CPython divides complex numbers (Smith's way, by the larger part of b).
 internal fun __pyComplexQuot(a : Complex, b : Complex) : Complex {
-  val absRe = Math.abs(b.re)
-  val absIm = Math.abs(b.im)
-  if (absRe >= absIm) {
-    if (absRe == 0.0) { throw pyZeroDivisionError("division by zero") }
-    val ratio = b.im / b.re
-    val denom = b.re + b.im * ratio
-    return Complex((a.re + a.im * ratio) / denom, (a.im - a.re * ratio) / denom)
-  }
-  val ratio = b.re / b.im
-  val denom = b.re * ratio + b.im
-  return Complex((a.re * ratio + a.im) / denom, (a.im * ratio - a.re) / denom)
+  if (b.re == 0.0 and b.im == 0.0) { throw pyZeroDivisionError("division by zero") }
+  return a / b
 }

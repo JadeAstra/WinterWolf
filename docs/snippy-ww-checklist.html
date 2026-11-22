@@ -153,76 +153,114 @@ A second copy of <code>math.fsum</code> (ModMath.ww:640-657) that gives NaN befo
 The lists miss characters (the Ethiopic digits U+1369 to U+1371, most CJK numerals); CPython goes by Numeric_Type. A table made from Unicode's data (or from CPython, as Snippy's case tables are) would be whole.<br>
 <span class="owner">Owner: Snippy session; with W1's data.</span><br>
 <em>Done (0.9.5072, by the ww session at the user's word, "fix S1-S3, S5-S7"):</em> <code>isdecimal</code>, <code>isdigit</code> and <code>isnumeric</code> go by Numeric_Type from the same table (S3); the lists by hand are gone. <code>isalnum</code> is CPython's too: a letter or any of the three.</li>
+<li><span class="id">S8</span>A real minus a complex loses the sign of zero <span class="tag reported">reported</span><br>
+<span class="where">lib/Snippy/Runtime/Ops.ww (mixed int, float and complex arithmetic)</span><br>
+CPython 3.14 does mixed real and complex arithmetic as C11's Annex G does, without making the real a complex first: <code>-1 - 0j</code> is <code>(-1-0j)</code> there, its imaginary part -0.0, so <code>cmath.phase(-1 - 0j)</code> is -π. Snippy makes -1 into -1+0j first and gives <code>(-1+0j)</code> and π; <code>2 - 0j</code> the same. Found while checking U20 (0.9.5074).<br>
+<span class="owner">Owner: Snippy session.</span></li>
+<li><span class="id">S9</span><code>cmath.rect</code> has no special values <span class="tag reported">reported</span><br>
+<span class="where">lib/Snippy/Runtime/ModCmath.ww rect</span><br>
+CPython's rect takes an infinite or NaN modulus or angle from its table of special values: <code>rect(inf, 0.0)</code> is <code>(inf+0j)</code> there, <code>(inf+nanj)</code> in Snippy (before 0.9.5074 too). With W6.<br>
+<span class="owner">Owner: with W6.</span></li>
+<li><span class="id">S10</span>No <code>calendar</code> module <span class="tag reported">reported</span><br>
+<span class="where">lib/Snippy/Runtime/Modules.ww</span><br>
+<code>import calendar</code> is ModuleNotFoundError in Snippy. isleap, monthrange, timegm, weekday and the like are now one line each over ww's LocalDate (U1).<br>
+<span class="owner">Owner: Snippy session.</span></li>
 </ul>
 
 <h2 id="use">2. Snippy could use ww's code now, with the same results</h2>
 <p>Each of these is Snippy writing again what ww has, the results the same. <span class="owner">Owner of all: the Snippy session.</span></p>
 <h3>Dates and times</h3>
 <ul class="check">
-<li><span class="id">U1</span>Leap years, days in a month, dates to ordinals and back, floor division <span class="tag checked">checked</span><br>
-<span class="where">Runtime/ModTime.ww:12-48, 78-79</span> → <code>src/std/time.ww</code>: <code>__monthDays</code> (324), <code>__civilDays</code> and <code>__civilDate</code> (301-321, ordinal = <code>__civilDays(y, m, d) + 719163</code>), <code>__floorDiv</code> (292). Both proleptic Gregorian.</li>
-<li><span class="id">U2</span>The weekday and the day of the year <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModTime.ww:50</span> → <code>LocalDate.dayOfWeek - 1</code>, <code>LocalDate.dayOfYear</code> (<code>src/std/localtime.ww:21-25</code>).</li>
-<li><span class="id">U3</span>The names of days and months; two-digit numbers <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModTime.ww:6-8, 95-99</span> → <code>__dayNames</code>, <code>__monthNames</code> (<code>localtime.ww:179-181</code>), <code>__digits</code> (<code>time.ww:298</code>); for negative years ww's gives "00-5" where Snippy's gives "-05" (only <code>%Y</code>, <code>%C</code> of negative years).</li>
-<li><span class="id">U4</span><code>date.isoformat</code> <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModDatetime.ww:494</span> → <code>__isoDate</code> (<code>localtime.ww:168</code>), years 1 to 9999.</li>
-<li><span class="id">U5</span>The offset of local time for a naive datetime <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModDatetime.ww:866-871, 898-901</span> → the same two passes as <code>LocalDateTime.toInstant</code> (<code>localtime.ww:125-130</code>); only the offset can be shared, as <code>Instant</code> ends at 2262 (D2).</li>
+<li class="done"><span class="id">U1</span>Leap years, days in a month, dates to ordinals and back, floor division <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModTime.ww:12-48, 78-79</span> → <code>src/std/time.ww</code>: <code>__monthDays</code> (324), <code>__civilDays</code> and <code>__civilDate</code> (301-321, ordinal = <code>__civilDays(y, m, d) + 719163</code>), <code>__floorDiv</code> (292). Both proleptic Gregorian.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> ww gained, public, <code>LocalDate.isLeapYear</code>, <code>lengthOfMonth</code> and <code>lengthOfYear</code> (Java's LocalDate names; C#'s DateTime.IsLeapYear and DaysInMonth, chrono's leap_year), <code>epochDays</code> and <code>LocalDate.fromEpochDays</code> (kotlinx-datetime's toEpochDays and fromEpochDays, Java's toEpochDay and ofEpochDay, as ww's own Instant has epochSeconds and fromEpochSeconds; C#'s DayNumber and Python's toordinal count from year 1 instead, 719163 days earlier) and <code>int.floorDiv</code> (Kotlin's floorDiv beside its mod, Java's Math.floorDiv). Snippy's pyIsLeap, pyDaysInMonth, pyYmdToOrd, pyOrdToYmd and the rest are one line each over them; a month past 12 is carried into the years about it, as C's mktime takes it.</li>
+<li class="done"><span class="id">U2</span>The weekday and the day of the year <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModTime.ww:50</span> → <code>LocalDate.dayOfWeek - 1</code>, <code>LocalDate.dayOfYear</code> (<code>src/std/localtime.ww:21-25</code>).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> pyWeekday is <code>LocalDate.dayOfWeek - 1</code>: ww's 1 to 7 is ISO's and Java's DayOfWeek.getValue (Python's weekday() is 0 to 6, its isoweekday() 1 to 7; C#'s DayOfWeek starts at Sunday 0). The day of the year comes from the epoch days.</li>
+<li class="done"><span class="id">U3</span>The names of days and months; two-digit numbers <span class="tag checked">kept, 0.9.5074</span><br>
+<span class="where">Runtime/ModTime.ww:6-8, 95-99</span> → <code>__dayNames</code>, <code>__monthNames</code> (<code>localtime.ww:179-181</code>), <code>__digits</code> (<code>time.ww:298</code>); for negative years ww's gives "00-5" where Snippy's gives "-05" (only <code>%Y</code>, <code>%C</code> of negative years).<br>
+<em>Kept (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> Snippy's two lists stay: strftime names the day by tm_wday as given (<code>time.strftime('%A', (2024, 1, 1, 0, 0, 0, 3, 1, 0))</code> is Thursday whatever the date), so the names go by a number, and ww has them only through <code>LocalDate.format("EEEE")</code> of a whole date (Java's DayOfWeek.getDisplayName and C#'s DateTimeFormatInfo.GetDayName take the number or enum; ww has no such enum by design). The padding keeps its own sign rule for negative years.</li>
+<li class="done"><span class="id">U4</span><code>date.isoformat</code> <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModDatetime.ww:494</span> → <code>__isoDate</code> (<code>localtime.ww:168</code>), years 1 to 9999.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>date.isoformat()</code> is <code>LocalDate.toString()</code>, Java's ISO form, the same as Python's for years 1 to 9999.</li>
+<li class="done"><span class="id">U5</span>The offset of local time for a naive datetime <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModDatetime.ww:866-871, 898-901</span> → the same two passes as <code>LocalDateTime.toInstant</code> (<code>localtime.ww:125-130</code>); only the offset can be shared, as <code>Instant</code> ends at 2262 (D2).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> the offset now comes from public pieces, <code>Instant.fromEpochSeconds(s).toLocalDateTime()</code> and <code>epochDays</code>, not ww's internal <code>__localOffset</code>. Java (ZoneId.systemDefault().rules.getOffset(instant)), kotlinx (TimeZone.currentSystemDefault().offsetAt(instant)) and C# (TimeZoneInfo.Local.GetUtcOffset) have a time zone object for it; ww has none, and this did not need one.</li>
 </ul>
 <h3>Text and bytes</h3>
 <ul class="check">
-<li><span class="id">U6</span><code>removeprefix</code>, <code>removesuffix</code> <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Methods.ww:699-706</span> → <code>string.removePrefix</code>, <code>removeSuffix</code> (<code>src/std/string.ww:84-86</code>).</li>
-<li><span class="id">U7</span><code>ljust</code>, <code>rjust</code> <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Methods.ww:666-681</span> → <code>padEnd</code>, <code>padStart</code> (code points, as CPython counts).</li>
-<li><span class="id">U8</span><code>split(sep)</code> without maxsplit <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Methods.ww:473-485</span> → <code>string.split(delimiter)</code>; <code>"".split(",")</code> is <code>[""]</code> in both.</li>
-<li><span class="id">U9</span><code>int.bit_length</code> <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Methods.ww:1140-1149</span> → <code>BigInt.abs().bitLength</code> (<code>src/std/bigint.ww:63</code>).</li>
-<li><span class="id">U10</span>Hex text: bytes, and numbers to a width <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Bytes.ww:236-241 <code>pyBytesHex</code> (no separator); lib/Snippy/Text/Repr.ww:82-90 <code>pyHex</code>; Runtime/ModRe.ww:55-60 <code>__pyReHex</code></span> → <code>Bytes.toHex()</code> (<code>src/std/base64.ww:97</code>), <code>n.toString(16).padStart(width, '0')</code>.</li>
-<li><span class="id">U11</span><code>bytes.translate</code>, and ASCII <code>upper</code>/<code>lower</code>/<code>swapcase</code> of bytes <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Bytes.ww:525-540, 369-371</span> → <code>Bytes.mapped(table)</code> (<code>builtins.ww:451</code>); deleted bytes still need Snippy's step.</li>
-<li><span class="id">U12</span>Slices of bytes and lists, and inserting many <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Bytes.ww:57-61 <code>pyBytesPart</code>; Runtime/Containers.ww:226-229, 250-259, 339</span> → <code>b[a..&lt;b]</code>, <code>l[a..&lt;b]</code> (copied natively), <code>addAll(index, items)</code>. A slice running backwards is an error in ww and empty in Snippy: keep that check.</li>
-<li><span class="id">U13</span>Latin-1 both ways <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Text.ww:747-748; Runtime/Builtins.ww:292-296 <code>pyBytesText</code>; Runtime/Containers.ww:471-475 <code>pyBytesOfLatin1</code></span> → <code>decodeToString(Charset.latin1)</code>, <code>toBytes(Charset.latin1)</code>.</li>
-<li><span class="id">U14</span>Finding a byte in bytes <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Containers.ww:481</span> → <code>Bytes.contains</code>, <code>Bytes.indexOf</code>, after Snippy's 0-255 check.</li>
+<li class="done"><span class="id">U6</span><code>removeprefix</code>, <code>removesuffix</code> <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Methods.ww:699-706</span> → <code>string.removePrefix</code>, <code>removeSuffix</code> (<code>src/std/string.ww:84-86</code>).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>removePrefix</code> and <code>removeSuffix</code>: Kotlin's names, Python's removeprefix.</li>
+<li class="done"><span class="id">U7</span><code>ljust</code>, <code>rjust</code> <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Methods.ww:666-681</span> → <code>padEnd</code>, <code>padStart</code> (code points, as CPython counts).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>padEnd</code> and <code>padStart</code>: Kotlin's and JavaScript's names (C#'s PadRight and PadLeft, Python's ljust and rjust), counting characters as Python does. center stays Snippy's.</li>
+<li class="done"><span class="id">U8</span><code>split(sep)</code> without maxsplit <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Methods.ww:473-485</span> → <code>string.split(delimiter)</code>; <code>"".split(",")</code> is <code>[""]</code> in both.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> ww's split gained Kotlin's <code>limit</code> (at most that many parts: Python's maxsplit + 1, Java's and C#'s count); rsplit stays Snippy's, as Kotlin and Java have none.</li>
+<li class="done"><span class="id">U9</span><code>int.bit_length</code> <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Methods.ww:1140-1149</span> → <code>BigInt.abs().bitLength</code> (<code>src/std/bigint.ww:63</code>).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>BigInt.abs().bitLength</code> (Java's BigInteger.bitLength, C#'s GetBitLength), where Snippy counted the bits one at a time.</li>
+<li class="done"><span class="id">U10</span>Hex text: bytes, and numbers to a width <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Bytes.ww:236-241 <code>pyBytesHex</code> (no separator); lib/Snippy/Text/Repr.ww:82-90 <code>pyHex</code>; Runtime/ModRe.ww:55-60 <code>__pyReHex</code></span> → <code>Bytes.toHex()</code> (<code>src/std/base64.ww:97</code>), <code>n.toString(16).padStart(width, '0')</code>.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>Bytes.toHex()</code> (Kotlin's toHexString, Java's HexFormat.formatHex, Python's bytes.hex) and <code>n.toString(16).padStart(width, '0')</code>; hex with a separator stays Snippy's.</li>
+<li class="done"><span class="id">U11</span><code>bytes.translate</code>, and ASCII <code>upper</code>/<code>lower</code>/<code>swapcase</code> of bytes <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Bytes.ww:525-540, 369-371</span> → <code>Bytes.mapped(table)</code> (<code>builtins.ww:451</code>); deleted bytes still need Snippy's step.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>Bytes.mapped(table)</code> for translate without deletions, and for bytes' ASCII upper, lower and swapcase as 256-byte tables; translate's deleting stays Snippy's step.</li>
+<li class="done"><span class="id">U12</span>Slices of bytes and lists, and inserting many <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Bytes.ww:57-61 <code>pyBytesPart</code>; Runtime/Containers.ww:226-229, 250-259, 339</span> → <code>b[a..&lt;b]</code>, <code>l[a..&lt;b]</code> (copied natively), <code>addAll(index, items)</code>. A slice running backwards is an error in ww and empty in Snippy: keep that check.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>b[a..&lt;b]</code>, <code>l[a..&lt;b]</code> and <code>addAll(index, items)</code> (Kotlin's addAll(index, elements)). Taking out a run of a list stays a loop: ww's list has no way to remove a range (Kotlin and Java do it with subList(a, b).clear(), C# with RemoveRange, Python with del l[a:b]): a candidate for ww.</li>
+<li class="done"><span class="id">U13</span>Latin-1 both ways <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Text.ww:747-748; Runtime/Builtins.ww:292-296 <code>pyBytesText</code>; Runtime/Containers.ww:471-475 <code>pyBytesOfLatin1</code></span> → <code>decodeToString(Charset.latin1)</code>, <code>toBytes(Charset.latin1)</code>.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>decodeToString(Charset.latin1)</code> and <code>toBytes(Charset.latin1)</code> (Kotlin's decodeToString and toByteArray(charset)).</li>
+<li class="done"><span class="id">U14</span>Finding a byte in bytes <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Containers.ww:481</span> → <code>Bytes.contains</code>, <code>Bytes.indexOf</code>, after Snippy's 0-255 check.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>Bytes.indexOf(byte)</code> after Snippy's 0-255 check (Kotlin's ByteArray.indexOf).</li>
 </ul>
 <h3>Patterns, Template, JSON</h3>
 <ul class="check">
-<li><span class="id">U15</span>textwrap's word splitting, rebuilt by hand <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModTextwrap.ww:26-75</span> → CPython's own <code>wordsep_re</code>, <code>wordsep_simple_re</code> and <code>sentence_end_re</code> compiled with <code>RegexOption.snippy</code> and split with ModRe's own split. Also adds the class attributes a subclass replaces (today a subclass's <code>wordsep_re</code> is not read).</li>
-<li><span class="id">U16</span><code>string.Template</code>'s matching, by hand <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModString.ww:42-117, 188-231</span> → CPython's <code>Template.pattern</code> built from <code>idpattern</code>, <code>braceidpattern</code> and <code>flags</code> and compiled with <code>RegexOption.snippy</code>. Today those three are set (175-177) and never read, so a subclass that changes them gets results other than CPython's.</li>
-<li><span class="id">U17</span>A JSON error's line and column <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModJson.ww:22-41</span> → the same arithmetic as <code>__JsonReader.failure</code>; <code>JsonParseException</code> has <code>position</code>, <code>line</code>, <code>column</code> (<code>src/std/json.ww:107</code>).</li>
+<li class="done"><span class="id">U15</span>textwrap's word splitting, rebuilt by hand <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModTextwrap.ww:26-75</span> → CPython's own <code>wordsep_re</code>, <code>wordsep_simple_re</code> and <code>sentence_end_re</code> compiled with <code>RegexOption.snippy</code> and split with ModRe's own split. Also adds the class attributes a subclass replaces (today a subclass's <code>wordsep_re</code> is not read).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> textwrap splits with CPython 3.14's own wordsep_re, wordsep_simple_re and sentence_end_re, class attributes of TextWrapper as in CPython, compiled by Snippy's re (ww's Regex in its Snippy syntax, which reads 3.14's <code>\z</code>). A subclass that replaces one is now read, and wordsep_re is taken only where break_on_hyphens is True itself, as CPython's <code>is True</code>.</li>
+<li class="done"><span class="id">U16</span><code>string.Template</code>'s matching, by hand <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModString.ww:42-117, 188-231</span> → CPython's <code>Template.pattern</code> built from <code>idpattern</code>, <code>braceidpattern</code> and <code>flags</code> and compiled with <code>RegexOption.snippy</code>. Today those three are set (175-177) and never read, so a subclass that changes them gets results other than CPython's.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> string.Template builds its pattern as CPython 3.14's _compile_pattern does, from the class's delimiter, idpattern and braceidpattern, or the class's own pattern, compiled with its flags (None meaning IGNORECASE) and VERBOSE and kept on the class; substitute, safe_substitute, get_identifiers and is_valid go over its matches as CPython's. A subclass changing any of them now gets CPython's results, and an invalid placeholder's line counts \r as a line end too (it did not).</li>
+<li class="done"><span class="id">U17</span>A JSON error's line and column <span class="tag checked">kept, 0.9.5074</span><br>
+<span class="where">Runtime/ModJson.ww:22-41</span> → the same arithmetic as <code>__JsonReader.failure</code>; <code>JsonParseException</code> has <code>position</code>, <code>line</code>, <code>column</code> (<code>src/std/json.ww:107</code>).<br>
+<em>Kept (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> Snippy's stays: ww works out a line and column only inside its own JSON reader's errors, and has no public function giving them for a position in any text (nor do Kotlin, Java or C#); CPython's arithmetic is three lines.</li>
 </ul>
 <h3>Numbers</h3>
 <ul class="check">
-<li><span class="id">U18</span>An exact fmod of floats from BigInts <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModMath.ww:351-360 <code>__pyFmodFloat</code>; 165 <code>__pySinPi</code></span> → a float's <code>%</code>, which is C's <code>fmod</code> (exact, the sign of x, NaN and infinity as CPython's). Not <code>float.mod</code>, which is floored.</li>
-<li><span class="id">U19</span>The inverse in Fraction's hash <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModFractions.ww:161</span> → <code>BigInt.modInverse(P)</code> in place of <code>modPow(P - 2, P)</code> (P = 2<sup>61</sup> - 1 is prime and <code>d % P != 0</code> is checked first).</li>
-<li><span class="id">U20</span>cmath's <code>phase</code>, <code>polar</code>, <code>rect</code> <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModCmath.ww:233-249</span> → <code>Complex.arg()</code>, <code>Complex.abs()</code>, <code>Complex.fromPolar</code> (<code>src/std/complex.ww:21-24, 76-78</code>). Line 247 is dead code (<code>and false</code>).</li>
-<li><span class="id">U21</span>Complex <code>*</code>, <code>/</code> and whole powers <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Ops.ww:1361-1388</span> → Complex's own <code>*</code>, <code>/</code> (the same Smith's formula, term for term) and <code>pow(int)</code>; keep Snippy's check for a zero divisor and its <code>|n| &lt;= 100</code> rule.</li>
-<li><span class="id">U22</span>An int's <code>%</code> <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Ops.ww:103-108 <code>__pyModInt</code></span> → <code>int.mod</code> (<code>src/stdlib.cpp:877-884</code>), the same to a divisor of -1; check for 0 first.</li>
-<li><span class="id">U23</span><code>SystemRandom.random</code>; bytes to a BigInt <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModRandom.ww:536-541; 102-109, 547-548</span> → <code>SecureRandom.random()</code> (53 bits, as CPython's); <code>BigInt.parse(bytes.toHex(), 16)</code>, but not for no bytes at all (<code>getrandbits(0)</code>).</li>
+<li class="done"><span class="id">U18</span>An exact fmod of floats from BigInts <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModMath.ww:351-360 <code>__pyFmodFloat</code>; 165 <code>__pySinPi</code></span> → a float's <code>%</code>, which is C's <code>fmod</code> (exact, the sign of x, NaN and infinity as CPython's). Not <code>float.mod</code>, which is floored.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> ww's float <code>%</code>, which is C's fmod in every way ww runs code (the VM's, and native code hands % to it): exact, the sign of x, NaN for an infinite x or zero y.</li>
+<li class="done"><span class="id">U19</span>The inverse in Fraction's hash <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModFractions.ww:161</span> → <code>BigInt.modInverse(P)</code> in place of <code>modPow(P - 2, P)</code> (P = 2<sup>61</sup> - 1 is prime and <code>d % P != 0</code> is checked first).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>BigInt.modInverse(P)</code> (Java's name; Python's pow(d, -1, P)).</li>
+<li class="done"><span class="id">U20</span>cmath's <code>phase</code>, <code>polar</code>, <code>rect</code> <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModCmath.ww:233-249</span> → <code>Complex.arg()</code>, <code>Complex.abs()</code>, <code>Complex.fromPolar</code> (<code>src/std/complex.ww:21-24, 76-78</code>). Line 247 is dead code (<code>and false</code>).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>Complex.arg()</code>, <code>abs()</code> and <code>Complex.fromPolar</code> (num-complex's and C++'s arg, norm and polar; C#'s Phase, Magnitude and FromPolarCoordinates; Python's cmath.phase, abs and rect). A zero angle needs no branch of its own: cos(±0) is 1 and sin(±0) is ±0. The dead line is gone.</li>
+<li class="done"><span class="id">U21</span>Complex <code>*</code>, <code>/</code> and whole powers <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Ops.ww:1361-1388</span> → Complex's own <code>*</code>, <code>/</code> (the same Smith's formula, term for term) and <code>pow(int)</code>; keep Snippy's check for a zero divisor and its <code>|n| &lt;= 100</code> rule.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> Complex's <code>*</code>, <code>/</code> and <code>pow(int)</code>, CPython's c_prod, c_quot and c_powu term for term; a zero divisor stays Python's ZeroDivisionError.</li>
+<li class="done"><span class="id">U22</span>An int's <code>%</code> <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Ops.ww:103-108 <code>__pyModInt</code></span> → <code>int.mod</code> (<code>src/stdlib.cpp:877-884</code>), the same to a divisor of -1; check for 0 first.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>int.mod</code> (Kotlin's mod, Java's Math.floorMod, Python's %), after the check for 0.</li>
+<li class="done"><span class="id">U23</span><code>SystemRandom.random</code>; bytes to a BigInt <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModRandom.ww:536-541; 102-109, 547-548</span> → <code>SecureRandom.random()</code> (53 bits, as CPython's); <code>BigInt.parse(bytes.toHex(), 16)</code>, but not for no bytes at all (<code>getrandbits(0)</code>).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>SecureRandom.random()</code>, and the new <code>BigInt.fromBytes</code> (C#'s BigInteger(bytes, isUnsigned, isBigEndian), Java's BigInteger(bytes), Python's int.from_bytes; <code>toBytes</code> beside it, Java's toByteArray) for seeding from text and bytes and for getrandbits.</li>
 </ul>
 <h3>Containers</h3>
 <ul class="check">
-<li><span class="id">U24</span>Sorting <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Builtins.ww:606-657 <code>pySortList</code>, <code>__pyMergeSort</code>; Runtime/ModCollections.ww:38-47</span> → <code>List.sort(comparator)</code>, a stable merge sort that asks <code>less(right, left)</code> once a step, as CPython's <code>ISLT</code>; <code>pySortedBy</code> asks <code>pyLt</code> twice a step and can ask once.</li>
-<li><span class="id">U25</span><code>deque</code>, and asyncio's queues <span class="tag reported">reported</span><br>
-<span class="where">Runtime/ModCollections.ww:247-341 <code>PyDeque</code>; Runtime/Async.ww:585, 602</span> → <code>Deck</code> (<code>src/std/set.ww:199-418</code>): <code>removeAt(0)</code> on a list is slower the longer it is, a Deck's ends are not. <code>insert</code>, <code>rotate</code>, <code>remove</code>, <code>index</code> stay Snippy's (Deck's <code>indexOf</code> compares by ww's <code>==</code>).</li>
-<li><span class="id">U26</span>A range's length and containment; lists filled with one value <span class="tag reported">reported</span><br>
-<span class="where">Runtime/Iter.ww:345-358; Runtime/Set.ww:334-344</span> → <code>Range(start, stop, step).size</code>, <code>.contains</code>; <code>List(n) { x }</code>.</li>
+<li class="done"><span class="id">U24</span>Sorting <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Builtins.ww:606-657 <code>pySortList</code>, <code>__pyMergeSort</code>; Runtime/ModCollections.ww:38-47</span> → <code>List.sort(comparator)</code>, a stable merge sort that asks <code>less(right, left)</code> once a step, as CPython's <code>ISLT</code>; <code>pySortedBy</code> asks <code>pyLt</code> twice a step and can ask once.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> ww's <code>sort</code> with a comparator that asks only whether one goes first (ww's native stable merge sort; CPython's sort asks only &lt;), for list.sort, sorted and most_common. Neither is CPython's timsort, so a __lt__ that counts its calls sees other counts, as before.</li>
+<li class="done"><span class="id">U25</span><code>deque</code>, and asyncio's queues <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/ModCollections.ww:247-341 <code>PyDeque</code>; Runtime/Async.ww:585, 602</span> → <code>Deck</code> (<code>src/std/set.ww:199-418</code>): <code>removeAt(0)</code> on a list is slower the longer it is, a Deck's ends are not. <code>insert</code>, <code>rotate</code>, <code>remove</code>, <code>index</code> stay Snippy's (Deck's <code>indexOf</code> compares by ww's <code>==</code>).<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> deque and asyncio's queues keep their items in a <code>Deck</code>, quick at both ends (ww's name for Kotlin's and Java's ArrayDeque, Rust's VecDeque, C++'s deque, chosen by the user in D183; its members are Kotlin's). Deck gained <code>add(index, item)</code> (Kotlin's ArrayDeque.add(index, element)) for insert; rotate goes the shorter way round, as CPython's.</li>
+<li class="done"><span class="id">U26</span>A range's length and containment; lists filled with one value <span class="tag checked">done, 0.9.5074</span><br>
+<span class="where">Runtime/Iter.ww:345-358; Runtime/Set.ww:334-344</span> → <code>Range(start, stop, step).size</code>, <code>.contains</code>; <code>List(n) { x }</code>.<br>
+<em>Done (0.9.5074, the user: "look at U1 - U26, investigate how other languages do these ... let snippy just use ww's versions"):</em> <code>Range(start, stop, step).size</code> and <code>contains</code> (Python's range is what ww's Range follows) and <code>List(n) { x }</code> (Kotlin's List(size) { init }).</li>
 </ul>
 
 <h2 id="change">3. ww to change: ww's flaws, whose fixes also give Snippy what it needs</h2>

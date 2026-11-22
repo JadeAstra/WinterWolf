@@ -222,11 +222,8 @@ fun pyGetSlice(o : any?, lower : any?, upper : any?, step : any?) : any? => pyGe
 
 internal fun __pySliceList(l : List<any?>, s : PySlice) : open List<any?> {
   val ix = pySliceIndices(s, l.size)
+  if (ix[2] == 1) { return l[ix[0]..<(ix[0] + ix[3])] }
   val out : open List<any?> = []
-  if (ix[2] == 1) {
-    for i in ix[0]..<(ix[0] + ix[3]) { out.add(l[i]) }
-    return out
-  }
   var i = ix[0]
   for n in 0..<ix[3] {
     out.add(l[i])
@@ -249,6 +246,7 @@ internal fun __pySliceStr(str : string, s : PySlice) : string {
 
 internal fun __pySliceBytes(b : Bytes, s : PySlice) : Bytes {
   val ix = pySliceIndices(s, b.size)
+  if (ix[2] == 1) { return b[ix[0]..<(ix[0] + ix[3])] }
   val out = Bytes(ix[3])
   var i = ix[0]
   for n in 0..<ix[3] {
@@ -336,7 +334,7 @@ internal fun __pySetListSlice(l : open List<any?>, s : PySlice, v : any?) {
     val start = ix[0]
     val stop = ix[0] + ix[3]
     for i in 0..<(stop - start) { l.removeAt(start) }
-    for (j, x) in items.withIndex() { l.add(start + j, x) }
+    l.addAll(start, items)
     return
   }
   if (items.size != ix[3]) {
@@ -468,18 +466,13 @@ class PyByteArray(initial : Bytes) : PyIdentified() {
   override fun toString() : string => pyRepr(this)
 }
 
-fun pyBytesOfLatin1(s : string) : any? {
-  val b = Bytes(s.size)
-  for i in 0..<s.size { b[i] = s[i].code.toByte() }
-  return b
-}
+fun pyBytesOfLatin1(s : string) : any? => s.toBytes(Charset.latin1)
 
 fun pyBytesContains(b : Bytes, item : any?) : bool {
   if (pyIsInt(item)) {
     val n = pyIndex(item)
     if (n < 0 or n > 255) { throw pyValueError("byte must be in range(0, 256)") }
-    for i in 0..<b.size { if (b[i] == n) { return true } }
-    return false
+    return b.indexOf(n.toByte()) >= 0
   }
   if (item is Bytes) { return __pyBytesFind(b, item as Bytes, 0) >= 0 }
   throw pyTypeError("a bytes-like object is required, not '${pyTypeName(item)}'")

@@ -231,21 +231,20 @@ fun pyCmathModule() : PyModule {
     if (a.pos.size < 2) { r } else { __pyCquot(r, __pyClog(pyComplexArg(a.pos[1]))) }
   }
   m["phase"] = __pyB("phase") { a ->
-    val z = pyComplexArg(a.pos[0])
-    Math.atan2(z.im, z.re)
+    pyComplexArg(a.pos[0]).arg()
   }
   m["polar"] = __pyB("polar") { a ->
     val z = pyComplexArg(a.pos[0])
-    val r = Math.hypot(z.re, z.im)
+    val r = z.abs()
     if (r.isInfinite() and !z.re.isInfinite() and !z.im.isInfinite()) { throw pyOverflowError("math range error") }
-    PyTuple([r, Math.atan2(z.im, z.re)])
+    PyTuple([r, z.arg()])
   }
   m["rect"] = __pyB("rect") { a ->
     __pyCheckCount("rect", a, 2, 2)
     val r = pyRealArg(a.pos[0])
     val phi = pyRealArg(a.pos[1])
-    if (r < 0.0 and !r.isNaN() and !r.isInfinite() and false) { throw pyValueError("math domain error") }
-    if (phi == 0.0) { Complex(r, r * phi) } else { Complex(r * Math.cos(phi), r * Math.sin(phi)) }
+    // cos(±0) is 1 and sin(±0) is ±0, so a zero angle keeps r and r * phi, as CPython's.
+    Complex.fromPolar(r, phi)
   }
   m["isfinite"] = __pyB("isfinite") { a ->
     val z = pyComplexArg(a.pos[0])
