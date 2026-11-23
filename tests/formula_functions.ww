@@ -1,0 +1,171 @@
+// import Formula, part 2 (the formula plan): Snips' FormulaFunctionsTest and
+// ReferenceMatchesEngineTest, ported, give Snips' answers; then every other function of the
+// library once, as Snips' Compute.kt works it out. Left out, as Snips' own: STYLED, AUTOFILL and
+// GENERATE (a program adds them through the hooks). The cells come from a small sheet of the
+// test's own (sheets are part 3).
+import Formula.*
+
+// Sheets of cells by name ("A1" holds "7" or "=A2 + 1"), each cell worked out once.
+class Book : FormulaContext {
+  val sheets : open Map<string, open Map<string, string>> = {:}
+  val values : open Map<string, FormulaValue> = {:}
+  var current = "T"
+
+  fun put(sheet : string, ref : string, source : string) : Book {
+    if (sheet !in sheets.keys) { sheets[sheet] = {:} }
+    sheets[sheet]!![ref] = source
+    return this
+  }
+
+  fun at(sheet : string, ref : string) : string {
+    val where = CellRef.parseCell(ref)!!
+    return cell(sheet, where.first, where.second).toString()
+  }
+
+  override fun sheet(path : List<string>) : any? => path.isEmpty() ? current : null
+
+  override fun cell(sheet : any, column : int, row : int) : FormulaValue {
+    val ref = CellRef.columnName(column) + (row + 1).toString()
+    if (ref in values.keys) { return values[ref]!! }
+    val source = sheets[sheet as string]?.get(ref)
+    if (source == null) { return EmptyValue }
+    val v = source!!.startsWith("=") ? Formula.evaluate(source!!, this) : Formula.literal(source!!.trim())
+    values[ref] = v
+    return v
+  }
+
+  override fun columns(sheet : any) : int {
+    var most = 0
+    for (ref in sheets[sheet as string]!!.keys) { most = Math.max(most, CellRef.parseCell(ref)!!.first + 1) }
+    return most
+  }
+
+  override fun rows(sheet : any) : int {
+    var most = 0
+    for (ref in sheets[sheet as string]!!.keys) { most = Math.max(most, CellRef.parseCell(ref)!!.second + 1) }
+    return most
+  }
+}
+
+// A formula in a fresh sheet whose column A holds `colA`, as its cell shows it.
+fun ev(formula : string, colA : List<string> = []) : string {
+  val book = Book()
+  for (i in 0..<colA.size) { book.put("T", "A${i + 1}", colA[i]) }
+  book.put("T", "Z1", formula)
+  return book.at("T", "Z1")
+}
+
+// ---- FormulaFunctionsTest ----
+
+// Logical
+print(ev("=IFS(A1>5, \"big\", A1>0, \"small\")", ["3"]), ev("=IFS(A1>5, \"big\", A1>0, \"small\")", ["9"]), ev("=IFS(A1>5, \"big\", A1>0, \"small\")", ["-1"]))
+// expect: small big #N/A
+print(ev("=IFNA(MATCH(99, A1:A3), \"none\")", ["1", "2", "3"]), ev("=IFNA(MATCH(20, A1:A3), \"none\")", ["10", "20", "30"]))
+// expect: none 2
+print(ev("=XOR(A1>0, A2>0)", ["1", "-1"]), ev("=XOR(A1>0, A2>0)", ["1", "1"]), ev("=XOR(A1>0, A2>0)", ["-1", "-1"]))
+// expect: TRUE FALSE FALSE
+print(ev("=ISBLANK(A2)", ["1"]), ev("=ISBLANK(A1)", ["1"]), ev("=ISERROR(1/0)"), ev("=ISERROR(5)"), ev("=ISNUMBER(5)"), ev("=ISNUMBER(\"x\")"), ev("=ISTEXT(\"x\")"), ev("=ISTEXT(5)"))
+// expect: TRUE FALSE TRUE FALSE TRUE FALSE TRUE FALSE
+
+// Lookup
+val hl = Book().put("T", "A1", "a").put("T", "B1", "b").put("T", "C1", "c").put("T", "A2", "1").put("T", "B2", "2").put("T", "C2", "3")
+hl.put("T", "Z1", "=HLOOKUP(\"b\", A1:C2, 2)")
+print(hl.at("T", "Z1"))   // expect: 2
+print(ev("=CHOOSE(2, \"a\", \"b\", \"c\")"), ev("=MATCH(20, A1:A3)", ["10", "20", "30"]), ev("=INDEX(A1:A3, 2)", ["10", "20", "30"]))
+// expect: b 2 20
+
+// Conditional aggregates
+print(ev("=SUMIF(A1:A4, \">2\")", ["1", "2", "3", "4"]), ev("=COUNTIF(A1:A4, \">2\")", ["1", "2", "3", "4"]), ev("=AVERAGEIF(A1:A4, \">2\")", ["1", "2", "3", "4"]))
+// expect: 7 2 3.5
+print(ev("=COUNTA(A1:A3)", ["1", "", "x"]), ev("=COUNTBLANK(A1:A3)", ["1", "", "x"]))
+// expect: 2 1
+
+// Statistics
+print(ev("=MODE(A1:A5)", ["2", "2", "3", "4", "2"]), ev("=MEDIAN(A1:A3)", ["1", "2", "3"]), ev("=MEDIAN(A1:A4)", ["1", "2", "3", "4"]))
+// expect: 2 2 2.5
+print(ev("=VAR(A1:A3)", ["2", "4", "6"]), ev("=STDEV(A1:A3)", ["2", "4", "6"]), ev("=VARP(A1:A2)", ["1", "5"]), ev("=STDEVP(A1:A2)", ["1", "5"]))
+// expect: 4 2 4 2
+print(ev("=RANDBETWEEN(5, 5)"), ev("=IF(AND(RAND() >= 0, RAND() < 1), \"ok\", \"no\")"))
+// expect: 5 ok
+
+// Rounding and sign
+print(ev("=ROUNDUP(3.1, 0)"), ev("=ROUNDUP(-3.1, 0)"), ev("=ROUNDDOWN(3.9, 0)"), ev("=TRUNC(3.9)"), ev("=TRUNC(-3.9)"), ev("=SIGN(-5)"), ev("=SIGN(0)"), ev("=SIGN(3)"))
+// expect: 4 -4 3 3 -3 -1 0 1
+
+// Text
+print(ev("=FIND(\"b\", \"abc\")"), ev("=SUBSTITUTE(\"aaa\", \"a\", \"b\")"), ev("=EXACT(\"a\", \"a\")"), ev("=EXACT(\"a\", \"A\")"), ev("=REPT(\"ab\", 3)"))
+// expect: 2 bbb TRUE FALSE ababab
+print(ev("=MID(\"hello\", 2, 3)"), ev("=LEFT(\"hello\", 2)"), ev("=RIGHT(\"hello\", 2)"), ev("=TRIM(\"  a   b  \")"), ev("=CONCAT(\"a\", \"b\", \"c\")"))
+// expect: ell he lo a b abc
+
+// Dates and times
+print(ev("=YEAR(DATE(2021, 6, 15))"), ev("=MONTH(DATE(2021, 6, 15))"), ev("=DAY(DATE(2021, 6, 15))"), ev("=DAYS(DATE(2020, 1, 10), DATE(2020, 1, 1))"), ev("=WEEKDAY(DATE(2021, 6, 13))"))
+// expect: 2021 6 15 9 1
+print(ev("=IF(TODAY() > 40000, \"ok\", \"no\")"), ev("=ISNUMBER(NOW())"), ev("=YEAR(TODAY())").toInt() >= 2020)
+// expect: ok TRUE true
+
+// ---- ReferenceMatchesEngineTest ----
+
+// Every name and alias the reference offers reaches a function: called with arguments it may
+// well refuse, it says anything but #NAME?.
+val functions = FormulaFunctions()
+val documented : open List<string> = []
+for (info in functions.reference) {
+  documented.add(info.name)
+  documented.addAll(info.aliases)
+}
+val missing = documented.filter { Formula.evaluate("$it(1, 2, 3)").toString().startsWith("#NAME?") }
+print(missing)   // expect: []
+// And every function has an entry, under its name or as an alias.
+print(functions.names.filter { it !in documented })   // expect: []
+print(functions.reference.size, functions.names.size, functions.info("CEILING")!!.name, functions.info("sum")!!.example, functions.info("sum")!!.title)
+// expect: 88 96 ceil SUM(A1:A5) → 42 SUM
+// A program's own function, with its entry; taken away, both go.
+functions.add(FormulaFunctionInfo("damage", "Game", "DAMAGE(hit, armour)", "A hit after armour.")) { a -> a[0].number * (1.0 - a[1].number) }
+print(Formula.evaluate("DAMAGE(100, 0.25)", FormulaContext(functions)), functions.info("Damage")!!.category, functions.reference.size)
+// expect: 75 Game 89
+functions.remove("DAMAGE")
+print(functions.info("damage"), functions.contains("damage"), functions.reference.size)   // expect: null false 88
+
+// ---- The rest, once each, as Snips' Compute.kt works them out ----
+
+fun s(f : string) : string => Formula.evaluate(f).toString()
+
+// Maths
+print(s("PRODUCT(2, 3, [4])"), s("PRODUCT()"), s("ABS(-2)"), s("SQRT(16)"), s("MOD(-1, 3)"), s("POW(2, 10)"), s("POWER(2, 0.5)"), s("EXP(0)"), s("LN(1)"))
+// expect: 24 1 2 4 2 1024 1.4142135623731 1 0
+print(s("LOG(100)"), s("LOG(8, 2)"), s("LOG10(1000)"), s("SIN(0)"), s("COS(0)"), s("TAN(0)"), s("ASIN(1)"), s("ACOS(1)"), s("ATAN(1)"))
+// expect: 2 3 3 0 1 0 1.5707963267949 0 0.785398163397448
+print(s("SIGN(-0.5)"), s("INT(-2.5)"), s("INT(2.5)"), s("ROUND(2.5)"), s("ROUND(-2.5)"), s("ROUND(1.2345, 2)"), s("ROUND(1234, -2)"), s("FLOOR(-2.1)"), s("CEIL(2.1)"), s("CEILING(-2.1)"))
+// expect: -1 -3 2 3 -3 1.23 1200 -3 3 -2
+print(s("ROUNDUP(1.231, 2)"), s("ROUNDDOWN(-1.239, 2)"), s("TRUNC(1234.5, -2)"))
+// expect: 1.24 -1.23 1200
+// Aggregates: text, bools and empty passed over; an error is the result.
+print(s("SUM([1, \"x\", TRUE], 2)"), s("AVG(1, 2)"), s("MEAN([1, 2, 3])"), s("AVERAGE()"), s("MIN()"), s("MAX(3, [7, 1])"), s("COUNT(1, \"a\", [2, 3])"), s("SUM(1, 1/0)"))
+// expect: 3 1.5 2 #DIV/0! 0 7 3 #DIV/0!
+print(s("CLIP(5, 1, 3)"), s("CLAMP(-1, 0, 3)"), s("CLIP(2, 0, 3)"), s("MEDIAN()"), s("MODE()"), s("MODE(1, 2, 2, 3, 3)"), s("VAR(1)"), s("VARP()"), s("STDEV(1, 2, 3, 4)"))
+// expect: 3 0 2 #DIV/0! #N/A 2 #DIV/0! #DIV/0! 1.29099444873581
+// Logical: AND and OR work out only what they take, as the words and and or do.
+print(s("AND(TRUE, 1)"), s("AND(FALSE, 1/0)"), s("AND(1/0, FALSE)"), s("OR(FALSE, 0)"), s("OR(TRUE, 1/0)"), s("AND()"), s("OR()"), s("AND([1, 0])"), s("XOR(TRUE, TRUE, TRUE)"))
+// expect: TRUE FALSE #DIV/0! FALSE TRUE TRUE FALSE FALSE TRUE
+print(s("ISNUMBER(TRUE)"), s("ISBLANK(\"\")"), s("ISTEXT(1/0)"), s("NOT(0)"), s("TRUE()"), s("FALSE()"))
+// expect: TRUE TRUE FALSE TRUE TRUE FALSE
+// Text: characters counted as ww counts them, one to a code point.
+print(s("LEN(\"héllo\")"), s("LEFT(\"hello\")"), s("RIGHT(\"hello\", 9)"), s("MID(\"hello\", 0, 2)"), s("MID(\"hello\", 4, 9)"), s("UPPER(\"aß\")"), s("LOWER(\"ÀB\")"))
+// expect: 5 h hello he lo ASS àb
+print(s("TRIM(\" a \t\n b \")"), s("FIND(\"z\", \"abc\")"), s("FIND(\"a\", \"abca\", 2)"), s("CONCATENATE(1, \"a\", TRUE)"), s("TEXT(1/4)"), s("REPT(\"x\", -1)"), s("LEN(1/0)"))
+// expect: a b #VALUE! 4 1aTRUE 0.25  #DIV/0!
+// Lookups: exact matches, text without case, numbers nearly equal.
+print(s("VLOOKUP(2, [[1, \"a\"], [2, \"b\"]], 2)"), s("VLOOKUP(3, [[1, \"a\"]], 2)"), s("VLOOKUP(1, [[1, \"a\"]], 5)"), s("XLOOKUP(\"B\", [\"a\", \"b\"], [10, 20])"), s("XLOOKUP(9, [1], [2], \"no\")"), s("XLOOKUP(9, [1], [2])"))
+// expect: b #N/A #REF! 20 no #N/A
+print(s("INDEX([[1, 2], [3, 4]], 2)"), s("INDEX([[1, 2], [3, 4]], 2, 1)"), s("INDEX([5, 6], 2)"), s("INDEX([5, 6], 3)"), s("MATCH(\"X\", [\"a\", \"x\"])"), s("MATCH(0.3, [0.1 + 0.2])"))
+// expect: [3, 4] 3 6 #REF! 2 1
+// Conditional aggregates: a criterion is a number or text it equals, or a comparison before a number.
+print(s("SUMIF([\"a\", \"b\", \"a\"], \"a\", [1, 2, 3])"), s("COUNTIF([1, \"x\", 3], \"<>x\")"), s("COUNTIF([1, 2, 3], 2)"), s("COUNTIF([1, 2, 3], \">=2\")"), s("AVERAGEIF([1], \">5\")"), s("COUNTA([1, \"\", \"x\"], 2)"), s("COUNTBLANK([\"\", 1], \"\")"))
+// expect: 4 2 1 2 #DIV/0! 3 2
+// Dates: Excel's serial numbers.
+print(s("DATE(2021, 6, 15)"), s("DATE(1899, 12, 30)"), s("YEAR(44362.9)"), s("DATEVALUE(\"2026-07-10\")"), s("DATEVALUE(\"2026-7-1 and more\")"), s("DATEVALUE(\"July\")"), s("DATEVALUE(\"2026-02-30\")"))
+// expect: 44362 0 2021 46213 46204 #VALUE! #VALUE!
+// Matrices
+print(s("ROWS([[1, 2], [3, 4], [5, 6]])"), s("COLS([[1, 2, 3]])"), s("COLUMNS([1, 2])"), s("TRANSPOSE([[1, 2], [3, 4]])"), s("MMUL([[1, 2]], [[3], [4]])"), s("MATMUL([[1, 2]], [[3, 4]])"), s("ROWS(5)"))
+// expect: 3 3 2 [[1, 3], [2, 4]] [11] #VALUE! #VALUE!

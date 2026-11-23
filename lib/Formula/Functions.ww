@@ -1,20 +1,26 @@
 // ---- Functions (formula plan, parts 1 and 2) ----
 //
 //   val functions = FormulaFunctions()
-//   functions.add("DAMAGE") { args -> args[0].number * (1.0 - args[1].number) }
+//   functions.add(FormulaFunctionInfo("damage", "Game", "DAMAGE(hit, armour)", "A hit after armour.")) { args ->
+//     args[0].number * (1.0 - args[1].number)
+//   }
 //   Formula.evaluate("DAMAGE(100, 0.25)", FormulaContext(functions))   // 75
+//   functions.info("avg")!!.signature                                  // AVERAGE(a, b, …)
 //
 // The functions a formula can call, by name in any case (SUM, sum and Sum are one): the
-// library's, and any a program adds or puts in place of one. A function is given its arguments
-// worked out (an error among them as an ErrorValue), and gives a FormulaValue or a plain value
-// (a number, text, a bool, null for empty, a list for a row or a list of lists for rows). A
+// library's, Snips' own, and any a program adds or puts in place of one. A function is given its
+// arguments worked out (an error among them as an ErrorValue), and gives a FormulaValue or a plain
+// value (a number, text, a bool, null for empty, a list for a row or a list of lists for rows). A
 // result that is not a finite number is #NUM!; a FormulaException it throws is its error; an
-// argument it asks for that is not there is #ERR!.
+// argument it asks for that is not there is #ERR!. Each has an entry in the reference (info,
+// reference), for a program's autocomplete and help.
 class FormulaFunctions {
   private val entries : open Map<string, __FxFunction> = {:}
+  private val infos : open List<FormulaFunctionInfo> = []
 
   init {
     for (f in __fxStandardFunctions) { entries[f.name] = f }
+    infos.addAll(__fxReference)
   }
 
   // Adds `body` as the function `name`, in place of any of that name.
@@ -22,21 +28,55 @@ class FormulaFunctions {
     entries[name.lower()] = __FxFunction(name.lower(), body, null)
   }
 
-  // Takes the function `name` away.
-  fun remove(name : string) { entries.remove(name.lower()) }
+  // Adds `body` as the function `info.name`, in place of any of that name, with `info` its entry
+  // in the reference.
+  fun add(info : FormulaFunctionInfo, body : (List<FormulaValue>) -> any?) {
+    add(info.name, body)
+    infos.removeIf { it.name == info.name.lower() }
+    infos.add(info)
+  }
+
+  // Takes the function `name` away, and its entry.
+  fun remove(name : string) {
+    entries.remove(name.lower())
+    infos.removeIf { it.name == name.lower() }
+  }
 
   // Whether there is a function `name`.
   fun contains(name : string) : bool => name.lower() in entries.keys
 
-  // Every function's name, in lower case, in order.
+  // Every function's name, aliases too, in lower case, in order.
   val names : List<string>
     get() => entries.keys.toList().sorted()
+
+  // The reference entry of the function `name` or of one of its aliases, in any case; null where
+  // it has none.
+  fun info(name : string) : FormulaFunctionInfo? {
+    val n = name.lower()
+    for (i in infos) { if (i.name == n or n in i.aliases) { return i } }
+    return null
+  }
+
+  // The reference: an entry for each function, the library's in Snips' order (by category), a
+  // program's own after them.
+  val reference : List<FormulaFunctionInfo>
+    get() => infos.toList()
 
   fun find(name : string) : __FxFunction? => entries[name.lower()]
 }
 
+// A function's entry in the reference: its name (lower case), the category it is listed under,
+// how it is called (`ROUND(x, digits=0)`), a line saying what it gives, the other names it
+// answers to, and an example where there is one (`SUM(A1:A5) → 42`).
+data FormulaFunctionInfo(val name : string, val category : string, val signature : string, val summary : string,
+                         val aliases : List<string> = [], val example : string? = null) {
+  // The name as a formula writes it: SUM.
+  val title : string
+    get() => name.upper()
+}
+
 // A function: given its arguments worked out (eager), or given them as they are written, to
-// work out only what it takes (lazy: IF, IFS, IFERROR, IFNA, CHOOSE).
+// work out only what it takes (lazy: IF, IFS, IFERROR, IFNA, CHOOSE, AND, OR).
 class __FxFunction(val name : string, val eager : ((List<FormulaValue>) -> any?)?, val lazy : ((List<__FxNode>, __FxEvaluator) -> FormulaValue)?) {
   fun call(arguments : List<FormulaValue>) : FormulaValue {
     try {
@@ -78,6 +118,8 @@ fun __fxAlias(out : open List<__FxFunction>, name : string, of : string) {
   throw IllegalStateException("no function $of for $name")
 }
 
+// ---- Arguments ----
+
 // The numbers among the arguments, matrices' items too; an error among them is thrown. Text,
 // bools and empty are passed over, as Snips' aggregates do.
 fun __fxNumbers(arguments : List<FormulaValue>) : List<float> {
@@ -96,10 +138,35 @@ fun __fxAddNumbers(v : FormulaValue, out : open List<float>) {
   }
 }
 
+// The arguments' truths, matrices' items too, for AND, OR and XOR: empty passed over, an error thrown.
+fun __fxAddTruths(v : FormulaValue, out : open List<bool>) {
+  if (v is MatrixValue) {
+    for (item in (v as MatrixValue).flatten()) { __fxAddTruths(item, out) }
+  } else if (v is ErrorValue) {
+    throw FormulaException(v as ErrorValue)
+  } else if (v != EmptyValue) {
+    out.add(__fxTruth(v))
+  }
+}
+
+// Every value, matrices' items in their place (COUNTA, COUNTBLANK).
+fun __fxItems(arguments : List<FormulaValue>) : List<FormulaValue> {
+  val out : open List<FormulaValue> = []
+  for (a in arguments) { if (a is MatrixValue) { out.addAll((a as MatrixValue).flatten()) } else { out.add(a) } }
+  return out
+}
+
 fun __fxMatrixOf(v : FormulaValue) : MatrixValue {
   if (v is MatrixValue) { return v as MatrixValue }
   throw FormulaException(ErrorValue.value())
 }
+
+// An optional argument's value as a whole number (Kotlin's toInt: toward zero), or `otherwise`.
+fun __fxIntArg(a : List<FormulaValue>, i : int, otherwise : int) : int => a.size > i ? __fxNumber(a[i]).toInt() : otherwise
+
+fun __fxIsEmptyText(v : FormulaValue) : bool => v == EmptyValue or (v is TextValue and (v as TextValue).value == "")
+
+// ---- Numbers ----
 
 // The nearest whole number, halves up (Java's Math.round, without its limit at 2^63).
 fun __fxRoundHalfUp(x : float) : float {
@@ -116,8 +183,7 @@ fun __fxSum(a : List<FormulaValue>) : float {
   return s
 }
 
-fun __fxAverage(a : List<FormulaValue>) : FormulaValue {
-  val xs = __fxNumbers(a)
+fun __fxAverage(xs : List<float>) : FormulaValue {
   if (xs.isEmpty()) { return ErrorValue.divideByZero() }
   var s = 0.0
   for (x in xs) { s += x }
@@ -133,9 +199,19 @@ fun __fxExtreme(a : List<FormulaValue>, largest : bool) : float {
 }
 
 fun __fxRound(a : List<FormulaValue>) : float {
-  val d = a.size > 1 ? __fxNumber(a[1]).toInt() : 0
+  val d = __fxIntArg(a, 1, 0)
   val f = Math.pow(10.0, d.toFloat()).toFloat()
   return __fxRoundHalfAway(__fxNumber(a[0]) * f) / f
+}
+
+// ROUNDUP (away from zero), ROUNDDOWN and TRUNC (toward it), to an optional number of digits.
+fun __fxRoundDirection(a : List<FormulaValue>, up : bool) : float {
+  val x = __fxNumber(a[0])
+  val d = __fxIntArg(a, 1, 0)
+  val f = Math.pow(10.0, d.toFloat()).toFloat()
+  val scaled = x * f
+  val r = up ? (scaled < 0.0 ? __fxFloor(scaled) : scaled.ceil()) : (scaled < 0.0 ? scaled.ceil() : __fxFloor(scaled))
+  return r / f
 }
 
 // MOD takes the divisor's sign, as the % operator does.
@@ -145,12 +221,244 @@ fun __fxMod(a : List<FormulaValue>) : FormulaValue {
   return NumberValue(((__fxNumber(a[0]) % b) + b) % b)
 }
 
+fun __fxMedian(a : List<FormulaValue>) : FormulaValue {
+  val xs = __fxNumbers(a).sorted()
+  if (xs.isEmpty()) { return ErrorValue.divideByZero() }
+  val n = xs.size
+  return NumberValue(n % 2 == 1 ? xs[n / 2] : (xs[n / 2 - 1] + xs[n / 2]) / 2.0)
+}
+
+// The number met most often; of those met as often, the one met first.
+fun __fxMode(a : List<FormulaValue>) : FormulaValue {
+  val xs = __fxNumbers(a)
+  if (xs.isEmpty()) { return ErrorValue.notAvailable() }
+  val counts : open Map<int, int> = {:}
+  val first : open List<float> = []
+  for (x in xs) {
+    val key = x.toBits()
+    if (key !in counts.keys) {
+      counts[key] = 0
+      first.add(x)
+    }
+    counts[key] = counts[key]!! + 1
+  }
+  var best = first[0]
+  for (x in first) { if (counts[x.toBits()]!! > counts[best.toBits()]!!) { best = x } }
+  return NumberValue(best)
+}
+
+fun __fxVariance(xs : List<float>, sample : bool) : FormulaValue {
+  if (xs.size < (sample ? 2 : 1)) { return ErrorValue.divideByZero() }
+  var sum = 0.0
+  for (x in xs) { sum += x }
+  val mean = sum / xs.size.toFloat()
+  var squares = 0.0
+  for (x in xs) { squares += (x - mean) * (x - mean) }
+  return NumberValue(squares / (sample ? xs.size - 1 : xs.size).toFloat())
+}
+
+fun __fxStandardDeviation(xs : List<float>, sample : bool) : FormulaValue {
+  val v = __fxVariance(xs, sample)
+  return v is NumberValue ? NumberValue(Math.sqrt((v as NumberValue).value)) : v
+}
+
+// ---- Text ----
+
+// Runs of whitespace (Java's \s: space, tab, line feed, vertical tab, form feed, return) made one
+// space, the ends trimmed, as Snips' TRIM.
+fun __fxTrim(s : string) : string {
+  val t = s.trim()
+  val sb = StringBuilder()
+  var inRun = false
+  for (c in t) {
+    val space = c == ' ' or c == '\t' or c == '\n' or c == '\u{B}' or c == '\u{C}' or c == '\r'
+    if (space) {
+      if (!inRun) { sb.append(' ') }
+      inRun = true
+    } else {
+      sb.append(c)
+      inRun = false
+    }
+  }
+  return sb.toString()
+}
+
+fun __fxFind(a : List<FormulaValue>) : FormulaValue {
+  val needle = __fxText(a[0])
+  val haystack = __fxText(a[1])
+  var start = a.size > 2 ? __fxNumber(a[2]).toInt() - 1 : 0
+  if (start < 0) { start = 0 }
+  val at = start > haystack.size ? -1 : haystack.indexOf(needle, start)
+  return at < 0 ? ErrorValue.value() : NumberValue((at + 1).toFloat())
+}
+
+fun __fxMid(a : List<FormulaValue>) : string {
+  val s = __fxText(a[0])
+  val start = (__fxNumber(a[1]).toInt() - 1).coerceIn(0, s.size)
+  val n = Math.max(__fxNumber(a[2]).toInt(), 0)
+  return s[start..<Math.min(start + n, s.size)]
+}
+
+// ---- Lookups ----
+
+// Whether a looked-for value and a cell's are the same: as text without case where either is
+// text, else as numbers nearly equal; never where either is an error.
+fun __fxSameValue(a : FormulaValue, b : FormulaValue) : bool {
+  try {
+    if (a is TextValue or b is TextValue) { return a.toString().lower() == b.toString().lower() }
+    return __fxNearlyEqual(__fxNumber(a), __fxNumber(b))
+  } catch (e : FormulaException) {
+    return false
+  }
+}
+
+// VLOOKUP(key, table, column) and HLOOKUP(key, table, row): the first row (column) whose first
+// item is the key, exactly; #N/A where none is, #REF! past the table.
+fun __fxLookup(a : List<FormulaValue>, horizontal : bool) : FormulaValue {
+  val key = a[0]
+  val m = __fxMatrixOf(a[1])
+  val index = __fxNumber(a[2]).toInt() - 1
+  val lines : List<List<FormulaValue>> = horizontal ? List<List<FormulaValue>>(m.columnCount) { j -> m.rows.map { it[j] } } : m.rows
+  for (line in lines) {
+    if (!line.isEmpty() and __fxSameValue(line[0], key)) {
+      return index >= 0 and index < line.size ? line[index] : ErrorValue.ref()
+    }
+  }
+  return ErrorValue.notAvailable()
+}
+
+fun __fxMatch(a : List<FormulaValue>) : FormulaValue {
+  val items = __fxMatrixOf(a[1]).flatten()
+  for (i in 0..<items.size) { if (__fxSameValue(items[i], a[0])) { return NumberValue((i + 1).toFloat()) } }
+  return ErrorValue.notAvailable()
+}
+
+// INDEX(array, row, [column]), from 1; one index into a row or a column, or a whole row.
+fun __fxIndex(a : List<FormulaValue>) : FormulaValue {
+  val m = __fxMatrixOf(a[0])
+  val i = __fxNumber(a[1]).toInt()
+  if (a.size > 2) {
+    val c = __fxNumber(a[2]).toInt()
+    if (i < 1 or i > m.rowCount or c < 1 or c > m.rows[i - 1].size) { return ErrorValue.ref() }
+    return m.rows[i - 1][c - 1]
+  }
+  if (m.rowCount == 1) { return i >= 1 and i <= m.rows[0].size ? m.rows[0][i - 1] : ErrorValue.ref() }
+  if (m.columnCount == 1) { return i >= 1 and i <= m.rowCount ? m.rows[i - 1][0] : ErrorValue.ref() }
+  return i >= 1 and i <= m.rowCount ? MatrixValue([m.rows[i - 1]]) : ErrorValue.ref()
+}
+
+fun __fxXLookup(a : List<FormulaValue>) : FormulaValue {
+  val keys = __fxMatrixOf(a[1]).flatten()
+  val results = __fxMatrixOf(a[2]).flatten()
+  for (i in 0..<keys.size) {
+    if (__fxSameValue(keys[i], a[0])) { return i < results.size ? results[i] : ErrorValue.ref() }
+  }
+  return a.size > 3 ? a[3] : ErrorValue.notAvailable()
+}
+
+// ---- Conditional aggregates ----
+
+// Whether a cell meets a criterion: a number or text it equals (text without case), or a
+// comparison written before a number (">5", "<=3", "<>x").
+fun __fxMeets(cell : FormulaValue, criterion : FormulaValue) : bool {
+  val written = criterion.toString()
+  var op = ""
+  for (o in ["<=", ">=", "<>", "=", "<", ">"]) {
+    if (written.startsWith(o)) {
+      op = o
+      break
+    }
+  }
+  val rest = written[op.size..].trim()
+  val n = __fxJavaDouble(rest)
+  fun equal() : bool {
+    if (n != null) {
+      try {
+        return __fxNearlyEqual(__fxNumber(cell), n!!)
+      } catch (e : FormulaException) {
+        return false
+      }
+    }
+    return cell.toString().lower() == rest.lower()
+  }
+  if (op == "" or op == "=") { return equal() }
+  if (op == "<>") { return !equal() }
+  if (n == null) { return false }
+  try {
+    val c = __fxNumber(cell)
+    return when (op) {
+      "<" -> c < n!!
+      ">" -> c > n!!
+      "<=" -> c <= n!!
+      else -> c >= n!!
+    }
+  } catch (e : FormulaException) {
+    return false
+  }
+}
+
+// SUMIF's and AVERAGEIF's numbers: those of the sum range (the third argument, else the range
+// tested) whose cell in the range tested meets the criterion; what is no number passed over.
+fun __fxMeeting(a : List<FormulaValue>) : List<float> {
+  val range = __fxMatrixOf(a[0]).flatten()
+  val sums = a.size > 2 and a[2] is MatrixValue ? (a[2] as MatrixValue).flatten() : range
+  val out : open List<float> = []
+  for (i in 0..<range.size) {
+    if (__fxMeets(range[i], a[1]) and i < sums.size) {
+      try {
+        out.add(__fxNumber(sums[i]))
+      } catch (e : FormulaException) {
+      }
+    }
+  }
+  return out
+}
+
+// ---- Dates: Excel's serial numbers, days from 1899-12-30 ----
+
+val __fxEpochSerial = 25569   // 1970-01-01
+
+fun __fxSerial(d : LocalDate) : float => (d.epochDays + __fxEpochSerial).toFloat()
+
+fun __fxDateOf(serial : float) : LocalDate => LocalDate.fromEpochDays(serial.toInt() - __fxEpochSerial)
+
+fun __fxNow() : float {
+  val now = LocalDateTime.now()
+  return __fxSerial(now.date) + (now.hour * 3600 + now.minute * 60 + now.second).toFloat() / 86400.0
+}
+
+// A date written as text at its start, as 2026-07-10 (one or two digits for the month and day);
+// #VALUE! for text that is not one, or a day no calendar has.
+fun __fxDateValue(text : string) : FormulaValue {
+  val t = text.trim()
+  fun digits(from : int, least : int, most : int) : int {
+    var i = from
+    while (i < t.size and i - from < most and t[i] >= '0' and t[i] <= '9') { i += 1 }
+    return i - from >= least ? i : -1
+  }
+  val y = digits(0, 4, 4)
+  if (y < 0 or y >= t.size or t[y] != '-') { return ErrorValue.value() }
+  val m = digits(y + 1, 1, 2)
+  if (m < 0 or m >= t.size or t[m] != '-') { return ErrorValue.value() }
+  val d = digits(m + 1, 1, 2)
+  if (d < 0) { return ErrorValue.value() }
+  try {
+    return NumberValue(__fxSerial(LocalDate(t[0..<y].toInt(), t[y + 1..<m].toInt(), t[m + 1..<d].toInt())))
+  } catch (e : IllegalArgumentException) {
+    return ErrorValue.value()
+  }
+}
+
+// ---- Matrices ----
+
 fun __fxTranspose(m : MatrixValue) : MatrixValue {
   if (m.rowCount == 0) { return m }
   val rows : open List<List<FormulaValue>> = []
   for (j in 0 ..< m.columnCount) { rows.add(m.rows.map { it[j] }) }
   return MatrixValue(rows)
 }
+
+// ---- Those that work out only what they take ----
 
 fun __fxIf(nodes : List<__FxNode>, ev : __FxEvaluator) : FormulaValue {
   if (nodes.size >= 2 and __fxTruth(ev.argument(nodes[0]))) { return ev.argument(nodes[1]) }
@@ -182,39 +490,152 @@ fun __fxChoose(nodes : List<__FxNode>, ev : __FxEvaluator) : FormulaValue {
   return ev.argument(nodes[i])
 }
 
+// AND and OR, as the words and and or: the arguments worked out in turn until the answer is
+// known (AND(FALSE, 1/0) is FALSE), matrices' items each counted, empty passed over.
+fun __fxAndOr(nodes : List<__FxNode>, ev : __FxEvaluator, isAnd : bool) : FormulaValue {
+  for (node in nodes) {
+    val truths : open List<bool> = []
+    __fxAddTruths(ev.argument(node), truths)
+    for (t in truths) { if (t != isAnd) { return BoolValue(!isAnd) } }
+  }
+  return BoolValue(isAnd)
+}
+
+// ---- The library ----
+
 // The library's functions, made once; each FormulaFunctions starts from them.
 val __fxStandardFunctions : List<__FxFunction> = __fxStandard()
 
-// The library's functions. Part 1 has those its tests ask for; part 2 the rest of Snips'.
+// The library's functions: Snips' (its Compute.kt), but for its own STYLED, AUTOFILL and
+// GENERATE, which a program adds through the hooks.
 fun __fxStandard() : List<__FxFunction> {
   val out : open List<__FxFunction> = []
-  // ---- Logic (IF and its kind work out only what they take) ----
+  // ---- Logic (IF and its kind, AND and OR, work out only what they take) ----
   out.add(__fxLazy("if") { nodes, ev -> __fxIf(nodes, ev) })
   out.add(__fxLazy("ifs") { nodes, ev -> __fxIfs(nodes, ev) })
   out.add(__fxLazy("iferror") { nodes, ev -> __fxIfError(nodes, ev, false) })
   out.add(__fxLazy("ifna") { nodes, ev -> __fxIfError(nodes, ev, true) })
   out.add(__fxLazy("choose") { nodes, ev -> __fxChoose(nodes, ev) })
+  out.add(__fxLazy("and") { nodes, ev -> __fxAndOr(nodes, ev, true) })
+  out.add(__fxLazy("or") { nodes, ev -> __fxAndOr(nodes, ev, false) })
+  out.add(__fxEager("xor") { a ->
+    val truths : open List<bool> = []
+    for (v in a) { __fxAddTruths(v, truths) }
+    truths.count { it } % 2 == 1
+  })
   out.add(__fxEager("true") { a -> true })
   out.add(__fxEager("false") { a -> false })
   out.add(__fxEager("not") { a -> !__fxTruth(a[0]) })
+  out.add(__fxEager("isblank") { a -> __fxIsEmptyText(a[0]) })
   out.add(__fxEager("iserror") { a -> a[0] is ErrorValue })
+  out.add(__fxEager("isnumber") { a -> a[0] is NumberValue or a[0] is BoolValue })
+  out.add(__fxEager("istext") { a -> a[0] is TextValue })
   // ---- Maths ----
   out.add(__fxEager("sum") { a -> __fxSum(a) })
-  out.add(__fxEager("average") { a -> __fxAverage(a) })
+  out.add(__fxEager("product") { a ->
+    var p = 1.0
+    for (x in __fxNumbers(a)) { p *= x }
+    p
+  })
+  out.add(__fxEager("abs") { a -> Math.abs(__fxNumber(a[0])) })
+  out.add(__fxEager("sqrt") { a -> Math.sqrt(__fxNumber(a[0])) })
+  out.add(__fxEager("mod") { a -> __fxMod(a) })
+  out.add(__fxEager("power") { a -> Math.pow(__fxNumber(a[0]), __fxNumber(a[1])) })
+  __fxAlias(out, "pow", "power")
+  out.add(__fxEager("exp") { a -> Math.exp(__fxNumber(a[0])) })
+  out.add(__fxEager("ln") { a -> Math.ln(__fxNumber(a[0])) })
+  out.add(__fxEager("log") { a -> a.size > 1 ? Math.ln(__fxNumber(a[0])) / Math.ln(__fxNumber(a[1])) : Math.log10(__fxNumber(a[0])) })
+  out.add(__fxEager("log10") { a -> Math.log10(__fxNumber(a[0])) })
+  out.add(__fxEager("sin") { a -> Math.sin(__fxNumber(a[0])) })
+  out.add(__fxEager("cos") { a -> Math.cos(__fxNumber(a[0])) })
+  out.add(__fxEager("tan") { a -> Math.tan(__fxNumber(a[0])) })
+  out.add(__fxEager("asin") { a -> Math.asin(__fxNumber(a[0])) })
+  out.add(__fxEager("acos") { a -> Math.acos(__fxNumber(a[0])) })
+  out.add(__fxEager("atan") { a -> Math.atan(__fxNumber(a[0])) })
+  out.add(__fxEager("sign") { a -> Math.sign(__fxNumber(a[0])) })
+  out.add(__fxEager("int") { a -> __fxFloor(__fxNumber(a[0])) })
+  // ---- Rounding ----
+  out.add(__fxEager("round") { a -> __fxRound(a) })
+  out.add(__fxEager("roundup") { a -> __fxRoundDirection(a, true) })
+  out.add(__fxEager("rounddown") { a -> __fxRoundDirection(a, false) })
+  out.add(__fxEager("trunc") { a -> __fxRoundDirection(a, false) })
+  out.add(__fxEager("floor") { a -> __fxFloor(__fxNumber(a[0])) })
+  out.add(__fxEager("ceil") { a -> __fxNumber(a[0]).ceil() })
+  __fxAlias(out, "ceiling", "ceil")
+  // ---- Aggregates ----
+  out.add(__fxEager("average") { a -> __fxAverage(__fxNumbers(a)) })
   __fxAlias(out, "avg", "average")
   __fxAlias(out, "mean", "average")
   out.add(__fxEager("min") { a -> __fxExtreme(a, false) })
   out.add(__fxEager("max") { a -> __fxExtreme(a, true) })
   out.add(__fxEager("count") { a -> __fxNumbers(a).size.toFloat() })
-  out.add(__fxEager("sqrt") { a -> Math.sqrt(__fxNumber(a[0])) })
-  out.add(__fxEager("exp") { a -> Math.exp(__fxNumber(a[0])) })
-  out.add(__fxEager("ln") { a -> Math.ln(__fxNumber(a[0])) })
-  out.add(__fxEager("sin") { a -> Math.sin(__fxNumber(a[0])) })
-  out.add(__fxEager("cos") { a -> Math.cos(__fxNumber(a[0])) })
-  out.add(__fxEager("round") { a -> __fxRound(a) })
-  out.add(__fxEager("mod") { a -> __fxMod(a) })
-  out.add(__fxEager("power") { a -> Math.pow(__fxNumber(a[0]), __fxNumber(a[1])) })
-  __fxAlias(out, "pow", "power")
+  out.add(__fxEager("counta") { a -> __fxItems(a).count { !__fxIsEmptyText(it) }.toFloat() })
+  out.add(__fxEager("countblank") { a -> __fxItems(a).count { __fxIsEmptyText(it) }.toFloat() })
+  out.add(__fxEager("median") { a -> __fxMedian(a) })
+  out.add(__fxEager("mode") { a -> __fxMode(a) })
+  out.add(__fxEager("clip") { a ->
+    val x = __fxNumber(a[0])
+    val lo = __fxNumber(a[1])
+    val hi = __fxNumber(a[2])
+    x < lo ? lo : x > hi ? hi : x
+  })
+  __fxAlias(out, "clamp", "clip")
+  // ---- Statistics ----
+  out.add(__fxEager("var") { a -> __fxVariance(__fxNumbers(a), true) })
+  out.add(__fxEager("varp") { a -> __fxVariance(__fxNumbers(a), false) })
+  out.add(__fxEager("stdev") { a -> __fxStandardDeviation(__fxNumbers(a), true) })
+  out.add(__fxEager("stdevp") { a -> __fxStandardDeviation(__fxNumbers(a), false) })
+  out.add(__fxEager("rand") { a -> Math.random() })
+  out.add(__fxEager("randbetween") { a ->
+    val lo = __fxNumber(a[0]).toInt()
+    val hi = __fxNumber(a[1]).toInt()
+    (lo + (Math.random() * (hi - lo + 1).toFloat()).toInt()).toFloat()
+  })
+  // ---- Text ----
+  out.add(__fxEager("len") { a -> __fxText(a[0]).size.toFloat() })
+  out.add(__fxEager("left") { a ->
+    val s = __fxText(a[0])
+    s[0..<__fxIntArg(a, 1, 1).coerceIn(0, s.size)]
+  })
+  out.add(__fxEager("right") { a ->
+    val s = __fxText(a[0])
+    s[(s.size - __fxIntArg(a, 1, 1).coerceIn(0, s.size))..]
+  })
+  out.add(__fxEager("mid") { a -> __fxMid(a) })
+  out.add(__fxEager("upper") { a -> __fxText(a[0]).upper() })
+  out.add(__fxEager("lower") { a -> __fxText(a[0]).lower() })
+  out.add(__fxEager("trim") { a -> __fxTrim(__fxText(a[0])) })
+  out.add(__fxEager("concat") { a -> a.map { __fxText(it) }.join("") })
+  __fxAlias(out, "concatenate", "concat")
+  out.add(__fxEager("find") { a -> __fxFind(a) })
+  out.add(__fxEager("substitute") { a -> __fxText(a[0]).replace(__fxText(a[1]), __fxText(a[2])) })
+  out.add(__fxEager("text") { a -> __fxText(a[0]) })
+  out.add(__fxEager("rept") { a -> __fxText(a[0]).repeat(Math.max(__fxNumber(a[1]).toInt(), 0)) })
+  out.add(__fxEager("exact") { a -> __fxText(a[0]) == __fxText(a[1]) })
+  // ---- Lookups ----
+  out.add(__fxEager("vlookup") { a -> __fxLookup(a, false) })
+  out.add(__fxEager("hlookup") { a -> __fxLookup(a, true) })
+  out.add(__fxEager("xlookup") { a -> __fxXLookup(a) })
+  out.add(__fxEager("match") { a -> __fxMatch(a) })
+  out.add(__fxEager("index") { a -> __fxIndex(a) })
+  // ---- Conditional aggregates ----
+  out.add(__fxEager("sumif") { a ->
+    var s = 0.0
+    for (x in __fxMeeting(a)) { s += x }
+    s
+  })
+  out.add(__fxEager("countif") { a -> __fxMatrixOf(a[0]).flatten().count { __fxMeets(it, a[1]) }.toFloat() })
+  out.add(__fxEager("averageif") { a -> __fxAverage(__fxMeeting(a)) })
+  // ---- Dates and times ----
+  out.add(__fxEager("today") { a -> __fxSerial(LocalDate.now()) })
+  out.add(__fxEager("now") { a -> __fxNow() })
+  out.add(__fxEager("date") { a -> __fxSerial(LocalDate(__fxNumber(a[0]).toInt(), __fxNumber(a[1]).toInt(), __fxNumber(a[2]).toInt())) })
+  out.add(__fxEager("year") { a -> __fxDateOf(__fxNumber(a[0])).year.toFloat() })
+  out.add(__fxEager("month") { a -> __fxDateOf(__fxNumber(a[0])).month.toFloat() })
+  out.add(__fxEager("day") { a -> __fxDateOf(__fxNumber(a[0])).dayOfMonth.toFloat() })
+  out.add(__fxEager("weekday") { a -> (__fxDateOf(__fxNumber(a[0])).dayOfWeek % 7 + 1).toFloat() })
+  out.add(__fxEager("days") { a -> __fxNumber(a[0]) - __fxNumber(a[1]) })
+  out.add(__fxEager("datevalue") { a -> __fxDateValue(__fxText(a[0])) })
   // ---- Matrices ----
   out.add(__fxEager("rows") { a -> __fxMatrixOf(a[0]).rowCount.toFloat() })
   out.add(__fxEager("cols") { a -> __fxMatrixOf(a[0]).columnCount.toFloat() })
@@ -224,3 +645,108 @@ fun __fxStandard() : List<__FxFunction> {
   __fxAlias(out, "matmul", "mmul")
   return out
 }
+
+// ---- The reference (Snips' FormulaReference, but for its own STYLED, AUTOFILL and GENERATE) ----
+
+fun __fxInfo(name : string, category : string, signature : string, summary : string, aliases : List<string> = [],
+             example : string? = null) : FormulaFunctionInfo => FormulaFunctionInfo(name, category, signature, summary, aliases, example)
+
+val __fxReference : List<FormulaFunctionInfo> = [
+  // Maths
+  __fxInfo("sum", "Math", "SUM(a, b, …)", "The total of the numbers (ranges are flattened).", [], "SUM(A1:A5) → 42"),
+  __fxInfo("product", "Math", "PRODUCT(a, b, …)", "The product of the numbers."),
+  __fxInfo("abs", "Math", "ABS(x)", "The magnitude of a number (drops the sign)."),
+  __fxInfo("sqrt", "Math", "SQRT(x)", "The square root of x."),
+  __fxInfo("mod", "Math", "MOD(x, divisor)", "The remainder of x divided by the divisor."),
+  __fxInfo("pow", "Math", "POW(x, y)", "x raised to the power y.", ["power"]),
+  __fxInfo("exp", "Math", "EXP(x)", "e raised to the power x."),
+  __fxInfo("ln", "Math", "LN(x)", "The natural logarithm of x."),
+  __fxInfo("log", "Math", "LOG(x, base=10)", "The logarithm of x (base 10, or to a given base)."),
+  __fxInfo("log10", "Math", "LOG10(x)", "The base-10 logarithm of x."),
+  __fxInfo("sin", "Math", "SIN(x)", "The sine of x (radians)."),
+  __fxInfo("cos", "Math", "COS(x)", "The cosine of x (radians)."),
+  __fxInfo("tan", "Math", "TAN(x)", "The tangent of x (radians)."),
+  __fxInfo("asin", "Math", "ASIN(x)", "The arcsine of x, in radians."),
+  __fxInfo("acos", "Math", "ACOS(x)", "The arccosine of x, in radians."),
+  __fxInfo("atan", "Math", "ATAN(x)", "The arctangent of x, in radians."),
+  __fxInfo("sign", "Math", "SIGN(x)", "-1, 0 or 1 according to the sign of x."),
+  __fxInfo("int", "Math", "INT(x)", "x rounded down to the nearest integer."),
+  // Rounding
+  __fxInfo("round", "Rounding", "ROUND(x, digits=0)", "x rounded to the given number of decimal places."),
+  __fxInfo("roundup", "Rounding", "ROUNDUP(x, digits=0)", "x rounded away from zero."),
+  __fxInfo("rounddown", "Rounding", "ROUNDDOWN(x, digits=0)", "x rounded toward zero."),
+  __fxInfo("trunc", "Rounding", "TRUNC(x, digits=0)", "x truncated toward zero (drops the fraction)."),
+  __fxInfo("floor", "Rounding", "FLOOR(x)", "The largest integer not greater than x."),
+  __fxInfo("ceil", "Rounding", "CEIL(x)", "The smallest integer not less than x.", ["ceiling"]),
+  // Aggregates
+  __fxInfo("average", "Aggregates", "AVERAGE(a, b, …)", "The mean of the numbers.", ["avg", "mean"]),
+  __fxInfo("min", "Aggregates", "MIN(a, b, …)", "The smallest of the numbers."),
+  __fxInfo("max", "Aggregates", "MAX(a, b, …)", "The largest of the numbers."),
+  __fxInfo("count", "Aggregates", "COUNT(a, b, …)", "How many of the values are numbers."),
+  __fxInfo("counta", "Aggregates", "COUNTA(a, b, …)", "How many of the values are non-empty."),
+  __fxInfo("countblank", "Aggregates", "COUNTBLANK(a, b, …)", "How many of the values are empty."),
+  __fxInfo("median", "Aggregates", "MEDIAN(a, b, …)", "The middle value of the numbers."),
+  __fxInfo("mode", "Aggregates", "MODE(a, b, …)", "The most frequent of the numbers."),
+  __fxInfo("clip", "Aggregates", "CLIP(x, lo, hi)", "x limited to the range lo..hi.", ["clamp"]),
+  // Statistics
+  __fxInfo("var", "Statistics", "VAR(a, b, …)", "The sample variance of the numbers."),
+  __fxInfo("varp", "Statistics", "VARP(a, b, …)", "The population variance of the numbers."),
+  __fxInfo("stdev", "Statistics", "STDEV(a, b, …)", "The sample standard deviation."),
+  __fxInfo("stdevp", "Statistics", "STDEVP(a, b, …)", "The population standard deviation."),
+  __fxInfo("rand", "Statistics", "RAND()", "A random number in [0, 1)."),
+  __fxInfo("randbetween", "Statistics", "RANDBETWEEN(lo, hi)", "A random integer between lo and hi, inclusive."),
+  // Logical
+  __fxInfo("if", "Logical", "IF(test, then, else)", "`then` when the test is true, otherwise `else`.", [], "IF(A1 > 10, \"big\", \"small\")"),
+  __fxInfo("ifs", "Logical", "IFS(test1, val1, test2, val2, …)", "The value for the first true test."),
+  __fxInfo("iferror", "Logical", "IFERROR(value, fallback)", "The value, or the fallback if it is an error."),
+  __fxInfo("ifna", "Logical", "IFNA(value, fallback)", "The value, or the fallback if it is #N/A."),
+  __fxInfo("and", "Logical", "AND(a, b, …)", "True when every argument is true."),
+  __fxInfo("or", "Logical", "OR(a, b, …)", "True when any argument is true."),
+  __fxInfo("not", "Logical", "NOT(x)", "The logical opposite of x."),
+  __fxInfo("xor", "Logical", "XOR(a, b, …)", "True when an odd number of arguments are true."),
+  __fxInfo("true", "Logical", "TRUE()", "The boolean true value."),
+  __fxInfo("false", "Logical", "FALSE()", "The boolean false value."),
+  __fxInfo("isblank", "Logical", "ISBLANK(x)", "True when x is empty."),
+  __fxInfo("iserror", "Logical", "ISERROR(x)", "True when x is an error value."),
+  __fxInfo("isnumber", "Logical", "ISNUMBER(x)", "True when x is a number."),
+  __fxInfo("istext", "Logical", "ISTEXT(x)", "True when x is text."),
+  // Text
+  __fxInfo("len", "Text", "LEN(text)", "The number of characters in the text."),
+  __fxInfo("left", "Text", "LEFT(text, n=1)", "The first n characters of the text."),
+  __fxInfo("right", "Text", "RIGHT(text, n=1)", "The last n characters of the text."),
+  __fxInfo("mid", "Text", "MID(text, start, n)", "n characters of the text starting at position `start` (1-based)."),
+  __fxInfo("upper", "Text", "UPPER(text)", "The text in upper case."),
+  __fxInfo("lower", "Text", "LOWER(text)", "The text in lower case."),
+  __fxInfo("trim", "Text", "TRIM(text)", "The text with runs of whitespace collapsed to single spaces."),
+  __fxInfo("concat", "Text", "CONCAT(a, b, …)", "The arguments joined into one string.", ["concatenate"]),
+  __fxInfo("find", "Text", "FIND(needle, haystack, start=1)", "The 1-based position of `needle` in `haystack`."),
+  __fxInfo("substitute", "Text", "SUBSTITUTE(text, old, new)", "The text with every `old` replaced by `new`."),
+  __fxInfo("text", "Text", "TEXT(value)", "The value as a string."),
+  __fxInfo("rept", "Text", "REPT(text, n)", "The text repeated n times."),
+  __fxInfo("exact", "Text", "EXACT(a, b)", "True when the two strings are exactly equal."),
+  // Lookup
+  __fxInfo("vlookup", "Lookup", "VLOOKUP(key, table, colIndex)", "Find `key` in the first column; return that row's colIndex.", [], "VLOOKUP(\"apple\", A1:C9, 3)"),
+  __fxInfo("hlookup", "Lookup", "HLOOKUP(key, table, rowIndex)", "Find `key` in the first row; return that column's rowIndex."),
+  __fxInfo("xlookup", "Lookup", "XLOOKUP(key, lookup, result, ifMissing)", "Find `key` in `lookup`; return the aligned `result`."),
+  __fxInfo("match", "Lookup", "MATCH(value, range)", "The 1-based position of the value within the range."),
+  __fxInfo("index", "Lookup", "INDEX(range, row, col)", "The cell of the range at the given row and column."),
+  __fxInfo("choose", "Lookup", "CHOOSE(n, a, b, …)", "The nth argument (1-based)."),
+  // Conditional aggregates
+  __fxInfo("sumif", "Conditional aggregates", "SUMIF(range, criterion)", "The total of the range's cells that meet the criterion.", [], "SUMIF(A1:A9, \">100\")"),
+  __fxInfo("countif", "Conditional aggregates", "COUNTIF(range, criterion)", "How many of the range's cells meet the criterion."),
+  __fxInfo("averageif", "Conditional aggregates", "AVERAGEIF(range, criterion)", "The mean of the range's cells that meet the criterion."),
+  // Date & time (Excel serial numbers)
+  __fxInfo("today", "Date & time", "TODAY()", "Today's date as a serial number."),
+  __fxInfo("now", "Date & time", "NOW()", "The current date and time as a serial number."),
+  __fxInfo("date", "Date & time", "DATE(year, month, day)", "The serial number for a calendar date."),
+  __fxInfo("year", "Date & time", "YEAR(serial)", "The year of a date."),
+  __fxInfo("month", "Date & time", "MONTH(serial)", "The month of a date (1–12)."),
+  __fxInfo("day", "Date & time", "DAY(serial)", "The day of the month of a date."),
+  __fxInfo("weekday", "Date & time", "WEEKDAY(serial)", "The day of the week (1 = Sunday)."),
+  __fxInfo("datevalue", "Date & time", "DATEVALUE(text)", "The serial number of a date written as text, as 2026-07-10.", [], "TODAY() - DATEVALUE(created)"),
+  __fxInfo("days", "Date & time", "DAYS(end, start)", "The number of days between two dates."),
+  // Arrays & matrices
+  __fxInfo("rows", "Arrays & matrices", "ROWS(range)", "The number of rows in a range."),
+  __fxInfo("cols", "Arrays & matrices", "COLS(range)", "The number of columns in a range.", ["columns"]),
+  __fxInfo("transpose", "Arrays & matrices", "TRANSPOSE(range)", "The range flipped over its diagonal (rows become columns)."),
+  __fxInfo("mmul", "Arrays & matrices", "MMUL(a, b)", "The matrix product of two ranges.", ["matmul"])]
