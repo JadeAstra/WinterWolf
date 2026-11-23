@@ -3,9 +3,10 @@ import Snippy.Text.*
 // localtime, and strftime as glibc's (which Linux's CPython hands it to) and strptime as CPython's
 // _strptime, both of which datetime uses too.
 
-internal val __pyDayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-internal val __pyMonthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
-  "October", "November", "December"]
+// The names of the days (Monday 0, as tm_wday counts) and months, English as C's locale and
+// CPython's time give them: ww's LocalDate.dayName and monthName (U3).
+internal val __pyDayNames : List<string> = (1..7).map { LocalDate.dayName(it) }
+internal val __pyMonthNames : List<string> = (1..12).map { LocalDate.monthName(it) }
 
 // ---- Calendar arithmetic (proleptic Gregorian), as datetime's: ww's LocalDate (U1, U2) ----
 // Python's ordinal 1 is January 1 of year 1; ww's epoch days count from 1970-01-01, 719163 later.
@@ -69,11 +70,10 @@ fun pyTmFromSeconds(secs : int, offset : int, zone : string?) : PyTm {
   return PyTm(ymd[0], ymd[1], ymd[2], ofDay / 3600, ofDay / 60 % 60, ofDay % 60, pyWeekday(ymd[0], ymd[1], ymd[2]), yday, offset == 0 and zone == "UTC" ? 0 : 0, zone, offset)
 }
 
-internal fun __pyPadNum(n : int, width : int, pad : char) : string {
-  val s = Math.abs(n).toString()
-  val body = s.size >= width ? s : pad.toString().repeat(width - s.size) + s
-  return n < 0 ? "-" + body : body
-}
+// A number in `width` places, `pad` before it, its sign before the pad (-05, as glibc's strftime
+// writes a negative year): ww's padStart on the size alone (U3).
+internal fun __pyPadNum(n : int, width : int, pad : char) : string =>
+  (n < 0 ? "-" : "") + Math.abs(n).toString().padStart(width, pad)
 
 // strftime as glibc's in the C locale: %a %A %b %B %c %C %d %D %e %F %g %G %h %H %I %j %k %l %m %M
 // %n %p %P %r %R %s %S %t %T %u %U %V %w %W %x %X %y %Y %z %Z %%; datetime adds %f before.
@@ -88,10 +88,10 @@ fun pyStrftime(fmt : string, t : PyTm) : string {
     val d = fmt[i + 1]
     i += 2
     when (d) {
-      'a' -> sb.append(__pyDayNames[t.wday][..<3])
-      'A' -> sb.append(__pyDayNames[t.wday])
-      'b', 'h' -> sb.append(__pyMonthNames[t.mon - 1][..<3])
-      'B' -> sb.append(__pyMonthNames[t.mon - 1])
+      'a' -> sb.append(LocalDate.dayName(t.wday + 1, abbreviated = true))
+      'A' -> sb.append(LocalDate.dayName(t.wday + 1))
+      'b', 'h' -> sb.append(LocalDate.monthName(t.mon, abbreviated = true))
+      'B' -> sb.append(LocalDate.monthName(t.mon))
       'c' -> sb.append(pyStrftime("%a %b %e %H:%M:%S %Y", t))
       'C' -> sb.append(__pyPadNum(__pyFdivI(t.year, 100), 2, '0'))
       'd' -> sb.append(__pyPadNum(t.mday, 2, '0'))
@@ -246,9 +246,9 @@ internal fun __pyStrpMatch(text : string, ti : int, fmt : string, fi : int, out 
       r
     }
     'p' -> word(["AM", "PM"], { k -> out.ampm = k })
-    'b', 'h' -> word(__pyMonthNames.map { it[..<3] }, { k -> out.month = k + 1; out.hadDate = true })
+    'b', 'h' -> word((1..12).map { LocalDate.monthName(it, abbreviated = true) }, { k -> out.month = k + 1; out.hadDate = true })
     'B' -> word(__pyMonthNames, { k -> out.month = k + 1; out.hadDate = true })
-    'a' -> word(__pyDayNames.map { it[..<3] }, { k -> out.weekday = k })
+    'a' -> word((1..7).map { LocalDate.dayName(it, abbreviated = true) }, { k -> out.weekday = k })
     'A' -> word(__pyDayNames, { k -> out.weekday = k })
     'w' -> number(1, 1, 0, 6, { v -> out.weekday = (v + 6) % 7 })
     'u' -> number(1, 1, 1, 7, { v -> out.weekday = v - 1 })

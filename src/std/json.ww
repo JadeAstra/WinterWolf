@@ -757,15 +757,7 @@ class __JsonReader {
 
   // A JsonParseException for `description` at `at`, as Python's JSONDecodeError gives it.
   private fun failure(description : string, at : int) : JsonParseException {
-    var line = 1
-    var lineStart = 0
-    var nl = text.indexOf('\n')
-    while (nl >= 0 and nl < at) {
-      line += 1
-      lineStart = nl + 1
-      nl = text.indexOf('\n', nl + 1)
-    }
-    val column = at - lineStart + 1
+    val (line, column) = text.lineAndColumnAt(at)
     return JsonParseException(description, at, line, column, "$description: line $line column $column (char $at)")
   }
 }

@@ -243,7 +243,9 @@ fun pyCmathModule() : PyModule {
     __pyCheckCount("rect", a, 2, 2)
     val r = pyRealArg(a.pos[0])
     val phi = pyRealArg(a.pos[1])
-    // cos(±0) is 1 and sin(±0) is ±0, so a zero angle keeps r and r * phi, as CPython's.
+    // ww's fromPolar is CPython's rect, its special values too (S9); a size other than 0 or NaN at
+    // an infinite angle is CPython's domain error.
+    if (r != 0.0 and !r.isNaN() and phi.isInfinite()) { throw pyValueError("math domain error") }
     Complex.fromPolar(r, phi)
   }
   m["isfinite"] = __pyB("isfinite") { a ->

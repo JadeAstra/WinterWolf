@@ -19,17 +19,12 @@ internal fun __pyMakeJsonDecodeError() : PyType {
 }
 
 // JSONDecodeError(msg, doc, pos): "msg: line L column C (char P)".
+// The line and column are ww's string.lineAndColumnAt (U17), at where CPython's doc.count and
+// doc.rfind look up to (pos, cut to the text as a slice cuts it).
 internal fun __pyJsonDecodeError(msg : string, doc : string, pos : int) : PyError {
-  var lines = 0
-  var lastNewline = -1
-  for k in 0..<Math.min(pos, doc.size) {
-    if (doc[k] == '\n') {
-      lines += 1
-      lastNewline = k
-    }
-  }
-  val lineno = lines + 1
-  val colno = pos - lastNewline
+  val end = pos < 0 ? Math.max(doc.size + pos, 0) : Math.min(pos, doc.size)
+  val (lineno, column) = doc.lineAndColumnAt(end)
+  val colno = pos - (end - column)
   val err = pyError(__pyJsonDecodeErrorType, "$msg: line $lineno column $colno (char $pos)")
   val d = err.exc.dict!!
   d.set("msg", msg)

@@ -878,6 +878,19 @@ void registerListMethods(VM& vm) {
         return removed;
     });
 
+    // Takes out the items from `fromIndex` up to `toIndex` (not included), those after moving down
+    // once: Java's and Kotlin's subList(from, to).clear(), C#'s RemoveRange, Python's del l[a:b].
+    vm.defineMethod(T, "removeRange", 2, 2, [](VM& vm, Value self, int, Value* args) -> Value {
+        ObjList* list = asList(self);
+        const int64_t from = vm.toInt(args[0], "fromIndex");
+        const int64_t to = vm.toInt(args[1], "toIndex");
+        const int64_t size = static_cast<int64_t>(list->size());
+        if (from < 0 || to > size || from > to)
+            throw vm.runtimeError(Thrown::IndexOutOfBoundsException, "removeRange(" + std::to_string(from) + ", " + std::to_string(to) + ") of a list of " + std::to_string(size));
+        if (to > from) vm.listErase(list, static_cast<size_t>(from), static_cast<size_t>(to - from));
+        return Value::null();
+    });
+
     vm.defineMethod(T, "remove", 1, 1, [](VM& vm, Value self, int, Value* args) -> Value {
         ObjList* list = asList(self);
         for (size_t i = 0; i < list->size(); i++) {
@@ -1505,7 +1518,7 @@ void registerBuiltins(VM& vm) {
 
     // For parallel sections: which methods change what they are called on, and which
     // built-in functions wait, or work on something the whole program has one of.
-    vm.markMutating(BuiltinType::List, {"removeAt", "remove", "clear", "reverse", "sort", "add", "addAll", "set", "ensureCapacity",
+    vm.markMutating(BuiltinType::List, {"removeAt", "removeRange", "remove", "clear", "reverse", "sort", "add", "addAll", "set", "ensureCapacity",
                                         "removeFirst", "removeLast", "removeFirstOrNull", "removeLastOrNull", "fill", "sortBy",
                                         "sortByDescending", "replaceAll"});
     vm.markMutating(BuiltinType::Map, {"remove", "clear", "put", "set"});

@@ -78,6 +78,10 @@ fun pyRepr(x : any?) : string {
     is PyFunction -> "<function ${(x as PyFunction).qualname} at ${pyHexId(x)}>"
     is PyType -> {
       val t = x as PyType
+      // A metaclass's own __repr__ (an enum's: <enum 'Day'>).
+      val meta = t.metaclass
+      val own = meta == null ? pyUnbound : meta!!.lookup("__repr__")
+      if (own !== pyUnbound) { return pyStr(__pyCall1Special(own, x)) }
       val m = t.dict["__module__", default = pyUnbound]
       val module = m is string ? m as string : t.module
       module == "builtins" ? "<class '${t.qualname}'>" : "<class '$module.${t.qualname}'>"

@@ -271,6 +271,13 @@ external fun <T> open List<T>.set(index : int, item : T) : T
 // Takes out the item at `index` and gives it; `^1` is the last. An IndexOutOfBoundsException
 // where there is none, as for a negative int.
 external fun <T> open List<T>.removeAt(index : Index) : T
+// Takes out the items from `fromIndex` up to `toIndex`, not including it, those after moving down
+// once: Java's and Kotlin's subList(fromIndex, toIndex).clear(), C#'s RemoveRange, Python's
+// del l[a:b]. An IndexOutOfBoundsException where the range is not in the list or ends before it
+// starts.
+//   val l = [0, 1, 2, 3, 4]
+//   l.removeRange(1, 3)    // l is [0, 3, 4]
+external fun <T> open List<T>.removeRange(fromIndex : int, toIndex : int)
 // Takes out the first item equal to `item`, compared with ==; true if there was one.
 external fun <T> open List<T>.remove(item : any?) : bool
 // Takes out the first item and gives it; a NoSuchElementException when the list is empty.

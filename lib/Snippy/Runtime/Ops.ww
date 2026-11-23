@@ -213,12 +213,23 @@ internal fun __pyFloatPow(a : float, b : float) : any? {
   return r
 }
 
+// a ** b as CPython's complex_pow: a whole power up to 100 by multiplying (c_powi), any other by
+// c_pow; ZeroDivisionError for 0 to a negative or complex power, and OverflowError where a part of
+// the answer is infinite (its _Py_ADJUST_ERANGE2), whatever the operands were.
 internal fun __pyComplexPow(a : Complex, b : Complex) : any? {
+  val p = __pyComplexPowRaw(a, b)
+  if (p.re.isInfinite() or p.im.isInfinite()) { throw pyOverflowError("complex exponentiation") }
+  return p
+}
+
+internal fun __pyComplexPowRaw(a : Complex, b : Complex) : Complex {
   if (b.im == 0.0 and b.re == pyFloor(b.re) and Math.abs(b.re) <= 100.0) {
     // A whole power by multiplying, as CPython's c_powi.
     val n = Math.trunc(b.re).toInt()
     val p = __pyComplexPowU(a, n < 0 ? -n : n)
-    return n < 0 ? __pyComplexQuot(Complex(1.0, 0.0), p) : p
+    if (n >= 0) { return p }
+    if (p.re == 0.0 and p.im == 0.0) { throw pyZeroDivisionError("zero to a negative or complex power") }
+    return Complex(1.0, 0.0) / p
   }
   if (b.re == 0.0 and b.im == 0.0) { return Complex(1.0, 0.0) }
   if (a.re == 0.0 and a.im == 0.0) {
@@ -233,6 +244,8 @@ internal fun __pyComplexPow(a : Complex, b : Complex) : any? {
     len /= Math.exp(at * b.im)
     phase += b.im * Math.ln(vabs)
   }
+  // C's cos and sin of an infinity set errno to EDOM, which CPython's complex_pow reports as this.
+  if (phase.isInfinite()) { throw pyZeroDivisionError("zero to a negative or complex power") }
   return Complex(len * Math.cos(phase), len * Math.sin(phase))
 }
 
@@ -339,7 +352,7 @@ fun pyRepeatOf(seq : any?, n : int) : any? {
 }
 
 internal fun __pyNumberOp(a : any?, b : any?, op : int) : any? {
-  if (a is Complex or b is Complex) { return __pyComplexOp(__pyToComplex(a), __pyToComplex(b), op) }
+  if (a is Complex or b is Complex) { return __pyMixedComplexOp(a, b, op) }
   if (a is float or b is float) {
     if (op >= 8) { return pyNotImplemented }
     if (op == 3) { return pyNotImplemented }
@@ -423,11 +436,45 @@ internal fun __pyBigTrueDiv(p : BigInt, q : BigInt) : float {
   return f
 }
 
+// A complex and a real number, as CPython 3.14 does them (C11's Annex G): the real not made a
+// complex first, so its missing imaginary part changes no sign of zero (-1 - 0j is (-1-0j), and
+// (inf+0j) * 0.0 is (nan+0j)): ww's own Complex and real operators (S8). Powers make the real a
+// complex, as CPython's do.
+internal fun __pyMixedComplexOp(a : any?, b : any?, op : int) : any? {
+  if ((a is Complex and b is Complex) or op == 7) { return __pyComplexOp(__pyToComplex(a), __pyToComplex(b), op) }
+  if (op != 0 and op != 1 and op != 2 and op != 4) { return pyNotImplemented }
+  if (a is Complex) {
+    val z = a as Complex
+    val x = pyToFloat(b)
+    return when (op) {
+      0 -> z + x
+      1 -> z - x
+      2 -> z * x
+      else -> {
+        if (x == 0.0) { throw pyZeroDivisionError("division by zero") }
+        z / x
+      }
+    }
+  }
+  val x = pyToFloat(a)
+  val z = b as Complex
+  return when (op) {
+    0 -> x + z
+    1 -> x - z
+    2 -> x * z
+    else -> {
+      if (z.re == 0.0 and z.im == 0.0) { throw pyZeroDivisionError("division by zero") }
+      x / z
+    }
+  }
+}
+
 internal fun __pyComplexOp(a : Complex, b : Complex, op : int) : any? {
   return when (op) {
-    0 -> Complex(a.re + b.re, a.im + b.im)
-    1 -> Complex(a.re - b.re, a.im - b.im)
-    2 -> Complex(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re)
+    // ww's Complex: its product recovers infinities as C11's Annex G does, as CPython's _Py_c_prod.
+    0 -> a + b
+    1 -> a - b
+    2 -> a * b
     4 -> __pyComplexQuot(a, b)
     7 -> __pyComplexPow(a, b)
     else -> pyNotImplemented
@@ -1290,6 +1337,13 @@ fun pyLength(x : any?) : int {
     is Bytes -> (x as Bytes).size
     is PyByteArray -> (x as PyByteArray).length
     is PyDictView -> (x as PyDictView).size()
+    is PyType -> {
+      // A class's length is its metaclass's __len__ (an enum's), as CPython's.
+      val meta = (x as PyType).metaclass
+      val m = meta == null ? pyUnbound : meta!!.lookup("__len__")
+      if (m === pyUnbound) { throw pyTypeError("object of type '${pyTypeName(x)}' has no len()") }
+      pyIndex(__pyCall1Special(m, x))
+    }
     is PyObject -> {
       val m = (x as PyObject).cls.lookup("__len__")
       if (m === pyUnbound or m == null) { throw pyTypeError("object of type '${pyTypeName(x)}' has no len()") }
@@ -1329,6 +1383,19 @@ fun pyContains(c : any?, item : any?) : bool {
     is PyDictView -> (c as PyDictView).has(item)
     is Bytes -> pyBytesContains(c as Bytes, item)
     is PyByteArray -> pyBytesContains((c as PyByteArray).bytes, item)
+    is PyType -> {
+      // `x in cls` asks the metaclass's __contains__ (an enum's), else goes over the class.
+      val meta = (c as PyType).metaclass
+      val m = meta == null ? pyUnbound : meta!!.lookup("__contains__")
+      if (m !== pyUnbound) { return pyTruth(__pyCall2Special(m, c, item)) }
+      val it = pyIter(c)
+      while (true) {
+        val x = pyNext(it)
+        if (x === pyEnd) { return false }
+        if (pyEqB(x, item)) { return true }
+      }
+      false
+    }
     is PyObject -> {
       val m = (c as PyObject).cls.lookup("__contains__")
       if (m !== pyUnbound and m != null) { return pyTruth(__pyCall2Special(m, c, item)) }

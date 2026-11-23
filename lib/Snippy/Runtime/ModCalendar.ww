@@ -1,0 +1,509 @@
+import Snippy.Text.*
+// calendar (S10 of docs/snippy-ww-checklist.html), in WinterWolf, after CPython 3.14's
+// calendar.py, function for function: leap years and weekdays from ww's LocalDate, Day and Month
+// as its IntEnums (repr calendar.MONDAY, str 0), Calendar, TextCalendar and HTMLCalendar with
+// each method called through the object, as CPython's are, so that a subclass's own formatday or
+// formatweek is used. The names are C's locale's, as CPython's give them there (ww's
+// LocalDate.dayName and monthName); the Locale calendars take a locale and keep those names.
+// The command line (calendar.main) is not here.
+
+// ---- Day and Month: an IntEnum each ----
+
+// A class of named ints, as enum.IntEnum makes them, made by EnumType below: its members by
+// name and in order.
+internal class PyCalEnum(val names : List<string>, val members : List<any?>)
+internal val __pyCalEnums : open Map<string, PyCalEnum> = {:}
+internal fun __pyCalEnumOf(cls : any?) : PyCalEnum => __pyCalEnums[(cls as PyType).name]!!
+
+// EnumType: iterating over the class gives its members, cls(value) the member of that value,
+// cls[name] the member of that name, as enum's metaclass does.
+internal lazy val __pyCalEnumType : PyType = pyLibClass("EnumType", "enum", [pyTypeType], {
+  "__iter__": pyLibMethod("EnumType", "__iter__") { cls, a -> PyListIter(__pyCalEnumOf(cls).members) },
+  "__reversed__": pyLibMethod("EnumType", "__reversed__") { cls, a -> PyListIter(__pyCalEnumOf(cls).members.reversed()) },
+  "__len__": pyLibMethod("EnumType", "__len__") { cls, a -> __pyCalEnumOf(cls).members.size },
+  "__contains__": pyLibMethod("EnumType", "__contains__") { cls, a -> __pyCalEnumOf(cls).members.any { pyEqB(it, a.pos[0]) } },
+  "__getitem__": pyLibMethod("EnumType", "__getitem__") { cls, a ->
+    val e = __pyCalEnumOf(cls)
+    val i = a.pos[0] is string ? e.names.indexOf(a.pos[0] as string) : -1
+    if (i < 0) { throw pyKeyError(a.pos[0]) }
+    e.members[i]
+  },
+  "__call__": pyLibMethod("EnumType", "__call__") { cls, a ->
+    val e = __pyCalEnumOf(cls)
+    val found = e.members.firstOrNull { pyEqB(it, a.pos[0]) }
+    if (found == null) { throw pyValueError("${pyRepr(a.pos[0])} is not a valid ${(cls as PyType).name}") }
+    found
+  },
+  "__repr__": pyLibMethod("EnumType", "__repr__") { cls, a -> "<enum '${(cls as PyType).name}'>" }
+})
+
+// A class of named ints from `first` on: calendar.NAME as its members' repr, name and value
+// read as enum's are.
+internal fun __pyCalMakeEnum(name : string, first : int, names : List<string>) : PyType {
+  val ns = PyDict()
+  ns.set("__module__", "calendar")
+  ns.set("__qualname__", name)
+  ns.set("__repr__", pyLibMethod(name, "__repr__") { self, a -> "calendar." + __pyCalEnumOf(pyTypeOf(self)).names[pyIndex(self) - first] })
+  // An IntEnum's str and format are its int's (ReprEnum): str(calendar.MONDAY) is "0".
+  ns.set("__str__", pyLibMethod(name, "__str__") { self, a -> "${pyIndex(self)}" })
+  ns.set("__format__", pyLibMethod(name, "__format__") { self, a -> pyFormatValue(pyIndex(self), 0, a.pos[0] as string) })
+  ns.set("name", pyCallV(pyPropertyType, [pyLibMethod(name, "name") { self, a -> __pyCalEnumOf(pyTypeOf(self)).names[pyIndex(self) - first] }], null))
+  ns.set("value", pyCallV(pyPropertyType, [pyLibMethod(name, "value") { self, a -> pyIndex(self) }], null))
+  val cls = pyNewClass(__pyCalEnumType, name, [pyIntType], ns, [], [])
+  val members : open List<any?> = []
+  for i in names.indices { members.add(pyTypeCall(cls, [first + i], null)) }
+  __pyCalEnums[name] = PyCalEnum(names, members)
+  for i in names.indices { cls.dict[names[i]] = members[i] }
+  return cls
+}
+
+internal val __pyCalMonthNames = ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER",
+  "OCTOBER", "NOVEMBER", "DECEMBER"]
+internal val __pyCalDayNames = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+internal lazy val __pyCalMonthType : PyType = __pyCalMakeEnum("Month", 1, __pyCalMonthNames)
+internal lazy val __pyCalDayType : PyType = __pyCalMakeEnum("Day", 0, __pyCalDayNames)
+internal fun __pyCalDay(n : int) : any? => __pyCalEnumOf(__pyCalDayType).members[n]
+
+// ---- Errors ----
+
+internal lazy val __pyIllegalMonthType : PyType = pyLibClass("IllegalMonthError", "calendar", [pyValueErrorType, pyIndexErrorType], {
+  "__init__": pyLibMethod("IllegalMonthError", "__init__") { self, a -> pySetAttr(self, "month", a.pos[0]); null },
+  "__str__": pyLibMethod("IllegalMonthError", "__str__") { self, a -> "bad month number ${pyRepr(pyGetAttr(self, "month"))}; must be 1-12" }
+})
+internal lazy val __pyIllegalWeekdayType : PyType = pyLibClass("IllegalWeekdayError", "calendar", [pyValueErrorType], {
+  "__init__": pyLibMethod("IllegalWeekdayError", "__init__") { self, a -> pySetAttr(self, "weekday", a.pos[0]); null },
+  "__str__": pyLibMethod("IllegalWeekdayError", "__str__") { self, a ->
+    "bad weekday number ${pyRepr(pyGetAttr(self, "weekday"))}; must be 0 (Monday) to 6 (Sunday)"
+  }
+})
+
+internal fun __pyCalValidateMonth(month : any?) {
+  if (!(pyLeB(1, month) and pyLeB(month, 12))) { throw PyError(pyCallV(__pyIllegalMonthType, [month], null) as PyExc) }
+}
+
+// ---- The names of days and months, C's locale's (_localized_day and _localized_month) ----
+
+// day_name[i] (Monday 0), month_name[i] (January 1, 0 the empty name), a slice a list of them.
+internal lazy val __pyCalNamesType : PyType = pyLibClass("_localized_names", "calendar", [pyObjectType], {
+  "__getitem__": pyLibMethod("_localized_names", "__getitem__") { self, a ->
+    val days = pyTruth(pyGetAttr(self, "_days"))
+    val format = pyGetAttr(self, "format") as string
+    val all : open List<any?> = []
+    if (days) {
+      for d in 1..7 { all.add(LocalDate.dayName(d, abbreviated = format == "%a")) }
+    } else {
+      all.add("")
+      for m in 1..12 { all.add(LocalDate.monthName(m, abbreviated = format == "%b")) }
+    }
+    pyGetItem(pyNewList(all.toOpenList()), a.pos[0])
+  },
+  "__len__": pyLibMethod("_localized_names", "__len__") { self, a -> pyTruth(pyGetAttr(self, "_days")) ? 7 : 13 }
+})
+internal fun __pyCalNames(days : bool, format : string) : any? {
+  val o = pyCall0(__pyCalNamesType)
+  pySetAttr(o, "_days", days)
+  pySetAttr(o, "format", format)
+  return o
+}
+
+// ---- Leap years, weekdays, months ----
+
+internal val __pyCalMdays = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+internal fun __pyCalDatetime(name : string) : any? => pyGetAttr(pyModuleNow("datetime"), name)
+
+// isleap: ww's LocalDate.isLeapYear for an int; any other number by Python's own arithmetic.
+fun pyCalIsLeap(year : any?) : any? {
+  if (year is int) { return LocalDate(year as int, 1, 1).isLeapYear }
+  val y = year
+  return pyEqB(pyBinary(y, 4, 6), 0) and (!pyEqB(pyBinary(y, 100, 6), 0) or pyEqB(pyBinary(y, 400, 6), 0))
+}
+
+internal fun __pyCalWeekday(year0 : any?, month : any?, day : any?) : any? {
+  var year = year0
+  if (!(pyLeB(1, year) and pyLeB(year, 9999))) { year = pyBinary(2000, pyBinary(year, 400, 6), 0) }
+  val d = pyCallV(__pyCalDatetime("date"), [year, month, day], null)
+  return pyCallV(__pyCalDayType, [pyCall0(pyGetAttr(d, "weekday"))], null)
+}
+
+internal fun __pyCalMonthLen(year : any?, month : int) : int => month == 2 and pyTruth(pyCalIsLeap(year)) ? 29 : __pyCalMdays[month]
+
+internal fun __pyCalMonthRange(year : any?, month : any?) : PyTuple {
+  __pyCalValidateMonth(month)
+  val day1 = __pyCalWeekday(year, month, 1)
+  return PyTuple([day1, __pyCalMonthLen(year, pyIndex(month))])
+}
+
+// ---- Calendar ----
+
+internal fun __pyCalFirst(self : any?) : int => pyIndex(pyGetAttr(self, "firstweekday"))
+internal fun __pyCalCall(self : any?, name : string, args : List<any?>) : any? => pyCallV(pyGetAttr(self, name), args, null)
+internal fun __pyCalCallKw(self : any?, name : string, args : List<any?>, kw : List<string>) : any? => pyCallV(pyGetAttr(self, name), args, kw)
+internal fun __pyCalItems(x : any?) : List<any?> => pyIterable(x)
+internal fun __pyCalRows(items : List<any?>, width : int) : open List<any?> {
+  val out : open List<any?> = []
+  var i = 0
+  while (i < items.size) {
+    out.add(pyNewList(items[i..<Math.min(i + width, items.size)].toOpenList()))
+    i += width
+  }
+  return pyNewList(out)
+}
+
+internal fun __pyCalDays3(self : any?, year : any?, month : any?) : List<any?> {
+  val range = __pyCalMonthRange(year, month)
+  val day1 = pyIndex(range.items[0])
+  val ndays = range.items[1] as int
+  val first = __pyCalFirst(self)
+  val before = (day1 - first).mod(7)
+  val after = (first - day1 - ndays).mod(7)
+  val m = pyIndex(month)
+  val py = m == 1 ? pyBinary(year, 1, 1) : year
+  val pm = m == 1 ? 12 : m - 1
+  val end = __pyCalMonthLen(py, pm) + 1
+  val out : open List<any?> = []
+  for d in (end - before)..<end { out.add(PyTuple([py, pm, d])) }
+  for d in 1..ndays { out.add(PyTuple([year, month, d])) }
+  val ny = m == 12 ? pyBinary(year, 1, 0) : year
+  val nm = m == 12 ? 1 : m + 1
+  for d in 1..after { out.add(PyTuple([ny, nm, d])) }
+  return out
+}
+
+internal fun __pyCalDays(self : any?, year : any?, month : any?) : List<any?> {
+  val range = __pyCalMonthRange(year, month)
+  val day1 = pyIndex(range.items[0])
+  val ndays = range.items[1] as int
+  val first = __pyCalFirst(self)
+  val out : open List<any?> = []
+  for i in 0..<(day1 - first).mod(7) { out.add(0) }
+  for d in 1..ndays { out.add(d) }
+  for i in 0..<(first - day1 - ndays).mod(7) { out.add(0) }
+  return out
+}
+
+internal lazy val __pyCalendarType : PyType = pyLibClass("Calendar", "calendar", [pyObjectType], {
+  "__init__": pyLibMethod("Calendar", "__init__") { self, a ->
+    a.only(["firstweekday"])
+    pySetAttr(self, "firstweekday", a.pos.isNotEmpty() ? a.pos[0] : a.get("firstweekday", 0))
+    null
+  },
+  "getfirstweekday": pyLibMethod("Calendar", "getfirstweekday") { self, a -> pyBinary(pyGetAttr(self, "_firstweekday"), 7, 6) },
+  "setfirstweekday": pyLibMethod("Calendar", "setfirstweekday") { self, a -> pySetAttr(self, "_firstweekday", a.pos[0]); null },
+  "firstweekday": pyCallV(pyPropertyType, [
+    pyLibMethod("Calendar", "getfirstweekday") { self, a -> __pyCalCall(self, "getfirstweekday", []) },
+    pyLibMethod("Calendar", "setfirstweekday") { self, a -> __pyCalCall(self, "setfirstweekday", [a.pos[0]]) }], null),
+  "iterweekdays": pyLibMethod("Calendar", "iterweekdays") { self, a ->
+    val first = __pyCalFirst(self)
+    PyListIter((first..<(first + 7)).map { it.mod(7) as any? })
+  },
+  "itermonthdates": pyLibMethod("Calendar", "itermonthdates") { self, a ->
+    val date = __pyCalDatetime("date")
+    PyListIter(__pyCalItems(__pyCalCall(self, "itermonthdays3", [a.pos[0], a.pos[1]])).map { pyCallV(date, (it as PyTuple).items, null) })
+  },
+  "itermonthdays": pyLibMethod("Calendar", "itermonthdays") { self, a -> PyListIter(__pyCalDays(self, a.pos[0], a.pos[1])) },
+  "itermonthdays2": pyLibMethod("Calendar", "itermonthdays2") { self, a ->
+    val first = __pyCalFirst(self)
+    val days = __pyCalItems(__pyCalCall(self, "itermonthdays", [a.pos[0], a.pos[1]]))
+    PyListIter(days.indices.map { PyTuple([days[it], (first + it).mod(7)]) as any? })
+  },
+  "itermonthdays3": pyLibMethod("Calendar", "itermonthdays3") { self, a -> PyListIter(__pyCalDays3(self, a.pos[0], a.pos[1])) },
+  "itermonthdays4": pyLibMethod("Calendar", "itermonthdays4") { self, a ->
+    val first = __pyCalFirst(self)
+    val days = __pyCalItems(__pyCalCall(self, "itermonthdays3", [a.pos[0], a.pos[1]]))
+    PyListIter(days.indices.map { PyTuple((days[it] as PyTuple).items + [(first + it).mod(7)]) as any? })
+  },
+  "monthdatescalendar": pyLibMethod("Calendar", "monthdatescalendar") { self, a ->
+    __pyCalRows(__pyCalItems(__pyCalCall(self, "itermonthdates", [a.pos[0], a.pos[1]])), 7)
+  },
+  "monthdays2calendar": pyLibMethod("Calendar", "monthdays2calendar") { self, a ->
+    __pyCalRows(__pyCalItems(__pyCalCall(self, "itermonthdays2", [a.pos[0], a.pos[1]])), 7)
+  },
+  "monthdayscalendar": pyLibMethod("Calendar", "monthdayscalendar") { self, a ->
+    __pyCalRows(__pyCalItems(__pyCalCall(self, "itermonthdays", [a.pos[0], a.pos[1]])), 7)
+  },
+  "yeardatescalendar": pyLibMethod("Calendar", "yeardatescalendar") { self, a -> __pyCalYear(self, a, "monthdatescalendar") },
+  "yeardays2calendar": pyLibMethod("Calendar", "yeardays2calendar") { self, a -> __pyCalYear(self, a, "monthdays2calendar") },
+  "yeardayscalendar": pyLibMethod("Calendar", "yeardayscalendar") { self, a -> __pyCalYear(self, a, "monthdayscalendar") }
+})
+
+internal fun __pyCalYear(self : any?, a : PyArgs, method : string) : any? {
+  a.only(["width"])
+  val width = pyIndex(a.pos.size > 1 ? a.pos[1] : a.get("width", 3))
+  val months = __pyCalEnumOf(__pyCalMonthType).members.map { __pyCalCall(self, method, [a.pos[0], it]) }
+  return __pyCalRows(months, width)
+}
+
+// ---- TextCalendar ----
+
+internal fun __pyCalPrint(text : any?) {
+  val kw : Map<string, any?> = {"end": ""}
+  __pyPrintFull([text], kw)
+}
+internal fun __pyCenter(s : any?, width : any?) : string => pyCallMethodV(s, "center", [width], null) as string
+internal fun __pyRstrip(s : any?) : string => pyCallMethodV(s, "rstrip", [], null) as string
+internal fun __pyArg(a : PyArgs, at : int, name : string, otherwise : any?) : any? => a.pos.size > at ? a.pos[at] : a.get(name, otherwise)
+
+// formatstring: the columns centred in `colwidth`, `spacing` spaces between them.
+fun pyCalFormatString(cols : any?, colwidth : any?, spacing : any?) : string =>
+  __pyCalItems(cols).map { __pyCenter(it, colwidth) }.join(" ".repeat(pyIndex(spacing)))
+
+internal lazy val __pyTextCalendarType : PyType = pyLibClass("TextCalendar", "calendar", [__pyCalendarType], {
+  "prweek": pyLibMethod("TextCalendar", "prweek") { self, a -> __pyCalPrint(__pyCalCall(self, "formatweek", [a.pos[0], a.pos[1]])); null },
+  "formatday": pyLibMethod("TextCalendar", "formatday") { self, a ->
+    val day = pyIndex(a.pos[0])
+    __pyCenter(day == 0 ? "" : "$day".padStart(2), a.pos[2])
+  },
+  "formatweek": pyLibMethod("TextCalendar", "formatweek") { self, a ->
+    __pyCalItems(a.pos[0]).map {
+      val dw = __pyCalItems(it)
+      pyStr(__pyCalCall(self, "formatday", [dw[0], dw[1], a.pos[1]]))
+    }.join(" ")
+  },
+  "formatweekday": pyLibMethod("TextCalendar", "formatweekday") { self, a ->
+    val width = pyIndex(a.pos[1])
+    val names = width >= 9 ? __pyCalDayName : __pyCalDayAbbr
+    val name = pyGetItem(names, a.pos[0]) as string
+    __pyCenter(name[..<Math.min(width, name.size)], width)
+  },
+  "formatweekheader": pyLibMethod("TextCalendar", "formatweekheader") { self, a ->
+    __pyCalItems(__pyCalCall(self, "iterweekdays", [])).map { pyStr(__pyCalCall(self, "formatweekday", [it, a.pos[0]])) }.join(" ")
+  },
+  "formatmonthname": pyLibMethod("TextCalendar", "formatmonthname") { self, a ->
+    __pyCalValidateMonth(a.pos[1])
+    var s = pyGetItem(__pyCalMonthName, a.pos[1]) as string
+    if (pyTruth(__pyArg(a, 3, "withyear", true))) { s = "$s ${pyRepr(a.pos[0])}" }
+    __pyCenter(s, a.pos[2])
+  },
+  "prmonth": pyLibMethod("TextCalendar", "prmonth") { self, a ->
+    __pyCalPrint(__pyCalCall(self, "formatmonth", [a.pos[0], a.pos[1], __pyArg(a, 2, "w", 0), __pyArg(a, 3, "l", 0)]))
+    null
+  },
+  "formatmonth": pyLibMethod("TextCalendar", "formatmonth") { self, a ->
+    val w = Math.max(2, pyIndex(__pyArg(a, 2, "w", 0)))
+    val l = Math.max(1, pyIndex(__pyArg(a, 3, "l", 0)))
+    val lines = "\n".repeat(l)
+    val sb = StringBuilder()
+    sb.append(__pyRstrip(__pyCalCall(self, "formatmonthname", [a.pos[0], a.pos[1], 7 * (w + 1) - 1]))).append(lines)
+    sb.append(__pyRstrip(__pyCalCall(self, "formatweekheader", [w]))).append(lines)
+    for week in __pyCalItems(__pyCalCall(self, "monthdays2calendar", [a.pos[0], a.pos[1]])) {
+      sb.append(__pyRstrip(__pyCalCall(self, "formatweek", [week, w]))).append(lines)
+    }
+    sb.toString()
+  },
+  "formatyear": pyLibMethod("TextCalendar", "formatyear") { self, a ->
+    val w = Math.max(2, pyIndex(__pyArg(a, 1, "w", 2)))
+    val l = Math.max(1, pyIndex(__pyArg(a, 2, "l", 1)))
+    val c = Math.max(2, pyIndex(__pyArg(a, 3, "c", 6)))
+    val m = pyIndex(__pyArg(a, 4, "m", 3))
+    val year = a.pos[0]
+    val colwidth = (w + 1) * 7 - 1
+    val lines = "\n".repeat(l)
+    val sb = StringBuilder()
+    sb.append(__pyRstrip(__pyCenter(pyRepr(year), colwidth * m + c * (m - 1)))).append(lines)
+    val header = __pyCalCall(self, "formatweekheader", [w])
+    val rows = __pyCalItems(__pyCalCall(self, "yeardays2calendar", [year, m]))
+    for i in rows.indices {
+      val row = __pyCalItems(rows[i])
+      val months = (m * i + 1)..<Math.min(m * (i + 1) + 1, 13)
+      sb.append(lines)
+      val names = months.map { __pyCalCall(self, "formatmonthname", [year, it, colwidth, false]) }
+      sb.append(__pyRstrip(pyCalFormatString(names, colwidth, c))).append(lines)
+      sb.append(__pyRstrip(pyCalFormatString(months.map { header }, colwidth, c))).append(lines)
+      var height = 0
+      for cal in row { height = Math.max(height, __pyCalItems(cal).size) }
+      for j in 0..<height {
+        val weeks = row.map {
+          val cal = __pyCalItems(it)
+          j >= cal.size ? "" : __pyCalCall(self, "formatweek", [cal[j], w])
+        }
+        sb.append(__pyRstrip(pyCalFormatString(weeks, colwidth, c))).append(lines)
+      }
+    }
+    sb.toString()
+  },
+  "pryear": pyLibMethod("TextCalendar", "pryear") { self, a ->
+    __pyCalPrint(__pyCalCall(self, "formatyear", [a.pos[0], __pyArg(a, 1, "w", 0), __pyArg(a, 2, "l", 0), __pyArg(a, 3, "c", 6),
+      __pyArg(a, 4, "m", 3)]))
+    null
+  }
+})
+
+// ---- HTMLCalendar ----
+
+// The CSS classes of the days, one list for <td> and <th> as CPython's class has it.
+internal lazy val __pyCalCss : open List<any?> = pyNewList(["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map { it as any? }.toOpenList())
+
+internal lazy val __pyHTMLCalendarType : PyType = pyLibClass("HTMLCalendar", "calendar", [__pyCalendarType], {
+  "cssclasses": __pyCalCss,
+  "cssclasses_weekday_head": __pyCalCss,
+  "cssclass_noday": "noday",
+  "cssclass_month_head": "month",
+  "cssclass_month": "month",
+  "cssclass_year_head": "year",
+  "cssclass_year": "year",
+  "formatday": pyLibMethod("HTMLCalendar", "formatday") { self, a ->
+    val day = pyIndex(a.pos[0])
+    day == 0 ? "<td class=\"${pyStr(pyGetAttr(self, "cssclass_noday"))}\">&nbsp;</td>"
+             : "<td class=\"${pyStr(pyGetItem(pyGetAttr(self, "cssclasses"), a.pos[1]))}\">$day</td>"
+  },
+  "formatweek": pyLibMethod("HTMLCalendar", "formatweek") { self, a ->
+    "<tr>" + __pyCalItems(a.pos[0]).map {
+      val dw = __pyCalItems(it)
+      pyStr(__pyCalCall(self, "formatday", [dw[0], dw[1]]))
+    }.join("") + "</tr>"
+  },
+  "formatweekday": pyLibMethod("HTMLCalendar", "formatweekday") { self, a ->
+    "<th class=\"${pyStr(pyGetItem(pyGetAttr(self, "cssclasses_weekday_head"), a.pos[0]))}\">${pyStr(pyGetItem(__pyCalDayAbbr, a.pos[0]))}</th>"
+  },
+  "formatweekheader": pyLibMethod("HTMLCalendar", "formatweekheader") { self, a ->
+    "<tr>" + __pyCalItems(__pyCalCall(self, "iterweekdays", [])).map { pyStr(__pyCalCall(self, "formatweekday", [it])) }.join("") + "</tr>"
+  },
+  "formatmonthname": pyLibMethod("HTMLCalendar", "formatmonthname") { self, a ->
+    __pyCalValidateMonth(a.pos[1])
+    val name = pyStr(pyGetItem(__pyCalMonthName, a.pos[1]))
+    val s = pyTruth(__pyArg(a, 2, "withyear", true)) ? "$name ${pyStr(a.pos[0])}" : name
+    "<tr><th colspan=\"7\" class=\"${pyStr(pyGetAttr(self, "cssclass_month_head"))}\">$s</th></tr>"
+  },
+  "formatmonth": pyLibMethod("HTMLCalendar", "formatmonth") { self, a ->
+    val sb = StringBuilder()
+    sb.append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" class=\"${pyStr(pyGetAttr(self, "cssclass_month"))}\">\n")
+    sb.append(pyStr(__pyCalCallKw(self, "formatmonthname", [a.pos[0], a.pos[1], __pyArg(a, 2, "withyear", true)], ["withyear"]))).append("\n")
+    sb.append(pyStr(__pyCalCall(self, "formatweekheader", []))).append("\n")
+    for week in __pyCalItems(__pyCalCall(self, "monthdays2calendar", [a.pos[0], a.pos[1]])) {
+      sb.append(pyStr(__pyCalCall(self, "formatweek", [week]))).append("\n")
+    }
+    sb.append("</table>\n")
+    sb.toString()
+  },
+  "formatyear": pyLibMethod("HTMLCalendar", "formatyear") { self, a ->
+    val width = Math.max(pyIndex(__pyArg(a, 1, "width", 3)), 1)
+    val year = a.pos[0]
+    val sb = StringBuilder()
+    sb.append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" class=\"${pyStr(pyGetAttr(self, "cssclass_year"))}\">\n")
+    sb.append("<tr><th colspan=\"$width\" class=\"${pyStr(pyGetAttr(self, "cssclass_year_head"))}\">${pyStr(year)}</th></tr>")
+    var i = 1
+    while (i < 13) {
+      sb.append("<tr>")
+      for m in i..<Math.min(i + width, 13) {
+        sb.append("<td>").append(pyStr(__pyCalCallKw(self, "formatmonth", [year, m, false], ["withyear"]))).append("</td>")
+      }
+      sb.append("</tr>")
+      i += width
+    }
+    sb.append("</table>")
+    sb.toString()
+  },
+  "formatyearpage": pyLibMethod("HTMLCalendar", "formatyearpage") { self, a ->
+    val year = a.pos[0]
+    val width = __pyArg(a, 1, "width", 3)
+    val css = __pyArg(a, 2, "css", "calendar.css")
+    var encoding = __pyArg(a, 3, "encoding", null)
+    if (encoding == null) { encoding = "utf-8" }
+    val sb = StringBuilder()
+    sb.append("<?xml version=\"1.0\" encoding=\"${pyStr(encoding)}\"?>\n")
+    sb.append("<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">\n")
+    sb.append("<html>\n<head>\n")
+    sb.append("<meta http-equiv=\"Content-Type\" content=\"text/html; charset=${pyStr(encoding)}\" />\n")
+    if (css != null) { sb.append("<link rel=\"stylesheet\" type=\"text/css\" href=\"${pyStr(css)}\" />\n") }
+    sb.append("<title>Calendar for ${pyIndex(year)}</title>\n</head>\n<body>\n")
+    sb.append(pyStr(__pyCalCall(self, "formatyear", [year, width])))
+    sb.append("</body>\n</html>\n")
+    pyCallMethodV(sb.toString(), "encode", [encoding, "xmlcharrefreplace"], null)
+  }
+})
+
+// The Locale calendars: a locale kept, the names C's (Snippy has no locale module).
+internal fun __pyCalLocaleInit(base : PyType, name : string) : PyBuiltin => pyLibMethod(name, "__init__") { self, a ->
+  a.only(["firstweekday", "locale"])
+  pyCallV(pyGetAttr(base, "__init__"), [self, __pyArg(a, 0, "firstweekday", 0)], null)
+  pySetAttr(self, "locale", __pyArg(a, 1, "locale", null) ?: "C")
+  null
+}
+
+// ---- The module ----
+
+internal lazy val __pyCalDayName : any? = __pyCalNames(true, "%A")
+internal lazy val __pyCalDayAbbr : any? = __pyCalNames(true, "%a")
+internal lazy val __pyCalMonthName : any? = __pyCalNames(false, "%B")
+internal lazy val __pyCalMonthAbbr : any? = __pyCalNames(false, "%b")
+
+fun pyCalendarModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["__all__"] = pyNewList(["IllegalMonthError", "IllegalWeekdayError", "setfirstweekday", "firstweekday", "isleap", "leapdays",
+    "weekday", "monthrange", "monthcalendar", "prmonth", "month", "prcal", "calendar", "timegm", "month_name", "month_abbr",
+    "day_name", "day_abbr", "Calendar", "TextCalendar", "HTMLCalendar", "LocaleTextCalendar", "LocaleHTMLCalendar",
+    "weekheader", "Day", "Month"].map { it as any? }.toOpenList() + (__pyCalMonthNames + __pyCalDayNames).map { it as any? })
+  m["error"] = pyValueErrorType
+  m["IllegalMonthError"] = __pyIllegalMonthType
+  m["IllegalWeekdayError"] = __pyIllegalWeekdayType
+  m["Month"] = __pyCalMonthType
+  m["Day"] = __pyCalDayType
+  for (i, name) in __pyCalMonthNames.withIndex() { m[name] = __pyCalEnumOf(__pyCalMonthType).members[i] }
+  for (i, name) in __pyCalDayNames.withIndex() { m[name] = __pyCalEnumOf(__pyCalDayType).members[i] }
+  m["mdays"] = pyNewList(__pyCalMdays.map { it as any? }.toOpenList())
+  m["day_name"] = __pyCalDayName
+  m["day_abbr"] = __pyCalDayAbbr
+  m["month_name"] = __pyCalMonthName
+  m["month_abbr"] = __pyCalMonthAbbr
+  m["isleap"] = __pyB("isleap") { a -> pyCalIsLeap(a.pos[0]) }
+  m["leapdays"] = __pyB("leapdays") { a ->
+    val y1 = pyBinary(a.pos[0], 1, 1)
+    val y2 = pyBinary(a.pos[1], 1, 1)
+    fun q(d : int) : any? => pyBinary(pyBinary(y2, d, 5), pyBinary(y1, d, 5), 1)
+    pyBinary(pyBinary(q(4), q(100), 1), q(400), 0)
+  }
+  m["weekday"] = __pyB("weekday") { a -> __pyCalWeekday(a.pos[0], a.pos[1], a.pos[2]) }
+  m["monthrange"] = __pyB("monthrange") { a -> __pyCalMonthRange(a.pos[0], a.pos[1]) }
+  m["Calendar"] = __pyCalendarType
+  m["TextCalendar"] = __pyTextCalendarType
+  m["HTMLCalendar"] = __pyHTMLCalendarType
+  m["LocaleTextCalendar"] = pyLibClass("LocaleTextCalendar", "calendar", [__pyTextCalendarType], {
+    "__init__": __pyCalLocaleInit(__pyTextCalendarType, "LocaleTextCalendar")
+  })
+  m["LocaleHTMLCalendar"] = pyLibClass("LocaleHTMLCalendar", "calendar", [__pyHTMLCalendarType], {
+    "__init__": __pyCalLocaleInit(__pyHTMLCalendarType, "LocaleHTMLCalendar")
+  })
+  // The old interface: one TextCalendar's methods.
+  val c = pyCall0(__pyTextCalendarType)
+  m["c"] = c
+  m["firstweekday"] = pyGetAttr(c, "getfirstweekday")
+  m["setfirstweekday"] = __pyB("setfirstweekday") { a ->
+    val f = a.pos[0]
+    if (!(pyLeB(0, f) and pyLeB(f, 6))) { throw PyError(pyCallV(__pyIllegalWeekdayType, [f], null) as PyExc) }
+    pySetAttr(c, "firstweekday", f)
+    null
+  }
+  m["monthcalendar"] = pyGetAttr(c, "monthdayscalendar")
+  m["prweek"] = pyGetAttr(c, "prweek")
+  m["week"] = pyGetAttr(c, "formatweek")
+  m["weekheader"] = pyGetAttr(c, "formatweekheader")
+  m["prmonth"] = pyGetAttr(c, "prmonth")
+  m["month"] = pyGetAttr(c, "formatmonth")
+  m["calendar"] = pyGetAttr(c, "formatyear")
+  m["prcal"] = pyGetAttr(c, "pryear")
+  m["format"] = __pyB("format") { a ->
+    pyPrint([pyCalFormatString(a.pos[0], __pyArg(a, 1, "colwidth", 20), __pyArg(a, 2, "spacing", 6))])
+  }
+  m["formatstring"] = __pyB("formatstring") { a -> pyCalFormatString(a.pos[0], __pyArg(a, 1, "colwidth", 20), __pyArg(a, 2, "spacing", 6)) }
+  m["EPOCH"] = 1970
+  // timegm: a UTC time tuple's seconds since 1970, the day from datetime's ordinal, as CPython's.
+  m["timegm"] = __pyB("timegm") { a ->
+    val t = __pyCalItems(a.pos[0])
+    val first = pyCallV(__pyCalDatetime("date"), [t[0], t[1], 1], null)
+    val days = pyBinary(pyBinary(pyBinary(pyCall0(pyGetAttr(first, "toordinal")), 719163, 1), t[2], 0), 1, 1)
+    val hours = pyBinary(pyBinary(days, 24, 2), t[3], 0)
+    val minutes = pyBinary(pyBinary(hours, 60, 2), t[4], 0)
+    pyBinary(pyBinary(minutes, 60, 2), t[5], 0)
+  }
+  return pyNativeModule("calendar", m)
+}
+
+// A module as `import name` gives it, made now if no program has imported it yet.
+fun pyModuleNow(name : string) : any? {
+  val had = pyModules.get(name, pyUnbound)
+  if (had !== pyUnbound) { return had }
+  val made = __pyModuleMakers()[name]!!()
+  pyModules.set(name, made)
+  return made
+}

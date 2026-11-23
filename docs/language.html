@@ -585,9 +585,9 @@ addButton(widgets)</pre></dd>
 <li><a href="#LineIndex"><code>LineIndex</code></a> (12)</li>
 <li><a href="#LineJoin"><code>LineJoin</code></a> (1)</li>
 <li><a href="#LinearGradient"><code>LinearGradient</code></a> (2)</li>
-<li><a href="#List.size"><code>List</code></a> (194)</li>
+<li><a href="#List.size"><code>List</code></a> (195)</li>
 <li><a href="#ListView"><code>ListView</code></a> (11)</li>
-<li><a href="#LocalDate"><code>LocalDate</code></a> (16)</li>
+<li><a href="#LocalDate"><code>LocalDate</code></a> (18)</li>
 <li><a href="#LocalDateTime"><code>LocalDateTime</code></a> (14)</li>
 <li><a href="#LocalTime"><code>LocalTime</code></a> (9)</li>
 <li><a href="#Lock"><code>Lock</code></a> (2)</li>
@@ -704,7 +704,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#char.code"><code>char</code></a> (15)</li>
 <li><a href="#float.toBigInt"><code>float</code></a> (30)</li>
 <li><a href="#int.toBigInt"><code>int</code></a> (46)</li>
-<li><a href="#string.hexToBytes"><code>string</code></a> (117)</li>
+<li><a href="#string.hexToBytes"><code>string</code></a> (118)</li>
 </ul>
 <section class="file" id="file-base64-ww">
 <h2>base64.ww</h2>
@@ -1356,6 +1356,12 @@ Range(10, 0, -3).toList()  // [10, 7, 4, 1]
 </div>
 <div class="entry" id="List.removeAt"><code class="sig">fun &lt;T&gt; open List&lt;T&gt;.removeAt(index : Index) : T</code><a class="anchor" href="#List.removeAt">#</a>
 <p>Takes out the item at <code>index</code> and gives it; <code>^1</code> is the last. An IndexOutOfBoundsException where there is none, as for a negative int.</p>
+</div>
+<div class="entry" id="List.removeRange"><code class="sig">fun &lt;T&gt; open List&lt;T&gt;.removeRange(fromIndex : int, toIndex : int)</code><a class="anchor" href="#List.removeRange">#</a>
+<p>Takes out the items from <code>fromIndex</code> up to <code>toIndex</code>, not including it, those after moving down once: Java's and Kotlin's subList(fromIndex, toIndex).clear(), C#'s RemoveRange, Python's del l[a:b]. An IndexOutOfBoundsException where the range is not in the list or ends before it starts.</p>
+<pre>val l = [0, 1, 2, 3, 4]
+l.removeRange(1, 3)    // l is [0, 3, 4]
+</pre>
 </div>
 <div class="entry" id="List.remove"><code class="sig">fun &lt;T&gt; open List&lt;T&gt;.remove(item : any?) : bool</code><a class="anchor" href="#List.remove">#</a>
 <p>Takes out the first item equal to <code>item</code>, compared with ==; true if there was one.</p>
@@ -2135,7 +2141,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The number <code>re</code> + <code>im</code> i, from ints or floats.</p>
 </div>
 <div class="entry member" id="Complex.fromPolar"><code class="sig">fun fromPolar(r : Number, theta : Number) : Complex</code><a class="anchor" href="#Complex.fromPolar">#</a>
-<p>The number of size <code>r</code> at the angle <code>theta</code> (radians) from the real axis.</p>
+<p>The number of size <code>r</code> at the angle <code>theta</code> (radians) from the real axis, as Python's cmath.rect: r cos theta + r sin theta i, a zero angle keeping r and r * theta; an infinite or NaN size or angle as rect's table of special values gives it (an infinite size at a finite angle its infinities' signs from cos and sin; NaN at a zero angle NaN + 0i).</p>
 </div>
 <div class="entry member" id="Complex.zero"><code class="sig">val zero : Complex</code><a class="anchor" href="#Complex.zero">#</a>
 <p>0.</p>
@@ -2168,7 +2174,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The number with both parts' signs turned round.</p>
 </div>
 <div class="entry member" id="Complex.*"><code class="sig">op *(other : Complex) : Complex</code><a class="anchor" href="#Complex.*">#</a>
-<p>The product.</p>
+<p>The product. Infinities that would come out NaN + NaN i are recovered as C11's Annex G (_Cmultd) recovers them, as CPython's does: (1 + 0i) * (inf + NaN i) is inf + NaN i, not NaN + NaN i.</p>
 </div>
 <div class="entry member" id="Complex.*-2"><code class="sig">op *(other : float) : Complex</code><a class="anchor" href="#Complex.*-2">#</a>
 <p>The product with a float.</p>
@@ -2177,7 +2183,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The product with an int.</p>
 </div>
 <div class="entry member" id="Complex./"><code class="sig">op /(other : Complex) : Complex</code><a class="anchor" href="#Complex./">#</a>
-<p>Divided by Smith's way, which neither overflows nor underflows on the way where the answer itself does not.</p>
+<p>Divided by Smith's way, which neither overflows nor underflows on the way where the answer itself does not; infinities and zeros that would come out NaN + NaN i recovered as C11's Annex G (_Cdivd) recovers them, as CPython's does: (inf + NaN i) / (1 + i) is inf - inf i.</p>
 </div>
 <div class="entry member" id="Complex./-2"><code class="sig">op /(other : float) : Complex</code><a class="anchor" href="#Complex./-2">#</a>
 <p>Divided by a float.</p>
@@ -2285,7 +2291,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The int times a Complex.</p>
 </div>
 <div class="entry" id="int./"><code class="sig">op int./(other : Complex) : Complex</code><a class="anchor" href="#int./">#</a>
-<p>The int divided by a Complex.</p>
+<p>The int divided by a Complex, as the float is.</p>
 </div>
 <div class="entry" id="float.+"><code class="sig">op float.+(other : Complex) : Complex</code><a class="anchor" href="#float.+">#</a>
 <p>The float plus a Complex.</p>
@@ -2297,7 +2303,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The float times a Complex.</p>
 </div>
 <div class="entry" id="float./"><code class="sig">op float./(other : Complex) : Complex</code><a class="anchor" href="#float./">#</a>
-<p>The float divided by a Complex.</p>
+<p>The float divided by a Complex: Smith's way as Complex / Complex, with no imaginary part on the left to add in (so its signs of zero come out as CPython's, and C11's: 2.0 / (-0.0 + 2i) is -0.0 - 1i), and the zeros recovered where an infinite divisor gives NaN + NaN i.</p>
 </div>
 </section>
 <section class="file" id="file-core-ww">
@@ -5191,6 +5197,12 @@ val local = path.lastModified()!!.toLocalDateTime()
 <div class="entry member" id="LocalDate.now"><code class="sig">fun now() : LocalDate</code><a class="anchor" href="#LocalDate.now">#</a>
 <p>Today, in the system's time zone.</p>
 </div>
+<div class="entry member" id="LocalDate.dayName"><code class="sig">fun dayName(dayOfWeek : int, abbreviated : bool = false) : string</code><a class="anchor" href="#LocalDate.dayName">#</a>
+<p>The name of the day of the week <code>dayOfWeek</code> (1 for Monday to 7 for Sunday, as dayOfWeek numbers them) in English, &quot;Monday&quot;, or with <code>abbreviated</code> its first three letters, &quot;Mon&quot;: as format's EEEE and E write it, and as C#'s GetDayName and GetAbbreviatedDayName give it for a number. An IllegalArgumentException for another number.</p>
+</div>
+<div class="entry member" id="LocalDate.monthName"><code class="sig">fun monthName(month : int, abbreviated : bool = false) : string</code><a class="anchor" href="#LocalDate.monthName">#</a>
+<p>The name of the month <code>month</code> (1 to 12) in English, &quot;January&quot;, or with <code>abbreviated</code> its first three letters, &quot;Jan&quot;: as format's MMMM and MMM write it, and as C#'s GetMonthName and GetAbbreviatedMonthName give it. An IllegalArgumentException for another number.</p>
+</div>
 <div class="entry member" id="LocalDate.fromEpochDays"><code class="sig">fun fromEpochDays(days : int) : LocalDate</code><a class="anchor" href="#LocalDate.fromEpochDays">#</a>
 <p>The date <code>days</code> days after 1970-01-01 (before it where negative), as kotlinx-datetime's LocalDate.fromEpochDays and Java's ofEpochDay.</p>
 </div>
@@ -7561,6 +7573,11 @@ print(squares.filter { it % 3 == 0 }.take(5).toList())     // [9, 36, 81, 144, 2
 <div class="entry" id="string.substringAfterLast"><code class="sig">fun string.substringAfterLast(delimiter : string, missingDelimiterValue : string? = null) : string</code><a class="anchor" href="#string.substringAfterLast">#</a>
 <p>What comes after the last <code>delimiter</code>; the whole string, or <code>missingDelimiterValue</code> when one is given, if <code>delimiter</code> is not there.</p>
 <pre>&quot;a/b/c.txt&quot;.substringAfterLast(&quot;/&quot;)   // &quot;c.txt&quot;
+</pre>
+</div>
+<div class="entry" id="string.lineAndColumnAt"><code class="sig">fun string.lineAndColumnAt(index : int) : Pair&lt;int, int&gt;</code><a class="anchor" href="#string.lineAndColumnAt">#</a>
+<p>The line and column of the character at <code>index</code> (or of the end, at <code>size</code>), both counted from 1, a line ending at each &quot;\n&quot;: what Python's json and ww's own JSON reader give in their errors (&quot;line 3 column 7&quot;), and what a text editor shows. An IndexOutOfBoundsException for an index past the end.</p>
+<pre>&quot;ab\ncd&quot;.lineAndColumnAt(4)   // Pair(2, 2)
 </pre>
 </div>
 <div class="entry" id="string.removePrefix"><code class="sig">fun string.removePrefix(prefix : string) : string</code><a class="anchor" href="#string.removePrefix">#</a>

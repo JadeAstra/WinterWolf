@@ -422,8 +422,9 @@ fun pyConstruct(cls : PyType, args : List<any?>, kwnames : List<string>?) : any?
   }
   val meta = cls.metaclass
   if (meta != null) {
+    // A metaclass's own __call__, written in Python or by the library (type has none of its own).
     val call = meta!!.lookup("__call__")
-    if (call !== pyUnbound and !(call is PyBuiltin)) {
+    if (call !== pyUnbound) {
       val all : open List<any?> = [cls]
       all.addAll(args)
       return pyCallV(call, all, kwnames)

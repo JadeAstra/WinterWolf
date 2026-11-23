@@ -6685,7 +6685,7 @@ struct Checker::Impl {
 
     static bool listChangingName(const std::string& name, size_t args) {
         static const std::unordered_set<std::string> changing = {
-            "remove", "removeAt", "removeFirst", "removeLast", "removeFirstOrNull", "removeLastOrNull", "clear", "sort",
+            "remove", "removeAt", "removeRange", "removeFirst", "removeLast", "removeFirstOrNull", "removeLastOrNull", "clear", "sort",
             "sortBy", "sortByDescending", "sortWith", "sortDescending", "reverse", "fill", "set", "shuffle", "removeAll",
             "retainAll", "removeIf", "replaceAll", "pop"};
         return changing.count(name) != 0 || ((name == "add" || name == "addAll") && args == 2);

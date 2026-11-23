@@ -17,10 +17,25 @@ value Complex(val re : float, val im : float) {
   static {
     // The number `re` + `im` i, from ints or floats.
     fun of(re : Number, im : Number = 0) : Complex => Complex(re.toFloat(), im.toFloat())
-    // The number of size `r` at the angle `theta` (radians) from the real axis.
+    // The number of size `r` at the angle `theta` (radians) from the real axis, as Python's
+    // cmath.rect: r cos theta + r sin theta i, a zero angle keeping r and r * theta; an infinite
+    // or NaN size or angle as rect's table of special values gives it (an infinite size at a
+    // finite angle its infinities' signs from cos and sin; NaN at a zero angle NaN + 0i).
     fun fromPolar(r : Number, theta : Number) : Complex {
+      val m = r.toFloat()
       val t = theta.toFloat()
-      return Complex(r.toFloat() * Math.cos(t), r.toFloat() * Math.sin(t))
+      if (m.isFinite() and t.isFinite()) {
+        return t == 0.0 ? Complex(m, m * t) : Complex(m * Math.cos(t), m * Math.sin(t))
+      }
+      if (m.isInfinite() and t.isFinite() and t != 0.0) {
+        val re = __negative(Math.cos(t)) ? -__complexInfinity : __complexInfinity
+        val im = __negative(Math.sin(t)) ? -__complexInfinity : __complexInfinity
+        return m > 0.0 ? Complex(re, im) : Complex(-re, -im)
+      }
+      if (m.isNaN()) { return t == 0.0 ? Complex(m, 0.0) : Complex(m, __complexNaN) }
+      if (m == 0.0) { return Complex(0.0, 0.0) }  // and the angle infinite or NaN
+      if (m.isInfinite()) { return t == 0.0 ? Complex(m, m > 0.0 ? t : -t) : Complex(__complexInfinity, __complexNaN) }
+      return Complex(__complexNaN, __complexNaN)  // a finite size, the angle infinite or NaN
     }
     // 0.
     val zero : Complex = Complex(0.0, 0.0)
@@ -47,25 +62,83 @@ value Complex(val re : float, val im : float) {
   // The number with both parts' signs turned round.
   op -() : Complex => Complex(-re, -im)
   // The product.
-  op *(other : Complex) : Complex => Complex(re * other.re - im * other.im, re * other.im + im * other.re)
+  // Infinities that would come out NaN + NaN i are recovered as C11's Annex G (_Cmultd) recovers
+  // them, as CPython's does: (1 + 0i) * (inf + NaN i) is inf + NaN i, not NaN + NaN i.
+  op *(other : Complex) : Complex {
+    var a = re
+    var b = im
+    var c = other.re
+    var d = other.im
+    val ac = a * c
+    val bd = b * d
+    val ad = a * d
+    val bc = b * c
+    val x = ac - bd
+    val y = ad + bc
+    if (!(x.isNaN() and y.isNaN())) { return Complex(x, y) }
+    var again = false
+    if (a.isInfinite() or b.isInfinite()) {
+      // This one is infinite: "box" it, and the other's NaNs made zeros.
+      a = __unitOf(a)
+      b = __unitOf(b)
+      if (c.isNaN()) { c = __zeroOf(c) }
+      if (d.isNaN()) { d = __zeroOf(d) }
+      again = true
+    }
+    if (c.isInfinite() or d.isInfinite()) {
+      c = __unitOf(c)
+      d = __unitOf(d)
+      if (a.isNaN()) { a = __zeroOf(a) }
+      if (b.isNaN()) { b = __zeroOf(b) }
+      again = true
+    }
+    if (!again and (ac.isInfinite() or bd.isInfinite() or ad.isInfinite() or bc.isInfinite())) {
+      // Infinities from overflow: the NaNs made zeros.
+      if (a.isNaN()) { a = __zeroOf(a) }
+      if (b.isNaN()) { b = __zeroOf(b) }
+      if (c.isNaN()) { c = __zeroOf(c) }
+      if (d.isNaN()) { d = __zeroOf(d) }
+      again = true
+    }
+    return again ? Complex(__complexInfinity * (a * c - b * d), __complexInfinity * (a * d + b * c)) : Complex(x, y)
+  }
   // The product with a float.
   op *(other : float) : Complex => Complex(re * other, im * other)
   // The product with an int.
   op *(other : int) : Complex => this * other.toFloat()
   // Divided by Smith's way, which neither overflows nor underflows on the way where the
-  // answer itself does not.
+  // answer itself does not; infinities and zeros that would come out NaN + NaN i recovered as
+  // C11's Annex G (_Cdivd) recovers them, as CPython's does: (inf + NaN i) / (1 + i) is inf - inf i.
   op /(other : Complex) : Complex {
     val c = other.re
     val d = other.im
+    var x = __complexNaN
+    var y = __complexNaN
     if (Math.abs(c) >= Math.abs(d)) {
       if (c == 0.0 and d == 0.0) { return Complex(re / 0.0, im / 0.0) }
       val r = d / c
       val t = c + d * r
-      return Complex((re + im * r) / t, (im - re * r) / t)
+      x = (re + im * r) / t
+      y = (im - re * r) / t
+    } else if (Math.abs(d) >= Math.abs(c)) {
+      val r = c / d
+      val t = c * r + d
+      x = (re * r + im) / t
+      y = (im * r - re) / t
     }
-    val r = c / d
-    val t = c * r + d
-    return Complex((re * r + im) / t, (im * r - re) / t)
+    if (x.isNaN() and y.isNaN()) {
+      if ((re.isInfinite() or im.isInfinite()) and c.isFinite() and d.isFinite()) {
+        val a = __unitOf(re)
+        val b = __unitOf(im)
+        return Complex(__complexInfinity * (a * c + b * d), __complexInfinity * (b * c - a * d))
+      }
+      if ((c.isInfinite() or d.isInfinite()) and re.isFinite() and im.isFinite()) {
+        val a = __unitOf(c)
+        val b = __unitOf(d)
+        return Complex(0.0 * (re * a + im * b), 0.0 * (im * a - re * b))
+      }
+    }
+    return Complex(x, y)
   }
   // Divided by a float.
   op /(other : float) : Complex => Complex(re / other, im / other)
@@ -254,16 +327,48 @@ op int.+(other : Complex) : Complex => Complex(this.toFloat() + other.re, other.
 op int.-(other : Complex) : Complex => Complex(this.toFloat() - other.re, -other.im)
 // The int times a Complex.
 op int.*(other : Complex) : Complex => Complex(this.toFloat() * other.re, this.toFloat() * other.im)
-// The int divided by a Complex.
-op int./(other : Complex) : Complex => Complex(this.toFloat(), 0.0) / other
+// The int divided by a Complex, as the float is.
+op int./(other : Complex) : Complex => this.toFloat() / other
 // The float plus a Complex.
 op float.+(other : Complex) : Complex => Complex(this + other.re, other.im)
 // The float less a Complex.
 op float.-(other : Complex) : Complex => Complex(this - other.re, -other.im)
 // The float times a Complex.
 op float.*(other : Complex) : Complex => Complex(this * other.re, this * other.im)
-// The float divided by a Complex.
-op float./(other : Complex) : Complex => Complex(this, 0.0) / other
+// The float divided by a Complex: Smith's way as Complex / Complex, with no imaginary part on the
+// left to add in (so its signs of zero come out as CPython's, and C11's: 2.0 / (-0.0 + 2i) is
+// -0.0 - 1i), and the zeros recovered where an infinite divisor gives NaN + NaN i.
+op float./(other : Complex) : Complex {
+  val c = other.re
+  val d = other.im
+  var x = __complexNaN
+  var y = __complexNaN
+  if (Math.abs(c) >= Math.abs(d)) {
+    if (c == 0.0 and d == 0.0) { return Complex(this / 0.0, __complexNaN) }
+    val r = d / c
+    val t = c + d * r
+    x = this / t
+    y = (-this * r) / t
+  } else if (Math.abs(d) >= Math.abs(c)) {
+    val r = c / d
+    val t = c * r + d
+    x = (this * r) / t
+    y = (-this) / t
+  }
+  if (x.isNaN() and y.isNaN() and this.isFinite() and (c.isInfinite() or d.isInfinite())) {
+    return Complex(0.0 * (this * __unitOf(c)), 0.0 * (-this * __unitOf(d)))
+  }
+  return Complex(x, y)
+}
+
+// 0 with x's sign (a NaN's sign bit too), as C's copysign(0.0, x).
+fun __zeroOf(x : float) : float => x.toBits() < 0 ? -0.0 : 0.0
+
+// 1 or 0 with x's sign: 1 for an infinity, 0 for anything else (C11's _Cdivd's step).
+fun __unitOf(x : float) : float {
+  val one = x.isInfinite() ? 1.0 : 0.0
+  return __negative(x) ? -one : one
+}
 
 // Whether `x` is below 0, -0.0 counted.
 fun __negative(x : float) : bool => x < 0.0 or (x == 0.0 and 1.0 / x < 0.0)

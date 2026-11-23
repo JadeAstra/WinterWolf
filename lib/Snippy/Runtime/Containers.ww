@@ -199,6 +199,12 @@ fun pyGetItem(o : any?, k : any?) : any? {
     }
     is PyType -> {
       val t = o as PyType
+      // The metaclass's __getitem__ first, as CPython looks there before __class_getitem__.
+      val meta = t.metaclass
+      if (meta != null) {
+        val g = meta!!.lookup("__getitem__")
+        if (g !== pyUnbound) { return __pyCall2Special(g, o, k) }
+      }
       val m = t.lookup("__class_getitem__")
       if (m !== pyUnbound) { return pyCall1(pyBindDescriptor(m, t, t), k) }
       if (t.builtin) { return PyGenericAlias(t, k) }
@@ -333,7 +339,7 @@ internal fun __pySetListSlice(l : open List<any?>, s : PySlice, v : any?) {
   if (ix[2] == 1) {
     val start = ix[0]
     val stop = ix[0] + ix[3]
-    for i in 0..<(stop - start) { l.removeAt(start) }
+    l.removeRange(start, stop)
     l.addAll(start, items)
     return
   }
@@ -371,7 +377,7 @@ fun pyDelItem(o : any?, k : any?) {
       if (k is PySlice) {
         val ix = pySliceIndices(k as PySlice, l.size)
         if (ix[2] == 1) {
-          for i in 0..<ix[3] { l.removeAt(ix[0]) }
+          l.removeRange(ix[0], ix[0] + ix[3])
           return
         }
         val gone : open List<int> = []

@@ -80,6 +80,24 @@ fun string.substringAfterLast(delimiter : string, missingDelimiterValue : string
   return this[at + delimiter.size..]
 }
 
+// The line and column of the character at `index` (or of the end, at `size`), both counted
+// from 1, a line ending at each "\n": what Python's json and ww's own JSON reader give in their
+// errors ("line 3 column 7"), and what a text editor shows. An IndexOutOfBoundsException for an
+// index past the end.
+//   "ab\ncd".lineAndColumnAt(4)   // Pair(2, 2)
+fun string.lineAndColumnAt(index : int) : Pair<int, int> {
+  if (index < 0 or index > this.size) { throw IndexOutOfBoundsException("index $index in text of ${this.size}") }
+  var line = 1
+  var lineStart = 0
+  var nl = this.indexOf('\n')
+  while (nl >= 0 and nl < index) {
+    line += 1
+    lineStart = nl + 1
+    nl = this.indexOf('\n', nl + 1)
+  }
+  return Pair(line, index - lineStart + 1)
+}
+
 // The string without `prefix` at its start; the string as it is when it does not start with it.
 fun string.removePrefix(prefix : string) : string => this.startsWith(prefix) ? this[prefix.size..] : this
 // The string without `suffix` at its end; the string as it is when it does not end with it.
