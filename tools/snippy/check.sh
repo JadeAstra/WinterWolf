@@ -11,8 +11,10 @@ if [ -z "$files" ]; then files=$(ls *.py *.snippy | grep -v "^_"); fi
 cr=$(printf '\r')
 bad=0
 for f in $files; do
+  rm -f -- *.tmp   # what a program leaves (mod_io.py's files), as expect.sh deletes them
   "$ww" "$f" > /tmp/snippy.raw 2> /tmp/snippy.rawerr < /dev/null
   code=$?
+  rm -f -- *.tmp
   sed "s/$cr\$//" /tmp/snippy.raw > /tmp/snippy.out
   sed "s/$cr\$//" /tmp/snippy.rawerr > /tmp/snippy.stderr
   {

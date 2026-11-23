@@ -7,3 +7,6 @@ tools/cpucheck/*.zip
 
 # Python leaves these beside tools/fmath/check.py
 __pycache__/
+
+# Files Snippy's test programs write while they run (mod_io.py), deleted by the runners
+tests/snippy_programs/lib/*.tmp

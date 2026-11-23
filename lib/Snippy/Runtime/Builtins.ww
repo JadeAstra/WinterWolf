@@ -853,10 +853,7 @@ fun pyDir(x : any?) : any? {
   return names
 }
 
-// open(): files, for trusted programs (5.3 makes it whole).
-fun pyOpen(a : PyArgs) : any? {
-  throw pyError(pyNotImplementedErrorType, "open() comes with Snippy's io module")
-}
+// open(): Runtime/ModIo.ww.
 
 // ---- Constructors of the builtin types ----
 

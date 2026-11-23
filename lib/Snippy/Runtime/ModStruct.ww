@@ -1,0 +1,468 @@
+import Snippy.Text.*
+// struct, as CPython 3.14's _struct packs and unpacks on Linux (x86-64): the byte orders @ = < > !,
+// native sizes and alignment for @ (long, size_t and pointers 8 bytes), the standard sizes for the
+// rest, every format character (x c b B ? h H i I l L q Q n N e f d s p P), half floats rounded as
+// PyFloat_Pack2 rounds them, and struct.error, OverflowError and TypeError where CPython raises
+// them, in its words. Struct objects hold a format read once; the functions read theirs each time.
+
+internal lazy val __pyStructErrorType : PyType = __pyExc("error", pyExceptionType).also { it.module = "struct" }
+
+internal fun __pyStructError(message : string) : PyError => pyError(__pyStructErrorType, message)
+
+// One code of a format: its character, where it goes, its size, and for s and p their length
+// (`count`); x and a count of 0 hold no value.
+class PyStructCode(val code : char, val offset : int, val size : int, val count : int)
+
+// A format read: its text, its codes (each s or p one code, each other value one code per
+// item), its size, and how many values it packs.
+class PyStructFormat(val text : string, val codes : List<PyStructCode>, val size : int, val bigEndian : bool,
+                     val native : bool) {
+  val values : int = codes.count { it.code != 'x' }
+}
+
+// Size of a code at the standard sizes, 0 where only native sizes have it (n N P), -1 for none.
+internal fun __pyStructStandardSize(c : char) : int {
+  return when (c) {
+    'x', 'c', 'b', 'B', '?', 's', 'p' -> 1
+    'h', 'H', 'e' -> 2
+    'i', 'I', 'l', 'L', 'f' -> 4
+    'q', 'Q', 'd' -> 8
+    'n', 'N', 'P' -> 0
+    else -> -1
+  }
+}
+
+// Size of a code at native sizes (LP64), which is also its alignment; -1 for none.
+internal fun __pyStructNativeSize(c : char) : int {
+  return when (c) {
+    'x', 'c', 'b', 'B', '?', 's', 'p' -> 1
+    'h', 'H', 'e' -> 2
+    'i', 'I', 'f' -> 4
+    'l', 'L', 'q', 'Q', 'n', 'N', 'd', 'P' -> 8
+    else -> -1
+  }
+}
+
+internal fun __pyStructSpace(c : char) : bool => c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\u{B}' or c == '\u{C}'
+
+// The format as Struct() takes it: str, or bytes read as Latin-1.
+internal fun __pyStructText(f : any?) : string {
+  if (f is string) { return f as string }
+  if (f is Bytes) {
+    val b = f as Bytes
+    val sb = StringBuilder()
+    for i in 0..<b.size { sb.append(b[i].toInt().char) }
+    return sb.toString()
+  }
+  throw pyTypeError("Struct() argument 1 must be a str or bytes object, not ${pyTypeName(f)}")
+}
+
+internal val __pyStructCache : open Map<string, PyStructFormat?> = {:}
+
+// A format read as CPython's prepare_s reads it.
+fun pyStructFormat(f : any?) : PyStructFormat {
+  val text = __pyStructText(f)
+  val cached = __pyStructCache[text, default = null]
+  if (cached != null) { return cached!! }
+  if (text.contains('\u{0}')) { throw __pyStructError("embedded null character") }
+  var at = 0
+  var native = true
+  var aligned = true
+  var big = false
+  if (text.size > 0) {
+    val first = text[0]
+    if (first == '@') { at = 1 }
+    if (first == '=') { at = 1; aligned = false; native = false }
+    if (first == '<') { at = 1; aligned = false; native = false }
+    if (first == '>' or first == '!') { at = 1; aligned = false; native = false; big = true }
+  }
+  val limit = 9223372036854775807
+  val codes : open List<PyStructCode> = []
+  var size = 0
+  while (at < text.size) {
+    var c = text[at]
+    at += 1
+    if (__pyStructSpace(c)) { continue }
+    var num = 1
+    if (c >= '0' and c <= '9') {
+      num = c.code - 48
+      while (at < text.size and text[at] >= '0' and text[at] <= '9') {
+        val d = text[at].code - 48
+        if (num > (limit - d) / 10) { throw __pyStructError("total struct size too long") }
+        num = num * 10 + d
+        at += 1
+      }
+      if (at >= text.size) { throw __pyStructError("repeat count given without format specifier") }
+      c = text[at]
+      at += 1
+    }
+    val itemSize = native ? __pyStructNativeSize(c) : __pyStructStandardSize(c)
+    if (itemSize <= 0) { throw __pyStructError("bad char in struct format") }
+    if (aligned and itemSize > 1 and c != 's' and c != 'p' and c != 'x') {
+      val rest = size % itemSize
+      if (rest != 0) { size += itemSize - rest }
+    }
+    if (c == 's' or c == 'p') {
+      codes.add(PyStructCode(c, size, num, num))
+      if (size > limit - num) { throw __pyStructError("total struct size too long") }
+      size += num
+      continue
+    }
+    if (num > 0 and itemSize > (limit - size) / num) { throw __pyStructError("total struct size too long") }
+    if (c != 'x') {
+      for i in 0..<num { codes.add(PyStructCode(c, size + i * itemSize, itemSize, 1)) }
+    }
+    size += num * itemSize
+  }
+  val made = PyStructFormat(text, codes, size, big, native)
+  if (__pyStructCache.size > 200) { __pyStructCache.clear() }
+  __pyStructCache[text] = made
+  return made
+}
+
+// ---- Packing ----
+
+internal fun __pyStructInt(x : any?) : any? {
+  if (x is bool) { return (x as bool) ? 1 : 0 }
+  if (x is int or x is BigInt) { return x }
+  if (x is PyObject and (x as PyObject).cls.lookup("__index__") !== pyUnbound) { return pyIndexValue(x) }
+  throw __pyStructError("required argument is not an integer")
+}
+
+internal fun __pyStructFloat(x : any?) : float {
+  if (x is float) { return x as float }
+  if (x is int or x is bool or x is BigInt) { return pyToFloat(x) }
+  if (x is PyObject) {
+    val cls = (x as PyObject).cls
+    if (cls.lookup("__float__") !== pyUnbound or cls.lookup("__index__") !== pyUnbound or cls.layout >= 5) { return pyRealArg(x) }
+  }
+  throw __pyStructError("required argument is not a float")
+}
+
+// The lowest and highest an int code holds, as BigInts.
+internal fun __pyStructRange(c : char, size : int) : Pair<BigInt, BigInt> {
+  val bits = size * 8
+  val unsigned = c == 'B' or c == 'H' or c == 'I' or c == 'L' or c == 'Q' or c == 'N' or c == 'P'
+  if (unsigned) { return Pair(BigInt.of(0), (BigInt.of(1) << (bits)) - BigInt.of(1)) }
+  return Pair(-(BigInt.of(1) << (bits - 1)), (BigInt.of(1) << (bits - 1)) - BigInt.of(1))
+}
+
+// Writes `n` (an int or a BigInt, in range) as `size` bytes at `at`.
+internal fun __pyStructPutInt(out : Bytes, at : int, size : int, n : any?, big : bool) {
+  // Two's complement in 64 bits: a BigInt here is an unsigned value past 2^63.
+  val v : int = n is BigInt ? ((n as BigInt) - (BigInt.of(1) << (64))).toInt() : n as int
+  for i in 0..<size {
+    val b = (v >> (i * 8)) & 255
+    out[big ? at + size - 1 - i : at + i] = b.toByte()
+  }
+}
+
+internal fun __pyStructPackHalf(x : float) : int {
+  if (x.isNaN()) { return 0x7e00 }
+  var sign = x.toBits() < 0 ? 1 : 0
+  if (x.isInfinite()) { return (sign << 15) | 0x7c00 }
+  if (x == 0.0) { return sign << 15 }
+  val ax = Math.abs(x)
+  val (m, e0) = ax.frexp()
+  var f = m * 2.0
+  var e = e0 - 1
+  if (e >= 16) { throw pyOverflowError("float too large to pack with e format") }
+  if (e < -25) {
+    f = 0.0
+    e = 0
+  } else if (e < -14) {
+    f = Math.ldexp(f, 14 + e)
+    e = 0
+  } else {
+    e += 15
+    f -= 1.0
+  }
+  f *= 1024.0
+  var bits = f.toInt()
+  val rest = f - bits.toFloat()
+  if (rest > 0.5 or (rest == 0.5 and bits % 2 == 1)) {
+    bits += 1
+    if (bits == 1024) {
+      bits = 0
+      e += 1
+      if (e == 31) { throw pyOverflowError("float too large to pack with e format") }
+    }
+  }
+  return (sign << 15) | (e << 10) | bits
+}
+
+internal fun __pyStructUnpackHalf(h : int) : float {
+  val sign = (h >> 15) & 1
+  val e = (h >> 10) & 0x1f
+  val f = h & 0x3ff
+  var x = 0.0
+  if (e == 0x1f) {
+    x = f == 0 ? 1.0 / 0.0 : 0.0 / 0.0
+  } else if (e == 0) {
+    x = Math.ldexp(f.toFloat() / 1024.0, -14)
+  } else {
+    x = Math.ldexp(1.0 + f.toFloat() / 1024.0, e - 15)
+  }
+  return sign == 1 ? -x : x
+}
+
+// Packs `args` from `from` into `out` at `base`, as `fmt` lays them out.
+internal fun __pyStructPackInto(fmt : PyStructFormat, out : Bytes, base : int, args : List<any?>, from : int) {
+  var k = from
+  val big = fmt.bigEndian
+  for code in fmt.codes {
+    if (code.code == 'x') { continue }
+    val v = args[k]
+    k += 1
+    val at = base + code.offset
+    when (code.code) {
+      'c' -> {
+        val b = v is Bytes ? v as Bytes : v is PyByteArray ? (v as PyByteArray).bytes : null
+        if (b == null or b!!.size != 1) { throw __pyStructError("char format requires a bytes object of length 1") }
+        out[at] = b!![0]
+      }
+      's', 'p' -> {
+        val b = v is Bytes ? v as Bytes : v is PyByteArray ? (v as PyByteArray).bytes : null
+        if (b == null) { throw __pyStructError("argument for '${code.code}' must be a bytes object") }
+        if (code.code == 's') {
+          val n = Math.min(b!!.size, code.count)
+          for i in 0..<n { out[at + i] = b!![i] }
+        } else if (code.count > 0) {
+          val n = Math.min(b!!.size, code.count - 1)
+          for i in 0..<n { out[at + 1 + i] = b!![i] }
+          out[at] = Math.min(n, 255).toByte()
+        }
+      }
+      '?' -> out[at] = (pyTruth(v) ? 1 : 0).toByte()
+      'e' -> __pyStructPutInt(out, at, 2, __pyStructPackHalf(__pyStructFloat(v)), big)
+      'f' -> {
+        val x = __pyStructFloat(v)
+        out.putFloat32(at, x, big)
+        if (out.float32(at, big).isInfinite() and !x.isInfinite() and !x.isNaN()) { throw pyOverflowError("float too large to pack with f format") }
+      }
+      'd' -> out.putFloat64(at, __pyStructFloat(v), big)
+      else -> {
+        val n = __pyStructInt(v)
+        val (lo, hi) = __pyStructRange(code.code, code.size)
+        val nb = pyBig(n)
+        if (nb < lo or nb > hi) { throw __pyStructError("'${code.code}' format requires $lo <= number <= $hi") }
+        __pyStructPutInt(out, at, code.size, n, big)
+      }
+    }
+  }
+}
+
+fun pyStructPack(fmt : PyStructFormat, args : List<any?>, from : int, what : string) : Bytes {
+  if (args.size - from != fmt.values) { throw __pyStructError("$what expected ${fmt.values} items for packing (got ${args.size - from})") }
+  val out = Bytes(fmt.size)
+  __pyStructPackInto(fmt, out, 0, args, from)
+  return out
+}
+
+// ---- Unpacking ----
+
+internal fun __pyStructGetInt(b : Bytes, at : int, size : int, signed : bool, big : bool) : any? {
+  var v = 0
+  for i in 0..<size {
+    val byte = b[big ? at + i : at + size - 1 - i].toInt()
+    v = (v << 8) | byte
+  }
+  if (size < 8) {
+    if (signed and ((v >> (size * 8 - 1)) & 1) == 1) { v -= 1 << (size * 8) }
+    return v
+  }
+  if (!signed and v < 0) { return pyNorm(BigInt.of(v) + (BigInt.of(1) << (64))) }
+  return v
+}
+
+fun pyStructUnpackAt(fmt : PyStructFormat, b : Bytes, base : int) : PyTuple {
+  val out : open List<any?> = []
+  val big = fmt.bigEndian
+  for code in fmt.codes {
+    val at = base + code.offset
+    when (code.code) {
+      'x' -> {}
+      'c' -> out.add(pyBytesPart(b, at, at + 1))
+      's' -> out.add(pyBytesPart(b, at, at + code.count))
+      'p' -> {
+        if (code.count == 0) { out.add(Bytes(0)) } else {
+          var n = b[at].toInt()
+          if (n >= code.count) { n = code.count - 1 }
+          out.add(pyBytesPart(b, at + 1, at + 1 + n))
+        }
+      }
+      '?' -> out.add(b[at].toInt() != 0)
+      'e' -> out.add(__pyStructUnpackHalf(__pyStructGetInt(b, at, 2, false, big) as int))
+      'f' -> out.add(b.float32(at, big))
+      'd' -> out.add(b.float64(at, big))
+      else -> {
+        val signed = code.code == 'b' or code.code == 'h' or code.code == 'i' or code.code == 'l' or code.code == 'q' or code.code == 'n'
+        out.add(__pyStructGetInt(b, at, code.size, signed, big))
+      }
+    }
+  }
+  return PyTuple(out)
+}
+
+internal fun __pyStructBuffer(x : any?) : Bytes {
+  val b = pyBytesLike(x)
+  if (b == null) { throw pyTypeError("a bytes-like object is required, not '${pyTypeName(x)}'") }
+  return b!!
+}
+
+fun pyStructUnpack(fmt : PyStructFormat, x : any?) : PyTuple {
+  val b = __pyStructBuffer(x)
+  if (b.size != fmt.size) { throw __pyStructError("unpack requires a buffer of ${fmt.size} bytes") }
+  return pyStructUnpackAt(fmt, b, 0)
+}
+
+fun pyStructUnpackFrom(fmt : PyStructFormat, x : any?, offset0 : any?) : PyTuple {
+  val b = __pyStructBuffer(x)
+  val offset = pyIndex(offset0)
+  var at = offset
+  if (offset < 0) {
+    if (offset + b.size < 0) { throw __pyStructError("offset $offset out of range for ${b.size}-byte buffer") }
+    at = offset + b.size
+    if (b.size - at < fmt.size) { throw __pyStructError("not enough data to unpack ${fmt.size} bytes at offset $offset") }
+  } else if (b.size - at < fmt.size) {
+    throw __pyStructError("unpack_from requires a buffer of at least ${fmt.size + offset} bytes for unpacking ${fmt.size} bytes at offset $offset (actual buffer size is ${b.size})")
+  }
+  return pyStructUnpackAt(fmt, b, at)
+}
+
+fun pyStructPackIntoBuffer(fmt : PyStructFormat, target : any?, offset0 : any?, args : List<any?>, from : int) {
+  var out : Bytes? = null
+  var start = 0
+  if (target is PyByteArray) {
+    out = (target as PyByteArray).bytes
+  } else if (target is PyMemoryView and !(target as PyMemoryView).readonly and (target as PyMemoryView).contiguous()) {
+    out = (target as PyMemoryView).memory()
+    start = (target as PyMemoryView).start
+  }
+  if (out == null) {
+    throw pyTypeError("argument must be read-write bytes-like object, not ${pyTypeName(target)}")
+  }
+  val length = target is PyMemoryView ? (target as PyMemoryView).count * (target as PyMemoryView).itemsize : out!!.size
+  if (args.size - from != fmt.values) { throw __pyStructError("pack_into expected ${fmt.values} items for packing (got ${args.size - from})") }
+  val offset = pyIndex(offset0)
+  var at = offset
+  if (offset < 0) {
+    if (offset + length < 0) { throw __pyStructError("offset $offset out of range for $length-byte buffer") }
+    at = offset + length
+    if (length - at < fmt.size) { throw __pyStructError("no space to pack ${fmt.size} bytes at offset $offset") }
+  } else if (length - at < fmt.size) {
+    throw __pyStructError("pack_into requires a buffer of at least ${fmt.size + offset} bytes for packing ${fmt.size} bytes at offset $offset (actual buffer size is $length)")
+  }
+  // Packed apart first, so that a value that cannot be packed leaves the buffer as it was.
+  val packed = Bytes(fmt.size)
+  __pyStructPackInto(fmt, packed, 0, args, from)
+  for i in 0..<fmt.size { out!![start + at + i] = packed[i] }
+}
+
+internal lazy val __pyUnpackIteratorType : PyType = pyNativeType("unpack_iterator", "_struct", ["__iter__", "__next__", "__length_hint__"], null)
+
+class PyStructIter(val fmt : PyStructFormat, val b : Bytes) : PyNative() {
+  var at = 0
+  override fun pyType() : PyType => __pyUnpackIteratorType
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "__iter__" -> this
+      "__next__" -> {
+        if (at + fmt.size > b.size) { throw pyStopIteration(null) }
+        val t = pyStructUnpackAt(fmt, b, at)
+        at += fmt.size
+        t
+      }
+      "__length_hint__" -> (b.size - at) / fmt.size
+      else -> throw pyAttributeError("'unpack_iterator' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+fun pyStructIterUnpack(fmt : PyStructFormat, x : any?) : PyStructIter {
+  val b = __pyStructBuffer(x)
+  if (fmt.size == 0) { throw __pyStructError("cannot iteratively unpack with a struct of length 0") }
+  if (b.size % fmt.size != 0) { throw __pyStructError("iterative unpacking requires a buffer of a multiple of ${fmt.size} bytes") }
+  return PyStructIter(fmt, b)
+}
+
+// ---- Struct ----
+
+internal lazy val __pyStructType : PyType = pyNativeType("Struct", "_struct",
+  ["pack", "pack_into", "unpack", "unpack_from", "iter_unpack", "__repr__"], { t, args, kw ->
+    val a = PyArgs(args, kw, "Struct()")
+    a.only(["format"])
+    if (a.pos.isEmpty() and !a.has("format")) { throw pyTypeError("Struct() missing required argument 'format' (pos 1)") }
+    if (a.pos.size > 1) { throw pyTypeError("Struct() takes at most 1 argument (${a.pos.size} given)") }
+    PyStruct(pyStructFormat(a.pos.isEmpty() ? a.get("format", null) : a.pos[0]))
+  })
+
+class PyStruct(val fmt : PyStructFormat) : PyNative() {
+  override fun pyType() : PyType => __pyStructType
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "format" -> fmt.text
+      "size" -> fmt.size
+      else -> pyUnbound
+    }
+  }
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "pack" -> pyStructPack(fmt, a.pos, 0, "pack")
+      "pack_into" -> {
+        if (a.pos.size < 2) { throw pyTypeError("pack_into expected buffer and offset arguments") }
+        pyStructPackIntoBuffer(fmt, a.pos[0], a.pos[1], a.pos, 2)
+        null
+      }
+      "unpack" -> {
+        __pyCheckCount("unpack", a, 1, 1)
+        pyStructUnpack(fmt, a.pos[0])
+      }
+      "unpack_from" -> {
+        a.only(["buffer", "offset"])
+        val buffer = a.pos.size > 0 ? a.pos[0] : a.get("buffer", null)
+        pyStructUnpackFrom(fmt, buffer, a.pos.size > 1 ? a.pos[1] : a.get("offset", 0))
+      }
+      "iter_unpack" -> pyStructIterUnpack(fmt, a.pos[0])
+      "__repr__" -> "Struct(${pyRepr(fmt.text)})"
+      else -> throw pyAttributeError("'_struct.Struct' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- The module ----
+
+fun pyStructModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["error"] = __pyStructErrorType
+  m["Struct"] = __pyStructType
+  m["calcsize"] = __pyB("calcsize") { a ->
+    __pyCheckCount("calcsize", a, 1, 1)
+    pyStructFormat(a.pos[0]).size
+  }
+  m["pack"] = __pyB("pack") { a ->
+    if (a.pos.isEmpty()) { throw pyTypeError("missing format argument") }
+    pyStructPack(pyStructFormat(a.pos[0]), a.pos, 1, "pack")
+  }
+  m["pack_into"] = __pyB("pack_into") { a ->
+    if (a.pos.isEmpty()) { throw pyTypeError("missing format argument") }
+    if (a.pos.size < 3) { throw pyTypeError("pack_into expected buffer and offset arguments") }
+    pyStructPackIntoBuffer(pyStructFormat(a.pos[0]), a.pos[1], a.pos[2], a.pos, 3)
+    null
+  }
+  m["unpack"] = __pyB("unpack") { a ->
+    __pyCheckCount("unpack", a, 2, 2)
+    pyStructUnpack(pyStructFormat(a.pos[0]), a.pos[1])
+  }
+  m["unpack_from"] = __pyB("unpack_from") { a ->
+    a.only(["buffer", "offset"])
+    if (a.pos.isEmpty()) { throw pyTypeError("unpack_from() missing required argument 'format' (pos 1)") }
+    val buffer = a.pos.size > 1 ? a.pos[1] : a.get("buffer", null)
+    pyStructUnpackFrom(pyStructFormat(a.pos[0]), buffer, a.pos.size > 2 ? a.pos[2] : a.get("offset", 0))
+  }
+  m["iter_unpack"] = __pyB("iter_unpack") { a ->
+    __pyCheckCount("iter_unpack", a, 2, 2)
+    pyStructIterUnpack(pyStructFormat(a.pos[0]), a.pos[1])
+  }
+  return pyNativeModule("struct", m)
+}

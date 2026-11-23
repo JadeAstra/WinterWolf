@@ -185,6 +185,12 @@ fun pyExcMatch(e : PyExc, t : any?) : bool {
 // str(e) for an exception of a class that does not write its own.
 fun pyExcStr(e : PyExc) : string {
   val args = e.args.items
+  // An OSError with errno and strerror: "[Errno 2] No such file or directory: 'name'".
+  if (e.cls.isSubtype(pyOSErrorType) and args.size >= 2 and args.size <= 5) {
+    val base = "[Errno ${pyStr(args[0])}] ${pyStr(args[1])}"
+    val name = e.dict == null ? null : e.dict!!.get("filename", null)
+    return name == null ? base : base + ": " + pyRepr(name)
+  }
   if (e.cls.isSubtype(pyKeyErrorType) and args.size == 1) { return pyRepr(args[0]) }
   if (args.isEmpty()) { return "" }
   if (args.size == 1) { return pyStr(args[0]) }

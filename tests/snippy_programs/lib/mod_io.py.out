@@ -1,0 +1,116 @@
+TextIOWrapper mod_io_a.tmp w UTF-8 strict False False True True
+11 7 17
+35
+True
+'first' ' line\n' 11 'second\n' 'third, no newline\nx\ny\nprinted 1 2.5\n' '' ''
+['first line\n', 'second\n', 'third, no newline\n', 'x\n', 'y\n', 'printed 1 2.5\n']
+['first line\n', 'second\n', 'third, no newline\n', 'x\n', 'y\n', 'printed 1 2.5\n']
+first line
+sec  'ond\n'
+OSError telling position disabled by next() call
+True 0 'firs' 54 ''
+54 9 63
+['printed 1 2.5', 'appended']
+'first' 0 5 0 'FIRST line\n'
+8 '' 0 'one\ntwo\n' 4 0 'one\n'
+4 '' 0 'one\n'
+b'a\nb\r\nc\rd\r'
+'a\nb\nc\nd\n' ('\r', '\n', '\r\n')
+['a\n', 'b\r\n', 'c\r', 'd\r'] ('\r', '\n', '\r\n')
+['a\nb\r', '\nc\r', 'd\r']
+['a\nb\r\n', 'c\rd\r']
+['a\n', 'b\r\n', 'c\rd\r']
+['a\n', 'b\n', 'c\n', 'd\n']
+b'p\r\nq\r\n'
+b'p\rq\r'
+'one\n' 5 'two\n' 9 ('\n', '\r\n')
+utf-8 b'h\xc3\xa9llo\nz' 'héllo\nz' utf-8
+latin-1 b'h\xe9llo\nz' 'héllo\nz' latin-1
+utf-16 b'\xff\xfeh\x00\xe9\x00l\x00l\x00o\x00\n\x00z\x00' 'héllo\nz' utf-16
+utf-16-le b'h\x00\xe9\x00l\x00l\x00o\x00\n\x00z\x00' 'héllo\nz' utf-16-le
+utf-8-sig b'\xef\xbb\xbfh\xc3\xa9llo\nz' 'héllo\nz' utf-8-sig
+utf-32 b'\xff\xfe\x00\x00h\x00\x00\x00\xe9\x00\x00\x00l\x00\x00\x00l\x00\x00\x00o\x00\x00\x00\n\x00\x00\x00z\x00\x00\x00' 'héllo\nz' utf-32
+ascii b'hello\nz' 'hello\nz' ascii
+'a' 1 'é' 3 '€😀' 10 'b' 11
+UnicodeDecodeError 'utf-8' codec can't decode byte 0xff in position 2: invalid start byte
+'ok�bad\n' replace
+'ok\udcffbad\n'
+'okÿbad\n'
+b'&#233;'
+UnicodeEncodeError 'ascii' codec can't encode character '\xe9' in position 0: ordinal not in range(128)
+LookupError unknown encoding: nope
+BufferedWriter mod_io_b.tmp wb False True True False
+10 4 2 16
+BufferedReader rb b'012' 3 b'34' 14 b'cd' 1 3 b'34' b''
+b'0123456789\n' b'ab\n' b'cd' b'' 16
+[b'0123456789\n', b'ab\n', b'cd'] []
+4 bytearray(b'0123') b'4' b'45'
+BufferedRandom rb+ b'01' 2 4 0 b'01XY4' 5 5
+b'01XY4'
+5 2 7
+BufferedRandom 3 0 b'abc' 1 3 1
+FileIO rb b'a' b'' True
+FileIO rb mod_io_b.tmp
+BufferedReader rb FileIO rb
+FileIO rb+
+FileIO ab
+FileExistsError [Errno 17] File exists: 'mod_io_x.tmp'
+b'new'
+<_io.TextIOWrapper name='T' mode='w' encoding='utf-8'>
+<_io.BufferedWriter name='T'> <_io.FileIO name='T' mode='wb' closefd=True>
+True True True False
+True True True True
+<_io.BufferedReader name='B'>
+<_io.BufferedRandom name='B'>
+<_io.BufferedRandom name='B'>
+0 1 2 True True True
+FileNotFoundError [Errno 2] No such file or directory: 'mod_io_missing.tmp'
+2 No such file or directory mod_io_missing.tmp (2, 'No such file or directory') FileNotFoundError(2, 'No such file or directory')
+IsADirectoryError [Errno 21] Is a directory: '.'
+IsADirectoryError [Errno 21] Is a directory: '.'
+FileNotFoundError [Errno 2] No such file or directory: 'mod_io_no_dir/x.tmp'
+ValueError must have exactly one of create/read/write/append mode
+ValueError can't have text and binary mode at once
+ValueError must have exactly one of create/read/write/append mode
+ValueError Must have exactly one of create/read/write/append mode and at most one plus
+ValueError binary mode doesn't take an encoding argument
+ValueError binary mode doesn't take an errors argument
+ValueError binary mode doesn't take a newline argument
+ValueError can't have unbuffered text I/O
+ValueError illegal newline value: x
+ValueError invalid mode: 'q'
+TypeError expected str, bytes or os.PathLike object, not float
+TypeError open() argument 'mode' must be str, not int
+ValueError I/O operation on closed file.
+ValueError I/O operation on closed file.
+ValueError I/O operation on closed file.
+ValueError I/O operation on closed file.
+ValueError I/O operation on closed file.
+ValueError I/O operation on closed file.
+ok True
+UnsupportedOperation not writable
+UnsupportedOperation can't do nonzero cur-relative seeks
+UnsupportedOperation can't do nonzero end-relative seeks
+ValueError negative seek position -1
+ValueError invalid whence (3, should be 0, 1 or 2)
+UnsupportedOperation not readable
+UnsupportedOperation not readable
+TypeError write() argument must be str, not bytes
+TypeError write() argument must be str, not int
+UnsupportedOperation read
+TypeError a bytes-like object is required, not 'str'
+UnsupportedOperation write
+OSError [Errno 22] Invalid argument
+TypeError argument should be integer or None, not 'str'
+0 'line one\n'
+1 'line two\n'
+hel 'lo\n' 6 ['world\n'] True
+3 4 7 abc
+def 1 bc
+def 0 2 'ab'
+'x 1!' StringIO True True True True False
+['a\n', 'b\n', 'c'] ['p\n', 'q'] ['p\r\n', 'q']
+ValueError I/O operation on closed file
+b'ab' b'c\n' 4 b'def' b'abc\ndef' 7 1 b'abc\ndef!' BytesIO
+5 2 1 b'12x45' 3 b'12x' 3 10 1 b'12x\x00\x00\x00\x00\x00\x00\x00z'
+[b'a\n', b'b'] True b'12'

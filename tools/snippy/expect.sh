@@ -11,6 +11,7 @@ cd "$dir" || exit 1
 files="$@"
 if [ -z "$files" ]; then files=$(ls *.py *.snippy | grep -v "^_"); fi
 for f in $files; do
+  rm -f -- *.tmp   # what a program leaves (mod_io.py's files), gone before and after each
   PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 timeout 60 python3.14 "$f" > "$f.out" 2> "$f.stderr" < /dev/null
   code=$?
   {
@@ -19,4 +20,5 @@ for f in $files; do
     tail -n 1 "$f.stderr"
   } > "$f.err"
   rm -f "$f.stderr"
+  rm -f -- *.tmp
 done

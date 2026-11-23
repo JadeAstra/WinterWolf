@@ -235,6 +235,15 @@ fun pyNext(it : any?) : any? {
   throw pyTypeError("'${pyTypeName(it)}' object is not an iterator")
 }
 
+// Whether next() takes `it`: an iterator of the runtime's, an object whose class has __next__, or
+// one of the runtime's own objects whose type lists it (struct's unpack_iterator, a file).
+internal fun __pyIsIterator(it : any?) : bool {
+  if (it is PyIterator) { return true }
+  if (it is PyObject) { return (it as PyObject).cls.lookup("__next__") !== pyUnbound }
+  if (it is PyNative) { return (it as PyNative).pyType().lookup("__next__") !== pyUnbound }
+  return false
+}
+
 // next(it) and next(it, default) as the builtin.
 fun pyNextOf1(it : any?) : any? {
   if (it is PyGenerator) {
@@ -243,7 +252,7 @@ fun pyNextOf1(it : any?) : any? {
     if (v === pyEnd) { throw pyStopIteration(g.result) }
     return v
   }
-  if (!(it is PyIterator) and !(it is PyObject and (it as PyObject).cls.lookup("__next__") !== pyUnbound)) {
+  if (!__pyIsIterator(it)) {
     throw pyTypeError("'${pyTypeName(it)}' object is not an iterator")
   }
   if (it is PyObject) { return __pyCall1Special((it as PyObject).cls.lookup("__next__"), it) }
@@ -252,7 +261,7 @@ fun pyNextOf1(it : any?) : any? {
   return v
 }
 fun pyNextOf2(it : any?, otherwise : any?) : any? {
-  if (!(it is PyIterator) and !(it is PyObject and (it as PyObject).cls.lookup("__next__") !== pyUnbound)) {
+  if (!__pyIsIterator(it)) {
     throw pyTypeError("'${pyTypeName(it)}' object is not an iterator")
   }
   val v = pyNext(it)

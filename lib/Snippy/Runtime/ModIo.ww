@@ -1,0 +1,1310 @@
+import Snippy.Text.*
+// open() and the io module, as CPython 3.14's _io behaves on Linux: FileIO, BufferedReader,
+// BufferedWriter and BufferedRandom over a file, TextIOWrapper over those (encodings with their
+// byte order marks and error handlers, newline translation both ways, tell's positions in bytes),
+// StringIO and BytesIO in memory, the abstract IOBase classes for isinstance, and the errors in
+// CPython's words. Files are WinterWolf's RandomAccessFile, so a safe script cannot open one, as
+// it cannot touch files. Text is UTF-8 unless an encoding is given, and "\n" is written as "\n"
+// (CPython on Linux), on every system.
+
+// ---- Types ----
+
+internal fun __pyIoType(name : string, module : string, methods : List<string>, bases : List<PyType>,
+                        construct : ((PyType, List<any?>, List<string>?) -> any?)?) : PyType {
+  val t = pyNativeType(name, module, methods, construct)
+  t.bases = bases
+  val mro : open List<PyType> = [t]
+  for b in bases {
+    for m in b.mro { if (!(mro.any { it === m })) { mro.add(m) } }
+  }
+  t.mro = mro
+  return t
+}
+
+internal val __pyIoMethods : List<string> = ["read", "read1", "readall", "readinto", "readinto1", "readline", "readlines",
+  "write", "writelines", "seek", "tell", "truncate", "flush", "close", "readable", "writable", "seekable", "isatty",
+  "fileno", "peek", "detach", "getvalue", "getbuffer", "__enter__", "__exit__", "__iter__", "__next__", "__repr__"]
+
+internal lazy val __pyIOBaseType : PyType = __pyIoType("IOBase", "io", [], [pyObjectType], null)
+internal lazy val __pyRawIOBaseType : PyType = __pyIoType("RawIOBase", "io", [], [__pyIOBaseType], null)
+internal lazy val __pyBufferedIOBaseType : PyType = __pyIoType("BufferedIOBase", "io", [], [__pyIOBaseType], null)
+internal lazy val __pyTextIOBaseType : PyType = __pyIoType("TextIOBase", "io", [], [__pyIOBaseType], null)
+internal lazy val __pyFileIOType : PyType = __pyIoType("FileIO", "_io", __pyIoMethods, [__pyRawIOBaseType], { t, args, kw ->
+  val a = PyArgs(args, kw, "FileIO()")
+  a.only(["file", "mode", "closefd", "opener"])
+  val file = a.pos.size > 0 ? a.pos[0] : a.get("file", null)
+  val mode = a.pos.size > 1 ? a.pos[1] : a.get("mode", "r")
+  if (!(mode is string)) { throw pyTypeError("FileIO() argument 'mode' must be str, not ${pyTypeName(mode)}") }
+  val m = __pyParseMode(mode as string, true)
+  PyBinFile(0, __pyOpenChannel(file, m), file, m)
+})
+internal lazy val __pyBufferedReaderType : PyType = __pyIoType("BufferedReader", "_io", __pyIoMethods, [__pyBufferedIOBaseType], { t, args, kw -> __pyWrapRaw(1, args) })
+internal lazy val __pyBufferedWriterType : PyType = __pyIoType("BufferedWriter", "_io", __pyIoMethods, [__pyBufferedIOBaseType], { t, args, kw -> __pyWrapRaw(2, args) })
+internal lazy val __pyBufferedRandomType : PyType = __pyIoType("BufferedRandom", "_io", __pyIoMethods, [__pyBufferedIOBaseType], { t, args, kw -> __pyWrapRaw(3, args) })
+internal lazy val __pyBytesIOType : PyType = __pyIoType("BytesIO", "_io", __pyIoMethods, [__pyBufferedIOBaseType], { t, args, kw ->
+  val a = PyArgs(args, kw, "BytesIO()")
+  a.only(["initial_bytes"])
+  val init = a.pos.size > 0 ? a.pos[0] : a.get("initial_bytes", null)
+  val ch = PyChannel(null)
+  if (init != null) {
+    ch.rawWrite(0, __pyNeedBytes(init))
+  }
+  PyBinFile(4, ch, null, __pyMemoryMode())
+})
+internal lazy val __pyStringIOType : PyType = __pyIoType("StringIO", "_io", __pyIoMethods, [__pyTextIOBaseType], { t, args, kw ->
+  val a = PyArgs(args, kw, "StringIO()")
+  a.only(["initial_value", "newline"])
+  val init = a.pos.size > 0 ? a.pos[0] : a.get("initial_value", "")
+  val nl = a.pos.size > 1 ? a.pos[1] : a.get("newline", "\n")
+  if (init != null and !(init is string)) { throw pyTypeError("initial_value must be str or None, not ${pyTypeName(init)}") }
+  __pyCheckNewline(nl)
+  val s = PyStringIO(nl as string?)
+  if (init != null) {
+    s.put(init as string)
+    s.pos = 0
+  }
+  s
+})
+
+// TextIOWrapper is the type sys.stdout already has, so that isinstance(sys.stdout, io.TextIOWrapper) holds.
+internal lazy val __pyTextIOWrapperType : PyType = __pyMakeTextIOWrapperType()
+
+internal fun __pyMakeTextIOWrapperType() : PyType {
+  val t = pyTextIOType
+  t.module = "_io"
+  t.builtin = true
+  for m in __pyIoMethods { if (!(m in t.dict.keys)) { t.dict[m] = PyMethodDescriptor(t, m) } }
+  t.bases = [__pyTextIOBaseType]
+  t.mro = [t, __pyTextIOBaseType, __pyIOBaseType, pyObjectType]
+  t.construct = { tt, args, kw ->
+    val a = PyArgs(args, kw, "TextIOWrapper()")
+    a.only(["buffer", "encoding", "errors", "newline", "line_buffering", "write_through"])
+    val buffer = a.pos.size > 0 ? a.pos[0] : a.get("buffer", null)
+    if (!(buffer is PyBinFile)) { throw pyTypeError("TextIOWrapper() needs a buffered binary stream of Snippy's, not ${pyTypeName(buffer)}") }
+    val encoding = a.pos.size > 1 ? a.pos[1] : a.get("encoding", null)
+    val errors = a.pos.size > 2 ? a.pos[2] : a.get("errors", null)
+    val newline = a.pos.size > 3 ? a.pos[3] : a.get("newline", null)
+    PyTextFile(buffer as PyBinFile, encoding as string?, errors as string?, __pyCheckNewline(newline), (buffer as PyBinFile).m.text)
+  }
+  pyTypeChanged()
+  return t
+}
+
+lazy val pyUnsupportedOperationType : PyType = __pyExc("UnsupportedOperation", pyOSErrorType).also {
+  it.module = "io"
+  it.bases = [pyOSErrorType, pyValueErrorType]
+  it.mro = [it, pyOSErrorType, pyValueErrorType, pyExceptionType, pyBaseExceptionType, pyObjectType]
+}
+
+internal fun __pyUnsupported(message : string) : PyError => pyError(pyUnsupportedOperationType, message)
+
+// An OSError of the kind `t` with errno and strerror, and the file name where there is one.
+fun pyOSError(t : PyType, errno : int, strerror : string, filename : any?) : PyError {
+  val e = pyNewException(t, [errno, strerror])
+  if (filename != null) { e.dict!!.set("filename", filename) }
+  val err = PyError(e)
+  e.thrown = err
+  return err
+}
+
+// ---- Modes ----
+
+// A mode read: what open() and FileIO() check, and what the objects say.
+class PyIoMode(val text : string, val reading : bool, val writing : bool, val appending : bool, val creating : bool,
+               val plus : bool, val binary : bool, val textMode : bool) {
+  val readable : bool = reading or plus
+  val writable : bool = writing or appending or creating or plus
+  // FileIO's mode: 'rb', 'wb', 'ab', 'xb', with '+' after for updating.
+  val rawMode : string = (creating ? "xb" : appending ? "ab" : (reading and !plus) ? "rb" : (writing and !plus) ? "wb" : "rb") + (plus ? "+" : "")
+}
+
+internal fun __pyMemoryMode() : PyIoMode => PyIoMode("rb+", true, false, false, false, true, true, false)
+
+internal fun __pyParseMode(mode : string, raw : bool) : PyIoMode {
+  var r = false
+  var w = false
+  var a = false
+  var x = false
+  var plus = false
+  var b = false
+  var t = false
+  val seen : open List<char> = []
+  for c in mode {
+    if (!("xrwab+t".contains(c)) or c in seen) { throw pyValueError("invalid mode: '$mode'") }
+    seen.add(c)
+    when (c) {
+      'r' -> r = true
+      'w' -> w = true
+      'a' -> a = true
+      'x' -> x = true
+      '+' -> plus = true
+      'b' -> b = true
+      't' -> t = true
+    }
+  }
+  if (raw and (b or t)) { throw pyValueError("invalid mode: $mode") }
+  if (t and b) { throw pyValueError("can't have text and binary mode at once") }
+  val count = (r ? 1 : 0) + (w ? 1 : 0) + (a ? 1 : 0) + (x ? 1 : 0)
+  if (count > 1) { throw pyValueError("must have exactly one of create/read/write/append mode") }
+  return PyIoMode(mode, r, w, a, x, plus, b or raw, !(b or raw))
+}
+
+internal fun __pyCheckNewline(nl : any?) : string? {
+  if (nl == null) { return null }
+  if (!(nl is string)) { throw pyTypeError("newline must be str or None, not ${pyTypeName(nl)}") }
+  val s = nl as string
+  if (s != "" and s != "\n" and s != "\r" and s != "\r\n") { throw pyValueError("illegal newline value: $s") }
+  return s
+}
+
+// ---- Channels: a file or memory, read ahead and written behind ----
+
+// Where the bytes are: a file (RandomAccessFile) read ahead and written behind in pieces, or
+// memory that grows. Each io object over the same file shares one, and its position.
+class PyChannel(val file : RandomAccessFile?) {
+  var pos = 0
+  var closed = false
+  var mem : Bytes = Bytes(0)
+  var memLength = 0
+  var ahead : Bytes = Bytes(0)
+  var aheadStart = 0
+  val pending : open List<Bytes> = []
+  var pendingSize = 0
+  var pendingStart = 0
+  var appending = false
+
+  fun rawRead(at : int, n : int) : Bytes {
+    if (file != null) {
+      try {
+        return file!!.readAt(at, n)
+      } catch (e : IOException) {
+        throw __pyIoFailed(e)
+      }
+    }
+    if (at >= memLength or n <= 0) { return Bytes(0) }
+    return pyBytesPart(mem, at, Math.min(memLength, at + n))
+  }
+  fun rawWrite(at : int, b : Bytes) {
+    if (file != null) {
+      try {
+        file!!.writeAt(at, b)
+      } catch (e : IOException) {
+        throw __pyIoFailed(e)
+      }
+      return
+    }
+    val end = at + b.size
+    if (end > mem.size) {
+      var room = Math.max(16, mem.size * 2)
+      while (room < end) { room *= 2 }
+      val grown = Bytes(room)
+      for i in 0..<memLength { grown[i] = mem[i] }
+      mem = grown
+    }
+    // Past the end: what is between is zeros, whatever was there before a truncate.
+    for i in memLength..<at { mem[i] = 0.toByte() }
+    for i in 0..<b.size { mem[at + i] = b[i] }
+    if (end > memLength) { memLength = end }
+  }
+  fun flush() {
+    if (pendingSize == 0) { return }
+    val data = pending.size == 1 ? pending[0] : __pyBytesCat(pending)
+    pending.clear()
+    pendingSize = 0
+    rawWrite(pendingStart, data)
+  }
+  fun size() : int {
+    flush()
+    if (file == null) { return memLength }
+    try {
+      return file!!.size()
+    } catch (e : IOException) {
+      throw __pyIoFailed(e)
+    }
+  }
+  fun dropAhead() {
+    if (ahead.size > 0) { ahead = Bytes(0) }
+  }
+  // Up to `n` bytes from the position (all that is left for n < 0).
+  fun read(n : int) : Bytes {
+    flush()
+    if (n < 0) {
+      val total = size()
+      val r = pos >= total ? Bytes(0) : rawRead(pos, total - pos)
+      pos += r.size
+      dropAhead()
+      return r
+    }
+    if (n == 0) { return Bytes(0) }
+    if (file == null) {
+      val r = rawRead(pos, n)
+      pos += r.size
+      return r
+    }
+    if (pos >= aheadStart and pos + n <= aheadStart + ahead.size) {
+      val r = pyBytesPart(ahead, pos - aheadStart, pos - aheadStart + n)
+      pos += n
+      return r
+    }
+    if (n >= 8192) {
+      dropAhead()
+      val r = rawRead(pos, n)
+      pos += r.size
+      return r
+    }
+    ahead = rawRead(pos, 8192)
+    aheadStart = pos
+    val take = Math.min(n, ahead.size)
+    val r = pyBytesPart(ahead, 0, take)
+    pos += take
+    return r
+  }
+  // The bytes from the position, without moving it: at least one where any are left.
+  fun peek() : Bytes {
+    flush()
+    if (file == null) { return rawRead(pos, memLength - pos) }
+    if (!(pos >= aheadStart and pos < aheadStart + ahead.size)) {
+      ahead = rawRead(pos, 8192)
+      aheadStart = pos
+    }
+    return pyBytesPart(ahead, pos - aheadStart, ahead.size)
+  }
+  fun write(b : Bytes) {
+    dropAhead()
+    if (appending) { pos = size() }
+    if (file == null) {
+      rawWrite(pos, b)
+      pos += b.size
+      return
+    }
+    if (pendingSize > 0 and pendingStart + pendingSize != pos) { flush() }
+    if (pendingSize == 0) { pendingStart = pos }
+    pending.add(pyBytesPart(b, 0, b.size))
+    pendingSize += b.size
+    pos += b.size
+    if (pendingSize >= 65536) { flush() }
+  }
+  fun truncate(n : int) {
+    flush()
+    dropAhead()
+    if (file != null) {
+      try {
+        file!!.setSize(n)
+      } catch (e : IOException) {
+        throw __pyIoFailed(e)
+      }
+    } else if (n < memLength) {
+      memLength = n
+    }
+  }
+  fun close() {
+    if (closed) { return }
+    try {
+      flush()
+    } finally {
+      closed = true
+      if (file != null) { file!!.close() }
+    }
+  }
+}
+
+// A file's read or write failing below Snippy: OSError, as the system's error would be.
+internal fun __pyIoFailed(e : IOException) : PyError => pyOSError(pyOSErrorType, 5, "Input/output error", null)
+
+// The path open() takes: str, bytes or an object with __fspath__.
+internal fun __pyFsPath(file : any?) : string {
+  if (file is string) { return file as string }
+  if (file is Bytes) { return pyDecodeUtf8(file as Bytes, "surrogateescape") }
+  if (file is PyObject) {
+    val m = (file as PyObject).cls.lookup("__fspath__")
+    if (m !== pyUnbound and m != null) {
+      val r = pyCall1(m, file)
+      if (r is string or r is Bytes) { return __pyFsPath(r) }
+      throw pyTypeError("expected ${(file as PyObject).cls.name}.__fspath__() to return str or bytes, not ${pyTypeName(r)}")
+    }
+  }
+  throw pyTypeError("expected str, bytes or os.PathLike object, not ${pyTypeName(file)}")
+}
+
+// Opens the file as FileIO does, with the errors CPython's open(2) gives on Linux. A safe script,
+// which ww lets touch no file, gets PermissionError, as a sandboxed system call gives.
+internal fun __pyOpenChannel(file : any?, m : PyIoMode) : PyChannel {
+  try {
+    return __pyOpenChannelHere(file, m)
+  } catch (e : SecurityException) {
+    throw pyOSError(pyPermissionErrorType, 1, "Operation not permitted", file)
+  }
+}
+
+internal fun __pyOpenChannelHere(file : any?, m : PyIoMode) : PyChannel {
+  if (file is int or file is bool) { throw pyOSError(pyOSErrorType, 9, "Bad file descriptor", null) }
+  val path = __pyFsPath(file)
+  if (!(m.reading or m.writing or m.appending or m.creating)) {
+    throw pyValueError("Must have exactly one of create/read/write/append mode and at most one plus")
+  }
+  if (path.contains('\u{0}')) { throw pyValueError("embedded null byte") }
+  val fp = FilePath(path)
+  if (fp.isDirectory()) {
+    throw pyOSError(m.creating ? pyFileExistsErrorType : pyIsADirectoryErrorType, m.creating ? 17 : 21, m.creating ? "File exists" : "Is a directory", file)
+  }
+  val exists = fp.exists()
+  if (m.creating and exists) { throw pyOSError(pyFileExistsErrorType, 17, "File exists", file) }
+  if (!exists) {
+    if (m.reading and !m.plus) { throw pyOSError(pyFileNotFoundErrorType, 2, "No such file or directory", file) }
+    if (m.reading) { throw pyOSError(pyFileNotFoundErrorType, 2, "No such file or directory", file) }
+    val parent = fp.absolute.parent
+    if (parent != null and !parent!!.exists()) { throw pyOSError(pyFileNotFoundErrorType, 2, "No such file or directory", file) }
+    if (parent != null and !parent!!.isDirectory()) { throw pyOSError(pyNotADirectoryErrorType, 20, "Not a directory", file) }
+  }
+  var raf : RandomAccessFile? = null
+  try {
+    raf = RandomAccessFile(fp, m.writable ? "rw" : "r")
+  } catch (e : IOException) {
+    throw pyOSError(pyPermissionErrorType, 13, "Permission denied", file)
+  }
+  val ch = PyChannel(raf)
+  if (m.writing) { ch.truncate(0) }
+  if (m.appending) {
+    ch.appending = true
+    ch.pos = ch.size()
+  }
+  return ch
+}
+
+internal fun __pyWrapRaw(kind : int, args : List<any?>) : any? {
+  if (args.isEmpty() or !(args[0] is PyBinFile) or (args[0] as PyBinFile).kind != 0) {
+    throw pyTypeError("${kind == 1 ? "BufferedReader" : kind == 2 ? "BufferedWriter" : "BufferedRandom"}() needs a FileIO")
+  }
+  val raw = args[0] as PyBinFile
+  val b = PyBinFile(kind, raw.ch, raw.name, raw.m)
+  b.raw = raw
+  return b
+}
+
+// ---- Argument helpers ----
+
+// The items of an iterable, as writelines() takes them.
+internal fun __pyIoItems(x : any?) : List<any?> {
+  val out : open List<any?> = []
+  val it = pyIter(x)
+  while (true) {
+    val v = pyNext(it)
+    if (v === pyEnd) { break }
+    out.add(v)
+  }
+  return out
+}
+
+internal fun __pySizeArg(a : PyArgs, name : string, at : int, otherwise : int) : int {
+  val v = a.pos.size > at ? a.pos[at] : a.get(name, null)
+  if (v == null) { return otherwise }
+  if (!pyIsInt(v) and !(v is PyObject and (v as PyObject).cls.lookup("__index__") !== pyUnbound)) {
+    throw pyTypeError("argument should be integer or None, not '${pyTypeName(v)}'")
+  }
+  return pyIndex(v)
+}
+
+internal fun __pyWhence(a : PyArgs, at : int) : int {
+  val v = a.pos.size > at ? a.pos[at] : a.get("whence", 0)
+  val w = pyIndex(v)
+  if (w < 0 or w > 2) { throw pyValueError("invalid whence ($w, should be 0, 1 or 2)") }
+  return w
+}
+
+// Lines of a stream, as readlines(hint) takes them: all, or until their length passes hint.
+internal fun __pyReadLines(next : () -> any?, size : (any?) -> int, hint : int) : open List<any?> {
+  val out = pyNewList([])
+  var total = 0
+  while (true) {
+    val line = next()
+    if (size(line) == 0) { break }
+    out.add(line)
+    total += size(line)
+    if (hint > 0 and total >= hint) { break }
+  }
+  return out
+}
+
+// ---- Binary objects: FileIO, the Buffered ones, BytesIO ----
+
+// kind: 0 FileIO, 1 BufferedReader, 2 BufferedWriter, 3 BufferedRandom, 4 BytesIO.
+class PyBinFile(val kind : int, val ch : PyChannel, val name : any?, val m : PyIoMode) : PyNative() {
+  var raw : PyBinFile? = null
+  var detached = false
+
+  override fun pyType() : PyType {
+    return when (kind) {
+      0 -> __pyFileIOType
+      1 -> __pyBufferedReaderType
+      2 -> __pyBufferedWriterType
+      3 -> __pyBufferedRandomType
+      else -> __pyBytesIOType
+    }
+  }
+  val typeName : string
+    get() => kind == 0 ? "FileIO" : kind == 1 ? "BufferedReader" : kind == 2 ? "BufferedWriter" : kind == 3 ? "BufferedRandom" : "BytesIO"
+
+  fun open() {
+    if (ch.closed) { throw pyValueError(kind == 4 ? "I/O operation on closed file." : "I/O operation on closed file.") }
+  }
+  fun needRead() {
+    open()
+    if (!m.readable) { throw __pyUnsupported(kind == 0 ? "File not open for reading" : "read") }
+  }
+  fun needWrite() {
+    open()
+    if (!m.writable) { throw __pyUnsupported(kind == 0 ? "File not open for writing" : "write") }
+  }
+
+  fun readLine(limit : int) : Bytes {
+    needRead()
+    val parts : open List<Bytes> = []
+    var got = 0
+    while (limit < 0 or got < limit) {
+      val p = ch.peek()
+      if (p.size == 0) { break }
+      var take = p.size
+      if (limit >= 0 and take > limit - got) { take = limit - got }
+      var end = -1
+      for i in 0..<take {
+        if (p[i].toInt() == 10) {
+          end = i
+          break
+        }
+      }
+      val n = end >= 0 ? end + 1 : take
+      parts.add(ch.read(n))
+      got += n
+      if (end >= 0) { break }
+    }
+    return parts.size == 1 ? parts[0] : __pyBytesCat(parts)
+  }
+
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "closed" -> ch.closed
+      "name" -> {
+        if (this.name == null) { throw pyAttributeError("'${typeName}' object has no attribute 'name'", this, "name") }
+        this.name
+      }
+      "mode" -> {
+        if (kind == 4) { throw pyAttributeError("'_io.BytesIO' object has no attribute 'mode'", this, "mode") }
+        m.rawMode
+      }
+      "raw" -> kind >= 1 and kind <= 3 ? raw : pyUnbound
+      "closefd" -> kind == 0 ? true : pyUnbound
+      else -> pyUnbound
+    }
+  }
+
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "read", "read1" -> {
+        needRead()
+        val n = __pySizeArg(a, "size", 0, -1)
+        ch.read(n)
+      }
+      "readall" -> {
+        needRead()
+        ch.read(-1)
+      }
+      "readinto", "readinto1" -> {
+        needRead()
+        val target = a.pos[0]
+        if (!(target is PyByteArray)) { throw pyTypeError("readinto() argument must be read-write bytes-like object, not ${pyTypeName(target)}") }
+        val buf = (target as PyByteArray).bytes
+        val got = ch.read(buf.size)
+        for i in 0..<got.size { buf[i] = got[i] }
+        got.size
+      }
+      "readline" -> readLine(__pySizeArg(a, "size", 0, -1))
+      "readlines" -> {
+        val hint = __pySizeArg(a, "hint", 0, -1)
+        __pyReadLines({ -> readLine(-1) }, { l -> (l as Bytes).size }, hint)
+      }
+      "peek" -> {
+        needRead()
+        ch.peek()
+      }
+      "write" -> {
+        needWrite()
+        val v = a.pos[0]
+        if (v is string) { throw pyTypeError("a bytes-like object is required, not 'str'") }
+        val b = __pyNeedBytes(v)
+        ch.write(b)
+        b.size
+      }
+      "writelines" -> {
+        needWrite()
+        for line in __pyIoItems(a.pos[0]) { ch.write(__pyNeedBytes(line)) }
+        null
+      }
+      "seek" -> {
+        open()
+        val off = __pySizeArg(a, "offset", 0, 0)
+        val whence = __pyWhence(a, 1)
+        val target = whence == 0 ? off : whence == 1 ? ch.pos + off : ch.size() + off
+        if (target < 0) {
+          if (kind == 4) { throw pyValueError(whence == 0 ? "negative seek value $off" : "negative seek value $target") }
+          throw pyOSError(pyOSErrorType, 22, "Invalid argument", null)
+        }
+        ch.pos = target
+        target
+      }
+      "tell" -> {
+        open()
+        ch.pos
+      }
+      "truncate" -> {
+        open()
+        if (!m.writable) { throw __pyUnsupported(kind == 0 ? "File not open for writing" : "truncate") }
+        val size = __pySizeArg(a, "size", 0, ch.pos)
+        if (size < 0) { throw pyValueError("negative size value $size") }
+        ch.truncate(size)
+        size
+      }
+      "flush" -> {
+        open()
+        ch.flush()
+        null
+      }
+      "close" -> {
+        ch.close()
+        null
+      }
+      "readable" -> {
+        open()
+        m.readable
+      }
+      "writable" -> {
+        open()
+        m.writable
+      }
+      "seekable" -> {
+        open()
+        true
+      }
+      "isatty" -> {
+        open()
+        false
+      }
+      "fileno" -> {
+        open()
+        if (kind == 4) { throw __pyUnsupported("fileno") }
+        3 + identity() % 1000
+      }
+      "getvalue" -> {
+        if (kind != 4) { throw pyAttributeError("'${typeName}' object has no attribute 'getvalue'", this, "getvalue") }
+        if (ch.closed) { throw pyValueError("I/O operation on closed file.") }
+        pyBytesPart(ch.mem, 0, ch.memLength)
+      }
+      "getbuffer" -> {
+        if (kind != 4) { throw pyAttributeError("'${typeName}' object has no attribute 'getbuffer'", this, "getbuffer") }
+        open()
+        pyMemoryView(PyByteArray(pyBytesPart(ch.mem, 0, ch.memLength)))
+      }
+      "detach" -> throw __pyUnsupported("detach")
+      "__enter__" -> {
+        open()
+        this
+      }
+      "__exit__" -> {
+        ch.close()
+        null
+      }
+      "__iter__" -> {
+        open()
+        this
+      }
+      "__next__" -> {
+        val line = readLine(-1)
+        if (line.size == 0) { throw pyStopIteration(null) }
+        line
+      }
+      "__repr__" -> {
+        if (kind == 4) { "<_io.BytesIO object at 0x${pyHex(identity(), 12)}>" }
+        else if (kind == 0) {
+          ch.closed ? "<_io.FileIO [closed]>" : "<_io.FileIO name=${pyRepr(this.name)} mode=${pyRepr(m.rawMode)} closefd=True>"
+        } else { "<_io.${typeName} name=${pyRepr(this.name)}>" }
+      }
+      else -> throw pyAttributeError("'_io.${typeName}' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- Text: TextIOWrapper ----
+
+// The bytes a code point takes in an encoding, for tell.
+internal fun __pyCodeBytes(cp : int, enc : string) : int {
+  if (enc == "utf-8") { return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4 }
+  if (enc.startsWith("utf-16")) { return cp >= 0x10000 ? 4 : 2 }
+  if (enc.startsWith("utf-32")) { return 4 }
+  return 1
+}
+
+class PyTextFile(val buffer : PyBinFile, encoding0 : string?, errors0 : string?, val newline : string?, val modeText : string) : PyNative() {
+  val ch : PyChannel = buffer.ch
+  // What `encoding` says: the name given, or UTF-8.
+  val encoding : string = encoding0 ?: "UTF-8"
+  val errors : string = errors0 ?: "strict"
+  // The codec without its byte order mark: utf-8, latin-1, ascii, utf-16-le... (utf-16, utf-32
+  // and utf-8-sig become one of these at the first read or write).
+  var codec : string = pyEncodingName(encoding0 ?: "utf-8")
+  var bomPending : bool = false
+  // Read ahead and decoded, untranslated: the code points, how many are used, the byte where the
+  // first starts, and bytes of a character not yet whole.
+  var cps : open List<int> = []
+  var used = 0
+  var cpsStart = 0
+  var tail : Bytes = Bytes(0)
+  var eof = false
+  var telling = true
+  // Newlines seen, as CPython counts them: 1 CR, 2 LF, 4 CRLF; and a CR at the end of what was
+  // decoded, not yet known to be one or the start of a CRLF.
+  var seen = 0
+  var crAtEnd = false
+
+  init {
+    val known = codec in ["utf-8", "utf-8-sig", "ascii", "latin-1", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"]
+    if (!known) { throw pyError(pyLookupErrorType, "unknown encoding: $encoding") }
+    bomPending = codec == "utf-16" or codec == "utf-32" or codec == "utf-8-sig"
+  }
+
+  override fun pyType() : PyType => __pyTextIOWrapperType
+
+  fun open() {
+    if (ch.closed) { throw pyValueError("I/O operation on closed file.") }
+  }
+  fun needRead() {
+    open()
+    if (!buffer.m.readable) { throw __pyUnsupported("not readable") }
+  }
+  fun needWrite() {
+    open()
+    if (!buffer.m.writable) { throw __pyUnsupported("not writable") }
+  }
+
+  // The codec once the byte order mark has been read, or is known absent.
+  fun settleRead(b : Bytes) : int {
+    if (!bomPending) { return 0 }
+    if (ch.pos - b.size > 0) {
+      bomPending = false
+      codec = codec == "utf-8-sig" ? "utf-8" : codec == "utf-16" ? "utf-16-le" : codec == "utf-32" ? "utf-32-le" : codec
+      return 0
+    }
+    var skip = 0
+    if (codec == "utf-8-sig") {
+      if (b.size >= 3 and b[0].toInt() == 0xEF and b[1].toInt() == 0xBB and b[2].toInt() == 0xBF) { skip = 3 }
+      codec = "utf-8"
+    } else if (codec == "utf-16") {
+      codec = "utf-16-le"
+      if (b.size >= 2 and b[0].toInt() == 0xFF and b[1].toInt() == 0xFE) { skip = 2 }
+      if (b.size >= 2 and b[0].toInt() == 0xFE and b[1].toInt() == 0xFF) { skip = 2; codec = "utf-16-be" }
+    } else if (codec == "utf-32") {
+      codec = "utf-32-le"
+      if (b.size >= 4 and b[0].toInt() == 0xFF and b[1].toInt() == 0xFE and b[2].toInt() == 0 and b[3].toInt() == 0) { skip = 4 }
+      if (b.size >= 4 and b[0].toInt() == 0 and b[1].toInt() == 0 and b[2].toInt() == 0xFE and b[3].toInt() == 0xFF) { skip = 4; codec = "utf-32-be" }
+    }
+    bomPending = false
+    return skip
+  }
+
+  // How many of `b`'s bytes make whole characters (all of them at the end of the file).
+  fun wholePart(b : Bytes, last : bool) : int {
+    if (last) { return b.size }
+    if (codec == "utf-8") {
+      var i = b.size - 1
+      var back = 0
+      while (i >= 0 and back < 4) {
+        val v = b[i].toInt()
+        if ((v & 0xC0) != 0x80) {
+          val need = v >= 0xF0 ? 4 : v >= 0xE0 ? 3 : v >= 0xC0 ? 2 : 1
+          return i + need > b.size ? i : b.size
+        }
+        i -= 1
+        back += 1
+      }
+      return b.size
+    }
+    if (codec.startsWith("utf-16")) {
+      var n = b.size - b.size % 2
+      if (n >= 2) {
+        val hi = codec == "utf-16-be" ? b[n - 2].toInt() : b[n - 1].toInt()
+        if (hi >= 0xD8 and hi <= 0xDB) { n -= 2 }
+      }
+      return n
+    }
+    if (codec.startsWith("utf-32")) { return b.size - b.size % 4 }
+    return b.size
+  }
+
+  // Reads and decodes more: false at the end of the file.
+  fun fill() : bool {
+    if (eof) { return false }
+    if (used > 0) {
+      var gone = 0
+      for i in 0..<used { gone += __pyCodeBytes(cps[i], codec) }
+      cpsStart += gone
+      val rest : open List<int> = []
+      for i in used..<cps.size { rest.add(cps[i]) }
+      cps = rest
+      used = 0
+    }
+    val startPos = ch.pos - tail.size
+    val got = ch.read(8192)
+    val last = got.size == 0
+    var b = tail.size == 0 ? got : __pyBytesCat([tail, got])
+    if (cps.isEmpty()) { cpsStart = startPos }
+    val skip = settleRead(b)
+    if (skip > 0) {
+      b = pyBytesPart(b, skip, b.size)
+      cpsStart += skip
+    }
+    val n = wholePart(b, last)
+    tail = pyBytesPart(b, n, b.size)
+    if (last) { eof = true }
+    if (n == 0) { return !last }
+    val text = pyDecode(pyBytesPart(b, 0, n), codec, errors) as string
+    val more = __pyCodePoints(text)
+    note(more, last)
+    for c in more { cps.add(c) }
+    return true
+  }
+
+  // Counts the newlines in what was just decoded, as CPython's decoder counts them.
+  fun note(more : List<int>, last : bool) {
+    if (newline != null and newline != "") { return }
+    var i = 0
+    if (crAtEnd) {
+      crAtEnd = false
+      if (more.size > 0 and more[0] == 10) {
+        seen = seen | 4
+        i = 1
+      } else {
+        seen = seen | 1
+      }
+    }
+    while (i < more.size) {
+      val c = more[i]
+      if (c == 13) {
+        if (i + 1 < more.size) {
+          if (more[i + 1] == 10) {
+            seen = seen | 4
+            i += 1
+          } else {
+            seen = seen | 1
+          }
+        } else if (last) {
+          seen = seen | 1
+        } else {
+          crAtEnd = true
+        }
+      } else if (c == 10) {
+        seen = seen | 2
+      }
+      i += 1
+    }
+  }
+
+  // At least `k` code points ready past `used`, or as many as the file has.
+  fun ready(k : int) : bool {
+    while (cps.size - used < k) {
+      if (!fill()) { return cps.size - used >= k }
+    }
+    return true
+  }
+
+  // Reads `limit` characters (all for limit < 0), or one line (`line`), newlines translated.
+  fun take(limit : int, line : bool) : string {
+    val sb = StringBuilder()
+    var count = 0
+    while (limit < 0 or count < limit) {
+      if (!ready(1)) { break }
+      val c = cps[used]
+      if (c == 13 and (newline == null or newline == "" or newline == "\r\n")) {
+        ready(2)
+        val crlf = used + 1 < cps.size and cps[used + 1] == 10
+        if (newline == null) {
+          used += crlf ? 2 : 1
+          sb.append('\n')
+          count += 1
+          if (line) { break }
+          continue
+        }
+        if (newline == "") {
+          if (crlf and (limit < 0 or count + 2 <= limit)) {
+            used += 2
+            sb.append("\r\n")
+            count += 2
+          } else {
+            used += 1
+            sb.append('\r')
+            count += 1
+          }
+          if (line) { break }
+          continue
+        }
+        // "\r\n": a line ends only where both come.
+        if (crlf and (limit < 0 or count + 2 <= limit)) {
+          used += 2
+          sb.append("\r\n")
+          count += 2
+          if (line) { break }
+          continue
+        }
+        used += 1
+        sb.append('\r')
+        count += 1
+        continue
+      }
+      used += 1
+      sb.append(pyChar(c))
+      count += 1
+      if (line) {
+        if (c == 10 and (newline == null or newline == "" or newline == "\n")) { break }
+        if (c == 13 and newline == "\r") { break }
+      }
+    }
+    return sb.toString()
+  }
+
+  // Leaves reading: the file's position back where the text read so far ends.
+  fun stopReading() {
+    if (cps.isEmpty() and tail.size == 0 and !eof) { return }
+    ch.pos = position()
+    cps = []
+    used = 0
+    tail = Bytes(0)
+    eof = false
+    crAtEnd = false
+  }
+
+  // The byte position of the next character to read.
+  fun position() : int {
+    if (cps.isEmpty() and tail.size == 0 and !eof) { return ch.pos }
+    var at = cpsStart
+    for i in 0..<used { at += __pyCodeBytes(cps[i], codec) }
+    return at
+  }
+
+  fun writeText(s : string) : int {
+    needWrite()
+    stopReading()
+    var text = s
+    if (newline == "\r" or newline == "\r\n") { text = text.replace("\n", newline!!) }
+    var enc = codec
+    if (bomPending) {
+      val at = ch.appending ? ch.size() : ch.pos
+      if (at > 0) {
+        enc = codec == "utf-8-sig" ? "utf-8" : codec == "utf-16" ? "utf-16-le" : codec == "utf-32" ? "utf-32-le" : codec
+      }
+      bomPending = false
+      codec = codec == "utf-8-sig" ? "utf-8" : codec == "utf-16" ? "utf-16-le" : codec == "utf-32" ? "utf-32-le" : codec
+    }
+    val b = pyEncode(text, enc, errors) as Bytes
+    ch.write(b)
+    return __pyCodePoints(s).size
+  }
+
+  fun newlines() : any? {
+    return when (seen) {
+      0 -> null
+      1 -> "\r"
+      2 -> "\n"
+      4 -> "\r\n"
+      3 -> PyTuple(["\r", "\n"])
+      5 -> PyTuple(["\r", "\r\n"])
+      6 -> PyTuple(["\n", "\r\n"])
+      else -> PyTuple(["\r", "\n", "\r\n"])
+    }
+  }
+
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "closed" -> ch.closed
+      "name" -> buffer.name
+      "mode" -> modeText
+      "encoding" -> encoding
+      "errors" -> errors
+      "newlines" -> newlines()
+      "buffer" -> buffer
+      "line_buffering" -> false
+      "write_through" -> false
+      else -> pyUnbound
+    }
+  }
+
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "read" -> {
+        needRead()
+        val n = __pySizeArg(a, "size", 0, -1)
+        take(n, false)
+      }
+      "readline" -> {
+        needRead()
+        take(__pySizeArg(a, "size", 0, -1), true)
+      }
+      "readlines" -> {
+        needRead()
+        val hint = __pySizeArg(a, "hint", 0, -1)
+        __pyReadLines({ -> take(-1, true) }, { l -> (l as string).size }, hint)
+      }
+      "write" -> {
+        val v = a.pos[0]
+        needWrite()
+        if (!(v is string)) { throw pyTypeError("write() argument must be str, not ${pyTypeName(v)}") }
+        writeText(v as string)
+      }
+      "writelines" -> {
+        needWrite()
+        for line in __pyIoItems(a.pos[0]) {
+          if (!(line is string)) { throw pyTypeError("write() argument must be str, not ${pyTypeName(line)}") }
+          writeText(line as string)
+        }
+        null
+      }
+      "seek" -> {
+        open()
+        val off = __pySizeArg(a, "cookie", 0, 0)
+        val whence = __pyWhence(a, 1)
+        if (whence == 1 and off != 0) { throw __pyUnsupported("can't do nonzero cur-relative seeks") }
+        if (whence == 2 and off != 0) { throw __pyUnsupported("can't do nonzero end-relative seeks") }
+        if (whence == 0 and off < 0) { throw pyValueError("negative seek position $off") }
+        ch.flush()
+        var target = off
+        if (whence == 1) { target = position() }
+        if (whence == 2) { target = ch.size() }
+        cps = []
+        used = 0
+        tail = Bytes(0)
+        eof = false
+        crAtEnd = false
+        telling = true
+        ch.pos = target
+        target
+      }
+      "tell" -> {
+        open()
+        if (!telling) { throw pyError(pyOSErrorType, "telling position disabled by next() call") }
+        ch.flush()
+        position()
+      }
+      "truncate" -> {
+        open()
+        if (!buffer.m.writable) { throw __pyUnsupported("truncate") }
+        stopReading()
+        ch.flush()
+        val size = __pySizeArg(a, "pos", 0, ch.pos)
+        ch.truncate(size)
+        size
+      }
+      "flush" -> {
+        open()
+        ch.flush()
+        null
+      }
+      "close" -> {
+        ch.close()
+        null
+      }
+      "readable" -> {
+        open()
+        buffer.m.readable
+      }
+      "writable" -> {
+        open()
+        buffer.m.writable
+      }
+      "seekable" -> {
+        open()
+        true
+      }
+      "isatty" -> {
+        open()
+        false
+      }
+      "fileno" -> buffer.call("fileno", a)
+      "detach" -> throw __pyUnsupported("detach")
+      "__enter__" -> {
+        open()
+        this
+      }
+      "__exit__" -> {
+        ch.close()
+        null
+      }
+      "__iter__" -> {
+        open()
+        this
+      }
+      "__next__" -> {
+        needRead()
+        telling = false
+        val line = take(-1, true)
+        if (line.size == 0) {
+          telling = true
+          throw pyStopIteration(null)
+        }
+        line
+      }
+      "__repr__" -> "<_io.TextIOWrapper name=${pyRepr(buffer.name)} mode=${pyRepr(modeText)} encoding=${pyRepr(encoding)}>"
+      else -> throw pyAttributeError("'_io.TextIOWrapper' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- StringIO ----
+
+class PyStringIO(val newline : string?) : PyNative() {
+  val text : open List<int> = []
+  var pos = 0
+  var closed = false
+  var seen = 0
+
+  override fun pyType() : PyType => __pyStringIOType
+
+  fun open() {
+    if (closed) { throw pyValueError("I/O operation on closed file") }
+  }
+
+  // Writes `s` at the position, newlines translated as the newline argument says.
+  fun put(s : string) : int {
+    var t = s
+    if (newline == null) {
+      if (t.contains("\r\n")) { seen = seen | 4 }
+      t = t.replace("\r\n", "\n")
+      if (t.contains("\r")) { seen = seen | 1 }
+      t = t.replace("\r", "\n")
+    } else if (newline == "\r" or newline == "\r\n") {
+      t = t.replace("\n", newline!!)
+    }
+    val cps = __pyCodePoints(t)
+    while (text.size < pos) { text.add(0) }
+    for c in cps {
+      if (pos < text.size) { text[pos] = c } else { text.add(c) }
+      pos += 1
+    }
+    return __pyCodePoints(s).size
+  }
+
+  fun take(limit : int, line : bool) : string {
+    val sb = StringBuilder()
+    var count = 0
+    while (pos < text.size and (limit < 0 or count < limit)) {
+      val c = text[pos]
+      pos += 1
+      sb.append(pyChar(c))
+      count += 1
+      if (line) {
+        if (newline == null or newline == "\n") {
+          if (c == 10) { break }
+        } else if (newline == "") {
+          if (c == 10) { break }
+          if (c == 13) {
+            if (pos < text.size and text[pos] == 10 and (limit < 0 or count < limit)) {
+              sb.append('\n')
+              pos += 1
+            }
+            break
+          }
+        } else if (newline == "\r") {
+          if (c == 13) { break }
+        } else if (c == 10 and count >= 2 and text[pos - 2] == 13) {
+          break
+        }
+      }
+    }
+    return sb.toString()
+  }
+
+  fun value() : string {
+    val sb = StringBuilder()
+    for c in text { sb.append(pyChar(c)) }
+    return sb.toString()
+  }
+
+  override fun attr(name : string) : any? {
+    return when (name) {
+      "closed" -> closed
+      "line_buffering" -> false
+      "newlines" -> {
+        when (seen | (10 in text ? 2 : 0)) {
+          0 -> null
+          1 -> "\r"
+          2 -> newline == null ? "\n" : null
+          else -> null
+        }
+      }
+      else -> pyUnbound
+    }
+  }
+
+  override fun call(name : string, a : PyArgs) : any? {
+    return when (name) {
+      "read" -> {
+        open()
+        take(__pySizeArg(a, "size", 0, -1), false)
+      }
+      "readline" -> {
+        open()
+        take(__pySizeArg(a, "size", 0, -1), true)
+      }
+      "readlines" -> {
+        open()
+        __pyReadLines({ -> take(-1, true) }, { l -> (l as string).size }, __pySizeArg(a, "hint", 0, -1))
+      }
+      "write" -> {
+        open()
+        val v = a.pos[0]
+        if (!(v is string)) { throw pyTypeError("string argument expected, got '${pyTypeName(v)}'") }
+        put(v as string)
+      }
+      "writelines" -> {
+        open()
+        for line in __pyIoItems(a.pos[0]) {
+          if (!(line is string)) { throw pyTypeError("string argument expected, got '${pyTypeName(line)}'") }
+          put(line as string)
+        }
+        null
+      }
+      "getvalue" -> {
+        open()
+        value()
+      }
+      "seek" -> {
+        open()
+        val off = __pySizeArg(a, "pos", 0, 0)
+        val whence = __pyWhence(a, 1)
+        if (whence == 0 and off < 0) { throw pyValueError("Negative seek position $off") }
+        if (whence != 0 and off != 0) { throw pyOSError(pyOSErrorType, 0, "Can't do nonzero cur-relative seeks", null) }
+        pos = whence == 0 ? off : whence == 1 ? pos : text.size
+        pos
+      }
+      "tell" -> {
+        open()
+        pos
+      }
+      "truncate" -> {
+        open()
+        val size = __pySizeArg(a, "pos", 0, pos)
+        if (size < 0) { throw pyValueError("Negative size value $size") }
+        while (text.size > size) { text.removeAt(text.size - 1) }
+        size
+      }
+      "flush" -> {
+        open()
+        null
+      }
+      "close" -> {
+        closed = true
+        null
+      }
+      "readable", "writable", "seekable" -> {
+        open()
+        true
+      }
+      "isatty" -> {
+        open()
+        false
+      }
+      "fileno" -> throw __pyUnsupported("fileno")
+      "detach" -> throw __pyUnsupported("detach")
+      "__enter__" -> {
+        open()
+        this
+      }
+      "__exit__" -> {
+        closed = true
+        null
+      }
+      "__iter__" -> {
+        open()
+        this
+      }
+      "__next__" -> {
+        open()
+        val line = take(-1, true)
+        if (line.size == 0) { throw pyStopIteration(null) }
+        line
+      }
+      "__repr__" -> "<_io.StringIO object at 0x${pyHex(identity(), 12)}>"
+      else -> throw pyAttributeError("'_io.StringIO' object has no attribute '$name'", this, name)
+    }
+  }
+}
+
+// ---- open() ----
+
+fun pyOpen(a : PyArgs) : any? {
+  a.only(["file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"])
+  fun arg(i : int, name : string, otherwise : any?) : any? => a.pos.size > i ? a.pos[i] : a.get(name, otherwise)
+  if (a.pos.isEmpty() and !a.has("file")) { throw pyTypeError("open() missing required argument 'file' (pos 1)") }
+  val file = arg(0, "file", null)
+  val mode = arg(1, "mode", "r")
+  val buffering0 = arg(2, "buffering", -1)
+  val encoding = arg(3, "encoding", null)
+  val errors = arg(4, "errors", null)
+  val newline = arg(5, "newline", null)
+  if (!(mode is string)) { throw pyTypeError("open() argument 'mode' must be str, not ${pyTypeName(mode)}") }
+  val buffering = pyIndex(buffering0)
+  if (encoding != null and !(encoding is string)) { throw pyTypeError("open() argument 'encoding' must be str or None, not ${pyTypeName(encoding)}") }
+  if (errors != null and !(errors is string)) { throw pyTypeError("open() argument 'errors' must be str or None, not ${pyTypeName(errors)}") }
+  if (newline != null and !(newline is string)) { throw pyTypeError("open() argument 'newline' must be str or None, not ${pyTypeName(newline)}") }
+  val m = __pyParseMode(mode as string, false)
+  if (m.binary and encoding != null) { throw pyValueError("binary mode doesn't take an encoding argument") }
+  if (m.binary and errors != null) { throw pyValueError("binary mode doesn't take an errors argument") }
+  if (m.binary and newline != null) { throw pyValueError("binary mode doesn't take a newline argument") }
+  if (!(file is string or file is Bytes or file is int or file is bool or (file is PyObject and (file as PyObject).cls.lookup("__fspath__") !== pyUnbound))) {
+    throw pyTypeError("expected str, bytes or os.PathLike object, not ${pyTypeName(file)}")
+  }
+  val ch = __pyOpenChannel(file, m)
+  val raw = PyBinFile(0, ch, file, m)
+  if (buffering == 0) {
+    if (!m.binary) {
+      ch.close()
+      throw pyValueError("can't have unbuffered text I/O")
+    }
+    return raw
+  }
+  val kind = m.plus ? 3 : m.reading ? 1 : 2
+  val buffered = PyBinFile(kind, ch, file, m)
+  buffered.raw = raw
+  if (m.binary) { return buffered }
+  try {
+    val nl = __pyCheckNewline(newline)
+    return PyTextFile(buffered, encoding as string?, errors as string?, nl, mode as string)
+  } catch (e : PyError) {
+    ch.close()
+    throw e
+  }
+}
+
+// ---- The module ----
+
+fun pyIoModule() : PyModule {
+  val m : open Map<string, any?> = {:}
+  m["open"] = __pyBuiltinTable()["open", default = null]
+  m["IOBase"] = __pyIOBaseType
+  m["RawIOBase"] = __pyRawIOBaseType
+  m["BufferedIOBase"] = __pyBufferedIOBaseType
+  m["TextIOBase"] = __pyTextIOBaseType
+  m["FileIO"] = __pyFileIOType
+  m["BufferedReader"] = __pyBufferedReaderType
+  m["BufferedWriter"] = __pyBufferedWriterType
+  m["BufferedRandom"] = __pyBufferedRandomType
+  m["TextIOWrapper"] = __pyTextIOWrapperType
+  m["StringIO"] = __pyStringIOType
+  m["BytesIO"] = __pyBytesIOType
+  m["UnsupportedOperation"] = pyUnsupportedOperationType
+  m["BlockingIOError"] = pyBlockingIOErrorType
+  m["SEEK_SET"] = 0
+  m["SEEK_CUR"] = 1
+  m["SEEK_END"] = 2
+  m["DEFAULT_BUFFER_SIZE"] = 131072
+  m["text_encoding"] = __pyB("text_encoding") { a ->
+    val e = a.pos.size > 0 ? a.pos[0] : null
+    e ?: "utf-8"
+  }
+  return pyNativeModule("io", m)
+}

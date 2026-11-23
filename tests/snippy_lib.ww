@@ -40,8 +40,15 @@ if (Program.environment["WW_SNIPPY_LIB_CHILD"] != null) {
   val quick = Program.environment["WW_TEST_QUICK"] == "1"
   val programs = quick ? every.indices.filter { it % 3 == 0 }.map { every[it] } : every
   val differ : open List<string> = []
+  // The files a program leaves (mod_io.py's *.tmp), gone before and after each, so that each run
+  // starts as CPython's did (tools/snippy/expect.sh deletes them the same way).
+  fun clean() {
+    for f in folder.list() { if (f.name.endsWith(".tmp")) { f.deleteIfExists() } }
+  }
   for p in programs {
+    clean()
     val run = Process.run([ww, p.name], directory = folder, environment = asChild)
+    clean()
     val output = run.output.replace("\r\n", "\n")
     val expected = folder.resolve(p.name + ".out").readText()
     val err = summary(run.exitCode, run.error)
@@ -56,7 +63,7 @@ if (Program.environment["WW_SNIPPY_LIB_CHILD"] != null) {
     print("snippy builtins and modules: ${differ.size} of ${programs.size} differ")
     for d in differ { print("  " + d) }
   }
-  print(every.size >= 22)   // all of them found, whichever ran
+  print(every.size >= 24)   // all of them found, whichever ran
 }
 // expect: snippy builtins and modules: all as CPython's
 // expect: true

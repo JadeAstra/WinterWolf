@@ -26,6 +26,8 @@ fun pyStandardModules() : open Map<string, () -> PyModule> {
   m["json"] = { -> pyJsonModule() }
   m["json.decoder"] = { -> pyJsonDecoderModule() }
   m["json.encoder"] = { -> pyJsonEncoderModule() }
+  m["struct"] = { -> pyStructModule() }
+  m["io"] = { -> pyIoModule() }
   return m
 }
 

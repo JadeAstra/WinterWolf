@@ -1,0 +1,91 @@
+4 8 5 10 10 16
+40 8 12 8 10 0
+16 6 4 8
+b'\x01\x00\x00\x00' b'\x00\x00\x00\x01' b'\xff\xfe' b'\xff\xff' b'\xff\xff\xff\xff\xff\xff\xff\xff'
+b'\x01\x00\x00\x00\x02\x00\x00\x00' b'\x01\x02\x00\x00\x00' b'\x01\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00'
+b'\xff\xff\xff\xff\xff\xff\xff\xff' b'\x80\x00\x00\x00\x00\x00\x00\x00' b'\x00\x00\x00\x00\x00\x00\x00\x80' b'\xff\xff\xff\xff'
+b'x' b'ab\x00' b'abc' b'hi' b'\x00' b''
+b'\x02ab\x00\x00' b'\x02ab' b'\x00' b'\xffxx'
+b'\x01\x00\x00\x01\x00\x01' b'\x00\x00\x01\x00'
+b'\x00\x00\x00\x00\x00\x00\xf8?' b'\x80\x00\x00\x00\x00\x00\x00\x00' b'\xcd\xcc\xcc=' b'\x00\x00@@' b'\x00\x00\x00\x00\x00\x00\x1c@'
+b'\x00<' b'\xff{' b'\xff\x03' b'\x01\x00' b'\x00\x00' b'\x00\x80'
+b'\x01<' b'\x00<' b'\x02<' b'\x00|' b'\xfc\x00'
+b'\x00\x00\x00\x00' b'\xff\xff\x7f\x7f' b'\x00\x00\x80\x7f' b'\x00\x00\x80?'
+b'\x00~' b'\x00\x00\xc0\x7f' b'\x00\x00\x00\x00\x00\x00\xf8\x7f'
+b'\x01\x00\x00\x00' b'\x00\x00'
+(1,) (-2,) (18446744073709551615,) (-9223372036854775808,)
+(-5, 70000) (b'abc', b'de') (b'ab',) (b'ab',)
+(False, True) (b'z',) (1.0,) (5.960464477539063e-08,) (inf,) (-inf,)
+(0.10000000149011612,) (0.1,) (inf,) (nan,)
+(nan,) (1, 2) (67305985,)
+(-1, 18446744073709551615, -3, 4) (12345,)
+() (b'',) ()
+bytearray(b'\x00\x00\x01\x00\xff\xff\x00\x00\x00\x00\x00\x07') (1,) (-1,) (7,) (0, 1)
+[(1,), (2,), (3,)] []
+unpack_iterator 2 (1,) 1
+Struct('<ih') Struct('<ih') <ih 6 b'\x01\x00\x00\x00\x02\x00' (1, 2) (1, 2)
+>H 2 [(1,), (2,)] Struct Struct
+bytearray(b'\x03\x00\x00\x00\x04\x00') 8
+struct error 'b' format requires -128 <= number <= 127
+struct error 'b' format requires -128 <= number <= 127
+struct error 'B' format requires 0 <= number <= 255
+struct error 'B' format requires 0 <= number <= 255
+struct error 'h' format requires -32768 <= number <= 32767
+struct error 'H' format requires 0 <= number <= 65535
+struct error 'i' format requires -2147483648 <= number <= 2147483647
+struct error 'I' format requires 0 <= number <= 4294967295
+struct error 'q' format requires -9223372036854775808 <= number <= 9223372036854775807
+struct error 'Q' format requires 0 <= number <= 18446744073709551615
+struct error 'Q' format requires 0 <= number <= 18446744073709551615
+struct error 'i' format requires -2147483648 <= number <= 2147483647
+struct error 'I' format requires 0 <= number <= 4294967295
+struct error 'b' format requires -128 <= number <= 127
+struct error 'h' format requires -32768 <= number <= 32767
+struct error 'l' format requires -9223372036854775808 <= number <= 9223372036854775807
+struct error 'L' format requires 0 <= number <= 18446744073709551615
+struct error 'q' format requires -9223372036854775808 <= number <= 9223372036854775807
+struct error 'Q' format requires 0 <= number <= 18446744073709551615
+struct error 'n' format requires -9223372036854775808 <= number <= 9223372036854775807
+struct error 'N' format requires 0 <= number <= 18446744073709551615
+struct error required argument is not an integer
+struct error required argument is not an integer
+struct error required argument is not a float
+builtins OverflowError float too large to pack with f format
+builtins OverflowError float too large to pack with e format
+builtins OverflowError float too large to pack with e format
+builtins OverflowError float too large to pack with f format
+struct error char format requires a bytes object of length 1
+struct error char format requires a bytes object of length 1
+struct error char format requires a bytes object of length 1
+struct error argument for 's' must be a bytes object
+struct error argument for 'p' must be a bytes object
+struct error pack expected 2 items for packing (got 1)
+struct error pack expected 1 items for packing (got 2)
+struct error bad char in struct format
+struct error repeat count given without format specifier
+struct error bad char in struct format
+struct error bad char in struct format
+struct error bad char in struct format
+struct error embedded null character
+builtins TypeError Struct() argument 1 must be a str or bytes object, not int
+struct error bad char in struct format
+struct error bad char in struct format
+struct error total struct size too long
+struct error unpack requires a buffer of 4 bytes
+struct error unpack requires a buffer of 2 bytes
+builtins TypeError a bytes-like object is required, not 'str'
+struct error unpack_from requires a buffer of at least 8 bytes for unpacking 4 bytes at offset 4 (actual buffer size is 6)
+struct error unpack_from requires a buffer of at least 11 bytes for unpacking 4 bytes at offset 7 (actual buffer size is 6)
+struct error offset -8 out of range for 6-byte buffer
+struct error not enough data to unpack 4 bytes at offset -2
+struct error pack_into requires a buffer of at least 8 bytes for packing 4 bytes at offset 4 (actual buffer size is 6)
+struct error offset -8 out of range for 6-byte buffer
+builtins TypeError argument must be read-write bytes-like object, not bytes
+struct error iterative unpacking requires a buffer of a multiple of 4 bytes
+struct error cannot iteratively unpack with a struct of length 0
+struct error bad char in struct format
+builtins TypeError Struct() missing required argument 'format' (pos 1)
+builtins TypeError missing format argument
+builtins TypeError unpack expected 2 arguments, got 1
+struct error True Exception
+['Struct', 'calcsize', 'error', 'iter_unpack', 'pack', 'pack_into', 'unpack', 'unpack_from']
