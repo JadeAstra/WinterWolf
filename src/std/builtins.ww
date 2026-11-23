@@ -678,6 +678,42 @@ external fun float.toBits() : int
 external fun float.floor() : float
 // The smallest whole number at or above the float, as a float: -2.5 gives -2.0.
 external fun float.ceil() : float
+// The float with the size of this one and the sign of `sign` (its sign bit: -0.0's too):
+// Kotlin's withSign, C's copysign.
+//   3.0.withSign(-0.0)   // -3.0
+fun float.withSign(sign : float) : float =>
+  Math.floatFromBits((this.toBits() & 9223372036854775807) | (sign.toBits() & (1 << 63)))
+// The next float above this one: Kotlin's nextUp. Infinity for the largest float, and NaN and
+// infinity themselves.
+fun float.nextUp() : float {
+  if (this.isNaN() or this == 1.0 / 0.0) { return this }
+  if (this == 0.0) { return 4.9e-324 }
+  val bits = this.toBits()
+  return Math.floatFromBits(bits >= 0 ? bits + 1 : bits - 1)
+}
+// The next float below this one: Kotlin's nextDown.
+fun float.nextDown() : float {
+  if (this.isNaN() or this == -1.0 / 0.0) { return this }
+  if (this == 0.0) { return -4.9e-324 }
+  val bits = this.toBits()
+  return Math.floatFromBits(bits > 0 ? bits - 1 : bits + 1)
+}
+// The next float from this one toward `to`: `to` itself where they are equal, NaN where either
+// is. Kotlin's nextTowards, C's nextafter.
+fun float.nextTowards(to : float) : float {
+  if (this.isNaN() or to.isNaN()) { return this + to }
+  if (this == to) { return to }
+  return to > this ? this.nextUp() : this.nextDown()
+}
+// The distance from this float to the next one away from 0 (to the one before it, for the
+// largest float): Kotlin's ulp. NaN for NaN, infinity for an infinity.
+val float.ulp : float
+  get() {
+    val a = Math.abs(this)
+    if (a.isNaN() or a.isInfinite()) { return a }
+    val up = a.nextUp()
+    return up.isInfinite() ? a - a.nextDown() : up - a
+  }
 // The float as m × 2^e, 0.5 <= |m| < 1 with the float's sign, exactly (subnormals too):
 // Pair(m, e). 0, NaN and the infinities are themselves with e 0. C's frexp; Math.ldexp goes back.
 //   8.0.frexp()   // Pair(first=0.5, second=4)
@@ -771,6 +807,41 @@ external object Math {
   fun atan2(y : Number, x : Number) : float
   // The length of the hypotenuse, `sqrt(x * x + y * y)`, without overflow on the way.
   fun hypot(x : Number, y : Number) : float
+  // The length of a vector, the square root of the sum of its coordinates' squares: the nearest
+  // float, without overflow or underflow on the way (Python's math.hypot of many). Infinite where
+  // a coordinate is infinite, NaN beside it or not; 0 for none.
+  //   Math.hypot([1, 2, 2])   // 3.0
+  fun hypot(coordinates : List<Number>) : float
+  // The distance between two points, each a list of their coordinates: the length of their
+  // difference, as hypot gives it. An IllegalArgumentException where their sizes differ.
+  //   Math.distance([0, 0], [3, 4])   // 5.0
+  fun distance(p : List<Number>, q : List<Number>) : float
+  // The cube root, of a negative `x` too: the nearest float, an exact cube's root exactly
+  // (`Math.cbrt(27)` is 3.0). Java's and Kotlin's cbrt.
+  fun cbrt(x : Number) : float
+  // The gamma function, Γ(n) = (n - 1)! for a whole n: by the Lanczos approximation, as CPython's
+  // math.gamma works it out, to its bits. NaN at the negative whole numbers and minus infinity,
+  // an infinity with x's sign at ±0, and infinity past the largest float.
+  fun gamma(x : Number) : float
+  // ln |Γ(x)|, the natural logarithm of the gamma function's size, worked out without Γ(x)
+  // itself (which overflows past 171), as CPython's math.lgamma. Infinity at 0 and the negative
+  // whole numbers.
+  fun lnGamma(x : Number) : float
+  // The error function, 2/sqrt(pi) times the integral of e^(-t^2) from 0 to x: the nearest float.
+  fun erf(x : Number) : float
+  // 1 - erf(x), the nearest float, its digits kept where erf(x) is near 1 (erfc(10) is 2.1e-45).
+  fun erfc(x : Number) : float
+  // a * b + c rounded once, not twice: Java's Math.fma, IEEE 754's fusedMultiplyAdd.
+  fun fma(a : Number, b : Number, c : Number) : float
+  // x - n y, n the whole number nearest x / y (the even one at a tie), exact: IEEE 754's
+  // remainder, Java's IEEEremainder. Between -|y|/2 and |y|/2, where `%` keeps x's sign and
+  // `mod` y's. NaN for an infinite x or a y of 0; x itself for an infinite y.
+  //   Math.ieeeRemainder(7, 4)   // -1.0, where 7 % 4 is 3
+  fun ieeeRemainder(x : Number, y : Number) : float
+  // The angle in radians given in degrees: x × (180 / pi). Java's toDegrees.
+  fun toDegrees(x : Number) : float
+  // The angle in degrees given in radians: x × (pi / 180). Java's toRadians.
+  fun toRadians(x : Number) : float
   // x × 2^e, rounded once: exact unless the result is subnormal or past the largest float (an
   // infinity then). NaN, infinities and zeros are themselves. C's ldexp, Java's Math.scalb.
   fun ldexp(x : Number, e : int) : float

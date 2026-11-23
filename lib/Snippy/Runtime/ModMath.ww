@@ -1,9 +1,9 @@
 import Snippy.Text.*
-// math (the Snippy plan, part 5.3, step 2), in WinterWolf (the user, 2026-11-21): Python's
-// functions with CPython's results and messages. Where CPython rounds exactly (fsum, hypot,
-// dist, sumprod, fmod, remainder, fma, ldexp), the exact value is worked out with BigInts and
-// rounded once; gamma and lgamma follow the Lanczos approximation as CPython computes it; erf
-// and erfc are worked out to more bits than a float has, then rounded.
+// math (the Snippy plan, part 5.3, step 2): Python's names, argument checks and messages over
+// ww's own functions (docs/math-plan.html, 0.9.5078): Math (cbrt, gamma, lnGamma, erf, erfc, fma,
+// ieeeRemainder, hypot and distance of lists, toDegrees, toRadians), the floats' withSign,
+// nextTowards and ulp, lists' exactSum and exactDot, and BigInt's factorial, binomial,
+// permutations and lcm. Nothing of the math is Snippy's own.
 
 // ---- Floats as exact numbers ----
 
@@ -54,16 +54,6 @@ fun pyExactToFloat(m0 : BigInt, e : int) : float {
   if (k > 900) { f = f * __pyTwoTo(900); k -= 900 }
   f = f * __pyTwoTo(k)
   return negative ? -f : f
-}
-
-// Exact values added: a list of (m, e), as one (m, e).
-internal fun __pyExactSum(parts : List<Pair<BigInt, int>>) : Pair<BigInt, int> {
-  if (parts.isEmpty()) { return Pair(BigInt.of(0), 0) }
-  var low = parts[0].second
-  for p in parts { if (p.second < low) { low = p.second } }
-  var total = BigInt.of(0)
-  for p in parts { total = total + (p.first << (p.second - low)) }
-  return Pair(total, low)
 }
 
 // ---- Arguments ----
@@ -126,98 +116,14 @@ internal fun __pyLog(x : any?, which : int) : float {
   return one(v)
 }
 
-// ---- gamma and lgamma, after CPython's m_tgamma and m_lgamma (the Lanczos approximation) ----
-
-internal val __pyLanczosG = 6.024680040776729583740234375
-internal val __pyLanczosGMinusHalf = 5.524680040776729583740234375
-internal val __pyLanczosNum = [23531376880.410759688572007674451636754734846804940, 42919803642.649098768957899047001988850926355848959,
-  35711959237.355668049440185451547166705960488635843, 17921034426.037209699919755754458931112671403265390,
-  6039542586.3520280050642916443072979210699388420708, 1439720407.3117216736632230727949123939715485786772,
-  248874557.86205415651146038641322942321632125127801, 31426415.585400194380614231628318205362874684987640,
-  2876370.6289353724412254090516208496135991145378768, 186056.26539522349504029498971604569928220784236328,
-  8071.6720023658162106380029022722506138218516325024, 210.82427775157934587250973392071336271166969580291,
-  2.5066282746310002701649081771338373386264310793408]
-internal val __pyLanczosDen = [0.0, 39916800.0, 120543840.0, 150917976.0, 105258076.0, 45995730.0, 13339535.0, 2637558.0,
-  357423.0, 32670.0, 1925.0, 66.0, 1.0]
-internal val __pyGammaIntegral = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0, 3628800.0, 39916800.0,
-  479001600.0, 6227020800.0, 87178291200.0, 1307674368000.0, 20922789888000.0, 355687428096000.0, 6402373705728000.0,
-  121645100408832000.0, 2432902008176640000.0, 51090942171709440000.0, 1124000727777607680000.0]
-internal val __pyLogPi = 1.144729885849400174143427351353058711647
-
-internal fun __pyLanczosSum(x : float) : float {
-  var num = 0.0
-  var den = 0.0
-  if (x < 5.0) {
-    for i in 12 downTo 0 {
-      num = num * x + __pyLanczosNum[i]
-      den = den * x + __pyLanczosDen[i]
-    }
-  } else {
-    for i in 0..<13 {
-      num = num / x + __pyLanczosNum[i]
-      den = den / x + __pyLanczosDen[i]
-    }
-  }
-  return num / den
-}
-
-internal fun __pySinPi(x : float) : float {
-  val y = __pyFmodFloat(Math.abs(x), 2.0)
-  val n = Math.round(2.0 * y)
-  val r = when (n) {
-    0 -> Math.sin(Math.pi * y)
-    1 -> Math.cos(Math.pi * (y - 0.5))
-    2 -> Math.sin(Math.pi * (1.0 - y))
-    3 -> -Math.cos(Math.pi * (y - 1.5))
-    else -> Math.sin(Math.pi * (y - 2.0))
-  }
-  return pyCopySign(1.0, x) * r
-}
+// ---- gamma and lgamma: ww's Math.gamma and Math.lnGamma, with CPython's errors ----
 
 fun pyGamma(x : float) : float {
   if (x.isNaN() or (x.isInfinite() and x > 0.0)) { return x }
   if (x.isInfinite() or (x == __pyFloorF(x) and x <= 0.0)) {
     throw pyValueError("expected a noninteger or positive integer, got ${__pyFloatText(x)}")
   }
-  if (x == __pyFloorF(x) and x <= 23.0) { return __pyGammaIntegral[x.toInt() - 1] }
-  val absx = Math.abs(x)
-  if (absx < 1e-20) {
-    val r = 1.0 / x
-    if (r.isInfinite()) { throw __pyRangeError() }
-    return r
-  }
-  if (absx > 200.0) {
-    if (x < 0.0) { return 0.0 / __pySinPi(x) }
-    throw __pyRangeError()
-  }
-  val y = absx + __pyLanczosGMinusHalf
-  var z = 0.0
-  if (absx > __pyLanczosGMinusHalf) {
-    val q = y - absx
-    z = q - __pyLanczosGMinusHalf
-  } else {
-    val q = y - __pyLanczosGMinusHalf
-    z = q - absx
-  }
-  z = z * __pyLanczosG / y
-  var r = 0.0
-  if (x < 0.0) {
-    r = -Math.pi / __pySinPi(absx) / absx * Math.exp(y) / __pyLanczosSum(absx)
-    r -= z * r
-    if (absx < 140.0) { r /= y.pow(absx - 0.5) } else {
-      val sqrtpow = y.pow(absx / 2.0 - 0.25)
-      r /= sqrtpow
-      r /= sqrtpow
-    }
-  } else {
-    r = __pyLanczosSum(absx) / Math.exp(y)
-    r += z * r
-    if (absx < 140.0) { r *= y.pow(absx - 0.5) } else {
-      val sqrtpow = y.pow(absx / 2.0 - 0.25)
-      r *= sqrtpow
-      r *= sqrtpow
-    }
-  }
+  val r = Math.gamma(x)
   if (r.isInfinite()) { throw __pyRangeError() }
   return r
 }
@@ -225,271 +131,38 @@ fun pyGamma(x : float) : float {
 fun pyLgamma(x : float) : float {
   if (x.isNaN()) { return x }
   if (x.isInfinite()) { return pyInf }
-  if (x == __pyFloorF(x) and x <= 2.0) {
-    if (x <= 0.0) { throw pyValueError("expected a noninteger or positive integer, got ${__pyFloatText(x)}") }
-    return 0.0
-  }
-  val absx = Math.abs(x)
-  if (absx < 1e-20) { return -Math.ln(absx) }
-  var r = Math.ln(__pyLanczosSum(absx)) - __pyLanczosG
-  r += (absx - 0.5) * (Math.ln(absx + __pyLanczosG - 0.5) - 1.0)
-  if (x < 0.0) { r = __pyLogPi - Math.ln(Math.abs(__pySinPi(absx))) - Math.ln(absx) - r }
+  if (x == __pyFloorF(x) and x <= 0.0) { throw pyValueError("expected a noninteger or positive integer, got ${__pyFloatText(x)}") }
+  val r = Math.lnGamma(x)
   if (r.isInfinite()) { throw __pyRangeError() }
   return r
 }
 
-// ---- erf and erfc, to 160 bits and rounded ----
-
-// erf(x) or erfc(x) for a finite x: the Taylor series of erf, or for x past 3 the continued
-// fraction of erfc, in fixed point of `bits` bits after the point, then rounded to a float.
-internal fun __pyErfExact(x : float, complement : bool) : float {
-  if (x == 0.0) { return complement ? 1.0 : x }
-  val negative = x < 0.0
-  val ax = Math.abs(x)
-  if (!complement and ax >= 6.0) { return negative ? -1.0 : 1.0 }
-  if (complement and x >= 27.3) { return 0.0 }
-  if (complement and x <= -6.0) { return 2.0 }
-  val bits = 200 + (ax * ax * 1.5).toInt()
-  val one = BigInt.of(1) << bits
-  val px = pyFloatExact(ax)
-  // x in fixed point.
-  val fx = px.second + bits >= 0 ? px.first << (px.second + bits) : px.first >> -(px.second + bits)
-  val x2 = (fx * fx) >> bits
-  // 2 / sqrt(pi) in fixed point, from pi worked out here.
-  val twoOverSqrtPi = __pyTwoOverSqrtPi(bits)
-  var erfc : BigInt? = null
-  var erf : BigInt? = null
-  if (ax < 3.0 or !complement) {
-    // erf(x) = 2/sqrt(pi) * sum (-1)^n x^(2n+1) / (n! (2n+1))
-    var term = fx
-    var sum = fx
-    var n = 0
-    while (true) {
-      n += 1
-      term = -((term * x2) >> bits) / n
-      val add = term / (2 * n + 1)
-      if (add.isZero) { break }
-      sum = sum + add
-    }
-    erf = (sum * twoOverSqrtPi) >> bits
-  } else {
-    // erfc(x) = exp(-x^2) / sqrt(pi) * 1 / (x + 1/2 / (x + 1 / (x + 3/2 / (x + ...)))), from the far end.
-    var depth = 400
-    var cf = fx
-    for k in depth downTo 1 {
-      val half = (BigInt.of(k) << bits) / 2
-      cf = fx + (half << bits) / cf
-    }
-    val expNeg = __pyExpFixed(-x2, bits)
-    erfc = (((expNeg * twoOverSqrtPi) >> bits) / 2 << bits) / cf
-  }
-  var value = complement ? (erfc != null ? erfc!! : one - erf!!) : (erf != null ? erf!! : one - erfc!!)
-  if (negative) { value = complement ? (one + one) - value : -value }
-  return pyExactToFloat(value, -bits)
-}
-
-// exp(v) for v in fixed point (v <= 0), by halving it until small, a Taylor series, and squaring back.
-internal fun __pyExpFixed(v : BigInt, bits : int) : BigInt {
-  val one = BigInt.of(1) << bits
-  var halvings = 0
-  var w = v
-  while (w.abs() > (one >> 4)) { w = w / 2; halvings += 1 }
-  var term = one
-  var sum = one
-  var n = 0
-  while (true) {
-    n += 1
-    term = ((term * w) >> bits) / n
-    if (term.isZero) { break }
-    sum = sum + term
-  }
-  for i in 0..<halvings { sum = (sum * sum) >> bits }
-  return sum
-}
-
-// 2 / sqrt(pi) in fixed point of `bits` bits: pi by Machin's formula, its square root, divided into 2.
-internal fun __pyTwoOverSqrtPi(bits : int) : BigInt {
-  val guard = bits + 20
-  val one = BigInt.of(1) << guard
-  fun arctanInverse(k : int) : BigInt {
-    var power = one / k
-    var sum = power
-    var n = 1
-    val k2 = k * k
-    while (!power.isZero) {
-      power = power / k2
-      val term = power / (2 * n + 1)
-      sum = n % 2 == 1 ? sum - term : sum + term
-      n += 1
-    }
-    return sum
-  }
-  val pi = (arctanInverse(5) * 16) - (arctanInverse(239) * 4)
-  val sqrtPi = (pi << guard).sqrt()
-  return ((one << guard) * 2 / sqrtPi) >> 20
-}
-
 // ---- Exact float operations ----
 
-fun pyCopySign(x : float, y : float) : float {
-  val b = Bytes(8)
-  b.putFloat64(0, x)
-  val xb = b.int64(0)
-  b.putFloat64(0, y)
-  val yb = b.int64(0)
-  b.putInt64(0, (xb & 0x7FFFFFFFFFFFFFFF) | (yb & (1 << 63)))
-  return b.float64(0)
-}
+fun pyCopySign(x : float, y : float) : float => x.withSign(y)
 
-internal fun __pySignBit(x : float) : bool {
-  val b = Bytes(8)
-  b.putFloat64(0, x)
-  return b.int64(0) < 0
-}
-
-// fmod as C's: exact, the sign of x.
 // C's fmod, which CPython's math.fmod is: ww's % of floats (U18), exact, with x's sign; NaN for
 // an infinite x or a zero y, x itself for an infinite y.
 internal fun __pyFmodFloat(x : float, y : float) : float => x % y
 
-// IEEE remainder: x - n*y, n the nearest integer to x/y, ties to even; exact.
-internal fun __pyRemainder(x : float, y : float) : float {
-  if (x.isNaN() or y.isNaN()) { return x + y }
-  if (x.isInfinite() or y == 0.0) { throw __pyDomainError() }
-  if (y.isInfinite()) { return x }
-  val px = pyFloatExact(Math.abs(x))
-  val py = pyFloatExact(Math.abs(y))
-  val e = px.second < py.second ? px.second : py.second
-  val bx = px.first << (px.second - e)
-  val by = py.first << (py.second - e)
-  val q = bx / by
-  var r = bx - q * by
-  val twice = r * 2
-  if (twice > by or (twice == by and q.testBit(0))) { r = r - by }
-  val f = pyExactToFloat(r, e)
-  return f == 0.0 ? pyCopySign(0.0, x) : (__pySignBit(x) ? -f : f)
-}
-
-// The square root of m * 2**e (m >= 0), the nearest float.
-internal fun __pyExactSqrt(m0 : BigInt, e0 : int) : float {
-  if (m0.isZero) { return 0.0 }
-  var m = m0
-  var e = e0
-  if (e % 2 != 0) { m = m << 1; e -= 1 }
-  // Enough bits that the root has 60 at least, and a bit below them for anything left over.
-  var k = 0
-  val need = 124 - m.bitLength
-  if (need > 0) { k = (need + 1) / 2 }
-  val scaled = m << (2 * k)
-  val r = scaled.sqrt()
-  val exact = r * r == scaled
-  return pyExactToFloat((r << 1) + (exact ? 0 : 1), e / 2 - k - 1)
-}
-
-// The length of a vector of floats, as CPython's vector_norm gives it: nearest the true value.
-internal fun __pyNorm(values : List<float>) : float {
-  var anyNan = false
-  for v in values {
-    if (v.isInfinite()) { return pyInf }
-    if (v.isNaN()) { anyNan = true }
-  }
-  if (anyNan) { return 0.0 / 0.0 }
-  val squares : open List<Pair<BigInt, int>> = []
-  for v in values {
-    val p = pyFloatExact(Math.abs(v))
-    squares.add(Pair(p.first * p.first, p.second * 2))
-  }
-  val sum = __pyExactSum(squares)
-  return __pyExactSqrt(sum.first, sum.second)
-}
-
 internal fun __pyFloats(x : any?) : List<float> => pyIterable(x).map { pyRealArg(it) }
 
-// math.fsum of floats, step for step as CPython's math_fsum (Shewchuk's partials, then its
-// correction where the rest is exactly half way): the sum rounded once; NaN where one is NaN,
-// "-inf + inf in fsum" where both infinities are there, and "intermediate overflow in fsum"
-// where a partial sum passes the largest float though the numbers are finite (as CPython's
-// does: [1e308, 1e308, -1e308]); 0.0, not -0.0, for nothing or only zeros. statistics' fmean
-// and the rest add up with this too, as CPython's call math.fsum.
+// math.fsum: ww's exactSum (CPython's algorithm), with CPython's errors: "-inf + inf in fsum"
+// where both infinities are there, "intermediate overflow in fsum" where a sum on the way passes
+// the largest float. statistics adds up with this too, as CPython's calls math.fsum.
 fun pyFsum(values : List<float>) : float {
-  val partials : open List<float> = []
-  var specialSum = 0.0
-  var infSum = 0.0
-  for xsave in values {
-    var x = xsave
-    var i = 0
-    for j in 0..<partials.size {
-      var y = partials[j]
-      if (Math.abs(x) < Math.abs(y)) { val t = x; x = y; y = t }
-      val hi = x + y
-      val yr = hi - x
-      val lo = y - yr
-      if (lo != 0.0) { partials[i] = lo; i += 1 }
-      x = hi
-    }
-    var n = i
-    if (x != 0.0) {
-      if (x.isNaN() or x.isInfinite()) {
-        // From a NaN or an infinity among the numbers, or from a sum that overflowed.
-        if (!xsave.isNaN() and !xsave.isInfinite()) { throw pyOverflowError("intermediate overflow in fsum") }
-        if (xsave.isInfinite()) { infSum += xsave }
-        specialSum += xsave
-        n = 0
-      } else {
-        if (n < partials.size) { partials[n] = x } else { partials.add(x) }
-        n += 1
-      }
-    }
-    while (partials.size > n) { partials.removeAt(partials.size - 1) }
+  try {
+    val r = values.exactSum()
+    if (r.isNaN() and values.any { it == pyInf } and values.any { it == -pyInf }) { throw pyValueError("-inf + inf in fsum") }
+    return r
+  } catch (e : ArithmeticException) {
+    throw pyOverflowError("intermediate overflow in fsum")
   }
-  if (specialSum != 0.0) {
-    if (infSum.isNaN()) { throw pyValueError("-inf + inf in fsum") }
-    return specialSum
-  }
-  var hi = 0.0
-  var n = partials.size
-  if (n > 0) {
-    n -= 1
-    hi = partials[n]
-    var lo = 0.0
-    while (n > 0) {
-      val x = hi
-      n -= 1
-      val y = partials[n]
-      hi = x + y
-      val yr = hi - x
-      lo = y - yr
-      if (lo != 0.0) { break }
-    }
-    // Make half-way cases round as they would with the rest of the partials (to even).
-    if (n > 0 and ((lo < 0.0 and partials[n - 1] < 0.0) or (lo > 0.0 and partials[n - 1] > 0.0))) {
-      val y = lo * 2.0
-      val x = hi + y
-      val yr = x - hi
-      if (y == yr) { hi = x }
-    }
-  }
-  return hi
 }
 
-// math.sumprod of two lists of floats as CPython's: the exact sum of the products rounded once;
-// where one is NaN or infinite, the products added one by one, as CPython falls back to then.
-// statistics' covariance, correlation and linear_regression use it too, as CPython's do.
-fun pySumprodFloats(p : List<float>, q : List<float>) : float {
-  if (p.all { it.isFinite() } and q.all { it.isFinite() }) {
-    val parts : open List<Pair<BigInt, int>> = []
-    for i in p.indices {
-      val x = pyFloatExact(p[i])
-      val y = pyFloatExact(q[i])
-      parts.add(Pair(x.first * y.first, x.second + y.second))
-    }
-    val sum = __pyExactSum(parts)
-    return pyExactToFloat(sum.first, sum.second)
-  }
-  var total = 0.0
-  for i in p.indices { total = total + p[i] * q[i] }
-  return total
-}
+// math.sumprod of two lists of floats: ww's exactDot. statistics' covariance, correlation and
+// linear_regression use it too, as CPython's do.
+fun pySumprodFloats(p : List<float>, q : List<float>) : float => p.exactDot(q)
 
 // ---- floor, ceil, trunc ----
 
@@ -523,29 +196,6 @@ internal fun __pyIntArg(x : any?) : BigInt {
   return pyBig(pyIndexValue(x))
 }
 
-// n! by splitting the product in halves, so that the numbers multiplied stay of a size.
-internal fun __pyProductRange(low : int, high : int) : BigInt {
-  if (high < low) { return BigInt.of(1) }
-  if (high - low < 8) {
-    var p = BigInt.of(low)
-    for i in (low + 1)..high { p = p * i }
-    return p
-  }
-  val mid = (low + high) / 2
-  return __pyProductRange(low, mid) * __pyProductRange(mid + 1, high)
-}
-
-internal fun __pyComb(n : BigInt, k0 : BigInt) : BigInt {
-  if (k0 > n) { return BigInt.of(0) }
-  var k = k0
-  if (k > n - k) { k = n - k }
-  val kk = k.toIntOrNull()
-  if (kk == null) { throw pyOverflowError("min(n - k, k) must not exceed 9223372036854775807") }
-  var r = BigInt.of(1)
-  for i in 1..kk!! { r = r * (n - kk!! + i) / i }
-  return r
-}
-
 // ---- The module ----
 
 fun pyMathModule() : PyModule {
@@ -564,7 +214,7 @@ fun pyMathModule() : PyModule {
   fun finite(x : float) : string? => x.isInfinite() ? "expected a finite input, got ${__pyFloatText(x)}" : null
   fun unit(x : float) : string? => x > 1.0 or x < -1.0 ? "expected a number in range from -1 up to 1, got ${__pyFloatText(x)}" : null
   one("sqrt", { x -> Math.sqrt(x) }, false, { x -> x < 0.0 ? "expected a nonnegative input, got ${__pyFloatText(x)}" : null })
-  one("cbrt", { x -> pyCbrt(x) })
+  one("cbrt", { x -> Math.cbrt(x) })
   one("exp", { x -> Math.exp(x) }, true)
   one("exp2", { x -> 2.0.pow(x) }, true)
   one("expm1", { x -> Math.expm1(x) }, true)
@@ -582,12 +232,12 @@ fun pyMathModule() : PyModule {
   one("acosh", { x -> Math.acosh(x) }, false, { x -> x < 1.0 ? "expected argument value not less than 1, got ${__pyFloatText(x)}" : null })
   one("atanh", { x -> Math.atanh(x) }, false, { x -> x >= 1.0 or x <= -1.0 ? "expected a number between -1 and 1, got ${__pyFloatText(x)}" : null })
   one("fabs", { x -> Math.abs(x) })
-  one("erf", { x -> x.isNaN() ? x : x.isInfinite() ? (x > 0.0 ? 1.0 : -1.0) : __pyErfExact(x, false) })
-  one("erfc", { x -> x.isNaN() ? x : x.isInfinite() ? (x > 0.0 ? 0.0 : 2.0) : __pyErfExact(x, true) })
+  one("erf", { x -> Math.erf(x) })
+  one("erfc", { x -> Math.erfc(x) })
   m["gamma"] = __pyB("gamma") { a -> pyGamma(pyRealArg(a.pos[0])) }
   m["lgamma"] = __pyB("lgamma") { a -> pyLgamma(pyRealArg(a.pos[0])) }
-  m["degrees"] = __pyB("degrees") { a -> pyRealArg(a.pos[0]) * (180.0 / Math.pi) }
-  m["radians"] = __pyB("radians") { a -> pyRealArg(a.pos[0]) * (Math.pi / 180.0) }
+  m["degrees"] = __pyB("degrees") { a -> Math.toDegrees(pyRealArg(a.pos[0])) }
+  m["radians"] = __pyB("radians") { a -> Math.toRadians(pyRealArg(a.pos[0])) }
   m["atan2"] = __pyB("atan2") { a ->
     __pyCheckCount("atan2", a, 2, 2)
     Math.atan2(pyRealArg(a.pos[0]), pyRealArg(a.pos[1]))
@@ -621,7 +271,12 @@ fun pyMathModule() : PyModule {
     if ((x.isInfinite() and !y.isNaN()) or (y == 0.0 and !x.isNaN())) { throw __pyDomainError() }
     __pyFmodFloat(x, y)
   }
-  m["remainder"] = __pyB("remainder") { a -> __pyRemainder(pyRealArg(a.pos[0]), pyRealArg(a.pos[1])) }
+  m["remainder"] = __pyB("remainder") { a ->
+    val x = pyRealArg(a.pos[0])
+    val y = pyRealArg(a.pos[1])
+    if (!x.isNaN() and !y.isNaN() and (x.isInfinite() or y == 0.0)) { throw __pyDomainError() }
+    Math.ieeeRemainder(x, y)
+  }
   m["copysign"] = __pyB("copysign") { a -> pyCopySign(pyRealArg(a.pos[0]), pyRealArg(a.pos[1])) }
   m["floor"] = __pyB("floor") { a -> __pyRound(a.pos[0], "__floor__", -1) }
   m["ceil"] = __pyB("ceil") { a -> __pyRound(a.pos[0], "__ceil__", 1) }
@@ -673,19 +328,10 @@ fun pyMathModule() : PyModule {
     val x = pyRealArg(a.pos[0])
     val y = pyRealArg(a.pos[1])
     val z = pyRealArg(a.pos[2])
-    if (x.isNaN() or y.isNaN() or z.isNaN() or x.isInfinite() or y.isInfinite() or z.isInfinite()) {
-      val r = x * y + z
-      if (r.isNaN() and !x.isNaN() and !y.isNaN() and !z.isNaN()) { throw pyValueError("invalid operation in fma") }
-      r
-    } else {
-      val px = pyFloatExact(x)
-      val py = pyFloatExact(y)
-      val pz = pyFloatExact(z)
-      val sum = __pyExactSum([Pair(px.first * py.first, px.second + py.second), pz])
-      val r = pyExactToFloat(sum.first, sum.second)
-      if (r.isInfinite()) { throw pyOverflowError("overflow in fma") }
-      r == 0.0 ? (x * y + z) : r
-    }
+    val r = Math.fma(x, y, z)
+    if (r.isNaN() and !x.isNaN() and !y.isNaN() and !z.isNaN()) { throw pyValueError("invalid operation in fma") }
+    if (r.isInfinite() and x.isFinite() and y.isFinite() and z.isFinite()) { throw pyOverflowError("overflow in fma") }
+    r
   }
   m["nextafter"] = __pyB("nextafter") { a ->
     a.only(["steps"])
@@ -696,25 +342,19 @@ fun pyMathModule() : PyModule {
     var steps = stepsArg == null ? 1 : pyIndex(stepsArg)
     if (steps < 0) { throw pyValueError("steps must be a non-negative integer") }
     while (steps > 0 and x != y and !x.isNaN() and !y.isNaN()) {
-      x = __pyNextAfter(x, y)
+      x = x.nextTowards(y)
       steps -= 1
     }
     x.isNaN() or y.isNaN() ? x + y : (x == y ? y : x)
   }
-  m["ulp"] = __pyB("ulp") { a ->
-    val x = Math.abs(pyRealArg(a.pos[0]))
-    if (x.isNaN() or x.isInfinite()) { x } else {
-      val up = __pyNextAfter(x, pyInf)
-      if (up.isInfinite()) { x - __pyNextAfter(x, 0.0) } else { up - x }
-    }
-  }
-  m["hypot"] = __pyB("hypot") { a -> __pyNorm(a.pos.map { pyRealArg(it) }) }
+  m["ulp"] = __pyB("ulp") { a -> pyRealArg(a.pos[0]).ulp }
+  m["hypot"] = __pyB("hypot") { a -> Math.hypot(a.pos.map { pyRealArg(it) }) }
   m["dist"] = __pyB("dist") { a ->
     __pyCheckCount("dist", a, 2, 2)
     val p = __pyFloats(a.pos[0])
     val q = __pyFloats(a.pos[1])
     if (p.size != q.size) { throw pyValueError("both points must have the same number of dimensions") }
-    __pyNorm(p.indices.map { Math.abs(p[it] - q[it]) })
+    Math.distance(p, q)
   }
   m["fsum"] = __pyB("fsum") { a -> pyFsum(__pyFloats(a.pos[0])) }
   m["sumprod"] = __pyB("sumprod") { a ->
@@ -752,7 +392,7 @@ fun pyMathModule() : PyModule {
     if (n < 0) { throw pyValueError("factorial() not defined for negative values") }
     val k = n.toIntOrNull()
     if (k == null) { throw pyOverflowError("factorial() argument should not exceed 9223372036854775807") }
-    pyNorm(k!! < 2 ? BigInt.of(1) : __pyProductRange(2, k!!))
+    pyNorm(BigInt.factorial(k!!))
   }
   m["comb"] = __pyB("comb") { a ->
     __pyCheckCount("comb", a, 2, 2)
@@ -760,7 +400,9 @@ fun pyMathModule() : PyModule {
     val k = __pyIntArg(a.pos[1])
     if (n < 0) { throw pyValueError("n must be a non-negative integer") }
     if (k < 0) { throw pyValueError("k must be a non-negative integer") }
-    pyNorm(__pyComb(n, k))
+    val small = k > n - k ? n - k : k
+    if (k <= n and small.toIntOrNull() == null) { throw pyOverflowError("min(n - k, k) must not exceed 9223372036854775807") }
+    pyNorm(BigInt.binomial(n, k))
   }
   m["perm"] = __pyB("perm") { a ->
     __pyCheckCount("perm", a, 1, 2)
@@ -769,7 +411,7 @@ fun pyMathModule() : PyModule {
       if (n < 0) { throw pyValueError("factorial() not defined for negative values") }
       val nn = n.toIntOrNull()
       if (nn == null) { throw pyOverflowError("factorial() argument should not exceed 9223372036854775807") }
-      pyNorm(nn!! < 2 ? BigInt.of(1) : __pyProductRange(2, nn!!))
+      pyNorm(BigInt.factorial(nn!!))
     } else {
       val k = __pyIntArg(a.pos[1])
       if (n < 0) { throw pyValueError("n must be a non-negative integer") }
@@ -778,7 +420,7 @@ fun pyMathModule() : PyModule {
         val nn = n.toIntOrNull()
         val kk = k.toIntOrNull()
         if (nn == null or kk == null) { throw pyOverflowError("n must not exceed 9223372036854775807") }
-        pyNorm(kk!! == 0 ? BigInt.of(1) : __pyProductRange(nn!! - kk!! + 1, nn!!))
+        pyNorm(BigInt.permutations(nn!!, kk!!))
       }
     }
   }
@@ -791,7 +433,7 @@ fun pyMathModule() : PyModule {
     var l = BigInt.of(1)
     for x in a.pos {
       val v = __pyIntArg(x).abs()
-      if (v.isZero) { l = BigInt.of(0) } else if (!l.isZero) { l = l / l.gcd(v) * v }
+      l = l.lcm(v)
     }
     pyNorm(l)
   }
@@ -806,40 +448,6 @@ internal fun __pyCheckCount(name : string, a : PyArgs, low : int, high : int) {
     throw pyTypeError(low == 1 ? "math.$name() takes exactly one argument ($n given)" : "$name expected $low arguments, got $n")
   }
   throw pyTypeError(n < low ? "$name expected at least $low argument${low == 1 ? "" : "s"}, got $n" : "$name expected at most $high arguments, got $n")
-}
-
-// The next float after x toward y.
-internal fun __pyNextAfter(x : float, y : float) : float {
-  if (x.isNaN() or y.isNaN()) { return x + y }
-  if (x == y) { return y }
-  if (x == 0.0) { return y > 0.0 ? 5e-324 : -5e-324 }
-  val b = Bytes(8)
-  b.putFloat64(0, x)
-  var bits = b.int64(0)
-  val up = (y > x) == (x > 0.0)
-  bits = up ? bits + 1 : bits - 1
-  b.putInt64(0, bits)
-  return b.float64(0)
-}
-
-// cbrt as the C library computes it on Linux (glibc's): a polynomial guess on [0.5, 1) and one
-// step of Halley's method, its result not always the nearest float (cbrt(27) is 3.0000000000000004).
-fun pyCbrt(x : float) : float {
-  if (x == 0.0 or x.isNaN() or x.isInfinite()) { return x + x }
-  val p = pyFloatExact(Math.abs(x))
-  val bits = p.first.bitLength
-  var xe = p.second + bits
-  val xm = pyExactToFloat(p.first, -bits)
-  val u = 0.354895765043919860 + ((1.50819193781584896 + ((-2.11499494167371287 + ((2.44693122563534430 +
-          ((-1.83469277483613086 + (0.784932344976639262 - 0.145263899385486377 * xm) * xm) * xm)) * xm)) * xm)) * xm)
-  val t2 = u * u * u
-  val factors = [1.0 / 1.5874010519681994748, 1.0 / 1.2599210498948731648, 1.0, 1.2599210498948731648, 1.5874010519681994748]
-  // C's xe % 3, of the sign of xe.
-  val rem = xe % 3
-  val ym = u * (t2 + 2.0 * xm) / (2.0 * t2 + xm) * factors[2 + rem]
-  val q = xe / 3
-  val r = pyExactToFloat(pyFloatExact(x > 0.0 ? ym : -ym).first, pyFloatExact(x > 0.0 ? ym : -ym).second + q)
-  return r
 }
 
 // floor and ceil of a float, as floats (Math's give ints).

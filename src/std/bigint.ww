@@ -32,6 +32,36 @@ class BigInt {
   static {
     // The number `n`.
     fun of(n : int) : BigInt => __bigOfInt(n)
+    // n!, the product 1 × 2 × ... × n; 1 for 0. An IllegalArgumentException for a negative n.
+    //   BigInt.factorial(25)   // 15511210043330985984000000
+    fun factorial(n : int) : BigInt {
+      if (n < 0) { throw IllegalArgumentException("factorial of a negative number ($n)") }
+      return n < 2 ? BigInt.of(1) : __bigProductRange(2, n)
+    }
+    // How many ways there are to choose `k` of `n` things, n! / (k! (n - k)!): 0 where k > n
+    // (Python's math.comb). An IllegalArgumentException where either is negative, and an
+    // ArithmeticException where the smaller of k and n - k is past an int.
+    //   BigInt.binomial(52, 5)   // 2598960
+    fun binomial(n : BigInt, k : BigInt) : BigInt {
+      if (n < 0 or k < 0) { throw IllegalArgumentException("binomial of a negative number ($n, $k)") }
+      if (k > n) { return BigInt.of(0) }
+      val small = k > n - k ? n - k : k
+      val kk = small.toIntOrNull()
+      if (kk == null) { throw ArithmeticException("binomial($n, $k): the smaller of k and n - k is past an int") }
+      var r = BigInt.of(1)
+      for i in 1..kk!! { r = r * (n - kk!! + i) / i }
+      return r
+    }
+    // binomial of two ints.
+    fun binomial(n : int, k : int) : BigInt => binomial(BigInt.of(n), BigInt.of(k))
+    // How many ways there are to put `k` of `n` things in order, n! / (n - k)!: 0 where k > n
+    // (Python's math.perm). An IllegalArgumentException where either is negative.
+    //   BigInt.permutations(5, 2)   // 20
+    fun permutations(n : int, k : int) : BigInt {
+      if (n < 0 or k < 0) { throw IllegalArgumentException("permutations of a negative number ($n, $k)") }
+      if (k > n) { return BigInt.of(0) }
+      return k == 0 ? BigInt.of(1) : __bigProductRange(n - k + 1, n)
+    }
     // The whole number `x` is, cut toward zero (2.7 makes 2, -2.7 makes -2), exactly however
     // large; an ArithmeticException for an infinity or NaN.
     fun of(x : float) : BigInt => __bigOfFloat(x)
@@ -218,6 +248,15 @@ class BigInt {
   }
   // gcd with an int.
   fun gcd(other : int) : BigInt => gcd(BigInt.of(other))
+  // The least whole number both divide, never negative; 0 where either is 0.
+  fun lcm(other : BigInt) : BigInt {
+    val a = abs()
+    val b = other.abs()
+    if (a.isZero or b.isZero) { return BigInt.of(0) }
+    return a / a.gcd(b) * b
+  }
+  // lcm with an int.
+  fun lcm(other : int) : BigInt => lcm(BigInt.of(other))
   // To the power `exponent` (0 or more), all modulo `modulus` (above 0): the result 0 or more and
   // below it, worked out without the whole power.
   fun modPow(exponent : BigInt, modulus : BigInt) : BigInt {
@@ -967,4 +1006,17 @@ fun __bigDivSmallInPlace(d : open List<int>, by : int) : int {
   }
   __bigTrim(d)
   return r
+}
+
+// low × (low + 1) × ... × high, the product split in halves so that the numbers multiplied stay of
+// a size (factorial, permutations).
+fun __bigProductRange(low : int, high : int) : BigInt {
+  if (high < low) { return BigInt.of(1) }
+  if (high - low < 8) {
+    var p = BigInt.of(low)
+    for i in (low + 1)..high { p = p * i }
+    return p
+  }
+  val mid = low + (high - low) / 2
+  return __bigProductRange(low, mid) * __bigProductRange(mid + 1, high)
 }

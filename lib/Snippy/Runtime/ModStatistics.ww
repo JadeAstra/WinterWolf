@@ -195,7 +195,7 @@ internal fun __pyND(self : any?) : Pair<float, float> => Pair(pyToFloat(pyGetAtt
 internal fun __pyMakeND(cls : any?, mu : float, sigma : float) : any? => pyCallV(cls, [mu, sigma], null)
 internal fun __pyNDCdf(mu : float, sigma : float, x : float) : float {
   if (sigma == 0.0) { throw __pyStatError("cdf() not defined when sigma is zero") }
-  return 0.5 * __pyErfExact((mu - x) / (sigma * __pySqrt2), true)
+  return 0.5 * Math.erfc((mu - x) / (sigma * __pySqrt2))
 }
 
 internal lazy val __pyNormalDistType : PyType = __pyMakeNormalDist()

@@ -479,7 +479,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#Base64"><code>Base64</code></a> (3)</li>
 <li><a href="#BeforeAll"><code>BeforeAll</code></a> (1)</li>
 <li><a href="#BeforeTest"><code>BeforeTest</code></a> (1)</li>
-<li><a href="#BigInt"><code>BigInt</code></a> (71)</li>
+<li><a href="#BigInt"><code>BigInt</code></a> (77)</li>
 <li><a href="#BitOrder"><code>BitOrder</code></a> (1)</li>
 <li><a href="#BitReader"><code>BitReader</code></a> (9)</li>
 <li><a href="#BlendMode"><code>BlendMode</code></a> (1)</li>
@@ -585,7 +585,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#LineIndex"><code>LineIndex</code></a> (12)</li>
 <li><a href="#LineJoin"><code>LineJoin</code></a> (1)</li>
 <li><a href="#LinearGradient"><code>LinearGradient</code></a> (2)</li>
-<li><a href="#List.size"><code>List</code></a> (195)</li>
+<li><a href="#List.size"><code>List</code></a> (197)</li>
 <li><a href="#ListView"><code>ListView</code></a> (11)</li>
 <li><a href="#LocalDate"><code>LocalDate</code></a> (18)</li>
 <li><a href="#LocalDateTime"><code>LocalDateTime</code></a> (14)</li>
@@ -598,7 +598,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#MatchGroup"><code>MatchGroup</code></a> (1)</li>
 <li><a href="#MatchGroupCollection"><code>MatchGroupCollection</code></a> (7)</li>
 <li><a href="#MatchResult"><code>MatchResult</code></a> (8)</li>
-<li><a href="#Math"><code>Math</code></a> (47)</li>
+<li><a href="#Math"><code>Math</code></a> (58)</li>
 <li><a href="#Memory"><code>Memory</code></a> (29)</li>
 <li><a href="#Method"><code>Method</code></a> (8)</li>
 <li><a href="#Network"><code>Network</code></a> (3)</li>
@@ -702,7 +702,7 @@ addButton(widgets)</pre></dd>
 <li><a href="#any.toString"><code>any</code></a> (5)</li>
 <li><a href="#byte.toInt"><code>byte</code></a> (1)</li>
 <li><a href="#char.code"><code>char</code></a> (15)</li>
-<li><a href="#float.toBigInt"><code>float</code></a> (30)</li>
+<li><a href="#float.toBigInt"><code>float</code></a> (35)</li>
 <li><a href="#int.toBigInt"><code>int</code></a> (46)</li>
 <li><a href="#string.hexToBytes"><code>string</code></a> (118)</li>
 </ul>
@@ -743,6 +743,24 @@ print(big * n + 7, big / 3, big % 1000, -big &lt; n)
 </div>
 <div class="entry member" id="BigInt.of"><code class="sig">fun of(n : int) : BigInt</code><a class="anchor" href="#BigInt.of">#</a>
 <p>The number <code>n</code>.</p>
+</div>
+<div class="entry member" id="BigInt.factorial"><code class="sig">fun factorial(n : int) : BigInt</code><a class="anchor" href="#BigInt.factorial">#</a>
+<p>n!, the product 1 × 2 × ... × n; 1 for 0. An IllegalArgumentException for a negative n.</p>
+<pre>BigInt.factorial(25)   // 15511210043330985984000000
+</pre>
+</div>
+<div class="entry member" id="BigInt.binomial"><code class="sig">fun binomial(n : BigInt, k : BigInt) : BigInt</code><a class="anchor" href="#BigInt.binomial">#</a>
+<p>How many ways there are to choose <code>k</code> of <code>n</code> things, n! / (k! (n - k)!): 0 where k &gt; n (Python's math.comb). An IllegalArgumentException where either is negative, and an ArithmeticException where the smaller of k and n - k is past an int.</p>
+<pre>BigInt.binomial(52, 5)   // 2598960
+</pre>
+</div>
+<div class="entry member" id="BigInt.binomial-2"><code class="sig">fun binomial(n : int, k : int) : BigInt</code><a class="anchor" href="#BigInt.binomial-2">#</a>
+<p>binomial of two ints.</p>
+</div>
+<div class="entry member" id="BigInt.permutations"><code class="sig">fun permutations(n : int, k : int) : BigInt</code><a class="anchor" href="#BigInt.permutations">#</a>
+<p>How many ways there are to put <code>k</code> of <code>n</code> things in order, n! / (n - k)!: 0 where k &gt; n (Python's math.perm). An IllegalArgumentException where either is negative.</p>
+<pre>BigInt.permutations(5, 2)   // 20
+</pre>
 </div>
 <div class="entry member" id="BigInt.of-2"><code class="sig">fun of(x : float) : BigInt</code><a class="anchor" href="#BigInt.of-2">#</a>
 <p>The whole number <code>x</code> is, cut toward zero (2.7 makes 2, -2.7 makes -2), exactly however large; an ArithmeticException for an infinity or NaN.</p>
@@ -857,6 +875,12 @@ BigInt.of(-1).toBytes(signed = true)        // [255]
 </div>
 <div class="entry member" id="BigInt.gcd-2"><code class="sig">fun gcd(other : int) : BigInt</code><a class="anchor" href="#BigInt.gcd-2">#</a>
 <p>gcd with an int.</p>
+</div>
+<div class="entry member" id="BigInt.lcm"><code class="sig">fun lcm(other : BigInt) : BigInt</code><a class="anchor" href="#BigInt.lcm">#</a>
+<p>The least whole number both divide, never negative; 0 where either is 0.</p>
+</div>
+<div class="entry member" id="BigInt.lcm-2"><code class="sig">fun lcm(other : int) : BigInt</code><a class="anchor" href="#BigInt.lcm-2">#</a>
+<p>lcm with an int.</p>
 </div>
 <div class="entry member" id="BigInt.modPow"><code class="sig">fun modPow(exponent : BigInt, modulus : BigInt) : BigInt</code><a class="anchor" href="#BigInt.modPow">#</a>
 <p>To the power <code>exponent</code> (0 or more), all modulo <code>modulus</code> (above 0): the result 0 or more and below it, worked out without the whole power.</p>
@@ -1820,6 +1844,23 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <div class="entry" id="float.ceil"><code class="sig">fun float.ceil() : float</code><a class="anchor" href="#float.ceil">#</a>
 <p>The smallest whole number at or above the float, as a float: -2.5 gives -2.0.</p>
 </div>
+<div class="entry" id="float.withSign"><code class="sig">fun float.withSign(sign : float) : float</code><a class="anchor" href="#float.withSign">#</a>
+<p>The float with the size of this one and the sign of <code>sign</code> (its sign bit: -0.0's too): Kotlin's withSign, C's copysign.</p>
+<pre>3.0.withSign(-0.0)   // -3.0
+</pre>
+</div>
+<div class="entry" id="float.nextUp"><code class="sig">fun float.nextUp() : float</code><a class="anchor" href="#float.nextUp">#</a>
+<p>The next float above this one: Kotlin's nextUp. Infinity for the largest float, and NaN and infinity themselves.</p>
+</div>
+<div class="entry" id="float.nextDown"><code class="sig">fun float.nextDown() : float</code><a class="anchor" href="#float.nextDown">#</a>
+<p>The next float below this one: Kotlin's nextDown.</p>
+</div>
+<div class="entry" id="float.nextTowards"><code class="sig">fun float.nextTowards(to : float) : float</code><a class="anchor" href="#float.nextTowards">#</a>
+<p>The next float from this one toward <code>to</code>: <code>to</code> itself where they are equal, NaN where either is. Kotlin's nextTowards, C's nextafter.</p>
+</div>
+<div class="entry" id="float.ulp"><code class="sig">val float.ulp : float</code><a class="anchor" href="#float.ulp">#</a>
+<p>The distance from this float to the next one away from 0 (to the one before it, for the largest float): Kotlin's ulp. NaN for NaN, infinity for an infinity.</p>
+</div>
 <div class="entry" id="float.frexp"><code class="sig">fun float.frexp() : Pair&lt;float, int&gt;</code><a class="anchor" href="#float.frexp">#</a>
 <p>The float as m × 2^e, 0.5 &lt;= |m| &lt; 1 with the float's sign, exactly (subnormals too): Pair(m, e). 0, NaN and the infinities are themselves with e 0. C's frexp; Math.ldexp goes back.</p>
 <pre>8.0.frexp()   // Pair(first=0.5, second=4)
@@ -1915,6 +1956,45 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 </div>
 <div class="entry member" id="Math.hypot"><code class="sig">fun hypot(x : Number, y : Number) : float</code><a class="anchor" href="#Math.hypot">#</a>
 <p>The length of the hypotenuse, <code>sqrt(x * x + y * y)</code>, without overflow on the way.</p>
+</div>
+<div class="entry member" id="Math.hypot-2"><code class="sig">fun hypot(coordinates : List&lt;Number&gt;) : float</code><a class="anchor" href="#Math.hypot-2">#</a>
+<p>The length of a vector, the square root of the sum of its coordinates' squares: the nearest float, without overflow or underflow on the way (Python's math.hypot of many). Infinite where a coordinate is infinite, NaN beside it or not; 0 for none.</p>
+<pre>Math.hypot([1, 2, 2])   // 3.0
+</pre>
+</div>
+<div class="entry member" id="Math.distance"><code class="sig">fun distance(p : List&lt;Number&gt;, q : List&lt;Number&gt;) : float</code><a class="anchor" href="#Math.distance">#</a>
+<p>The distance between two points, each a list of their coordinates: the length of their difference, as hypot gives it. An IllegalArgumentException where their sizes differ.</p>
+<pre>Math.distance([0, 0], [3, 4])   // 5.0
+</pre>
+</div>
+<div class="entry member" id="Math.cbrt"><code class="sig">fun cbrt(x : Number) : float</code><a class="anchor" href="#Math.cbrt">#</a>
+<p>The cube root, of a negative <code>x</code> too: the nearest float, an exact cube's root exactly (<code>Math.cbrt(27)</code> is 3.0). Java's and Kotlin's cbrt.</p>
+</div>
+<div class="entry member" id="Math.gamma"><code class="sig">fun gamma(x : Number) : float</code><a class="anchor" href="#Math.gamma">#</a>
+<p>The gamma function, Γ(n) = (n - 1)! for a whole n: by the Lanczos approximation, as CPython's math.gamma works it out, to its bits. NaN at the negative whole numbers and minus infinity, an infinity with x's sign at ±0, and infinity past the largest float.</p>
+</div>
+<div class="entry member" id="Math.lnGamma"><code class="sig">fun lnGamma(x : Number) : float</code><a class="anchor" href="#Math.lnGamma">#</a>
+<p>ln |Γ(x)|, the natural logarithm of the gamma function's size, worked out without Γ(x) itself (which overflows past 171), as CPython's math.lgamma. Infinity at 0 and the negative whole numbers.</p>
+</div>
+<div class="entry member" id="Math.erf"><code class="sig">fun erf(x : Number) : float</code><a class="anchor" href="#Math.erf">#</a>
+<p>The error function, 2/sqrt(pi) times the integral of e^(-t^2) from 0 to x: the nearest float.</p>
+</div>
+<div class="entry member" id="Math.erfc"><code class="sig">fun erfc(x : Number) : float</code><a class="anchor" href="#Math.erfc">#</a>
+<p>1 - erf(x), the nearest float, its digits kept where erf(x) is near 1 (erfc(10) is 2.1e-45).</p>
+</div>
+<div class="entry member" id="Math.fma"><code class="sig">fun fma(a : Number, b : Number, c : Number) : float</code><a class="anchor" href="#Math.fma">#</a>
+<p>a * b + c rounded once, not twice: Java's Math.fma, IEEE 754's fusedMultiplyAdd.</p>
+</div>
+<div class="entry member" id="Math.ieeeRemainder"><code class="sig">fun ieeeRemainder(x : Number, y : Number) : float</code><a class="anchor" href="#Math.ieeeRemainder">#</a>
+<p>x - n y, n the whole number nearest x / y (the even one at a tie), exact: IEEE 754's remainder, Java's IEEEremainder. Between -|y|/2 and |y|/2, where <code>%</code> keeps x's sign and <code>mod</code> y's. NaN for an infinite x or a y of 0; x itself for an infinite y.</p>
+<pre>Math.ieeeRemainder(7, 4)   // -1.0, where 7 % 4 is 3
+</pre>
+</div>
+<div class="entry member" id="Math.toDegrees"><code class="sig">fun toDegrees(x : Number) : float</code><a class="anchor" href="#Math.toDegrees">#</a>
+<p>The angle in radians given in degrees: x × (180 / pi). Java's toDegrees.</p>
+</div>
+<div class="entry member" id="Math.toRadians"><code class="sig">fun toRadians(x : Number) : float</code><a class="anchor" href="#Math.toRadians">#</a>
+<p>The angle in degrees given in radians: x × (pi / 180). Java's toRadians.</p>
 </div>
 <div class="entry member" id="Math.ldexp"><code class="sig">fun ldexp(x : Number, e : int) : float</code><a class="anchor" href="#Math.ldexp">#</a>
 <p>x × 2^e, rounded once: exact unless the result is subnormal or past the largest float (an infinity then). NaN, infinities and zeros are themselves. C's ldexp, Java's Math.scalb.</p>
@@ -5640,6 +5720,14 @@ val smooth = heights.convolve(Grid&lt;float&gt;(3, 3, fill = 1.0 / 9))
 </div>
 <div class="entry" id="List.dot-3"><code class="sig">fun &lt;T : Number&gt; List&lt;T&gt;.dot(other : List&lt;Number&gt;) : Number</code><a class="anchor" href="#List.dot-3">#</a>
 <p>The sum of the products of the items in turn: an int for ints, a float otherwise.</p>
+</div>
+<div class="entry" id="List.exactSum"><code class="sig">fun List&lt;float&gt;.exactSum() : float</code><a class="anchor" href="#List.exactSum">#</a>
+<p>The exact sum of the floats, rounded once to the nearest float, where sum() rounds at every step (Python's math.fsum; Shewchuk's partials, as CPython works it out): [0.1] * 10 gives 1.0. NaN where one is NaN, or where both infinities are there; an infinity where one is. An ArithmeticException where a sum on the way passes the largest float though the floats are finite (as Python's fsum raises OverflowError), the exact sum's own overflow among them.</p>
+<pre>[0.1, 0.1, 0.1].exactSum()   // 0.30000000000000004 by sum(), 0.3 here
+</pre>
+</div>
+<div class="entry" id="List.exactDot"><code class="sig">fun List&lt;float&gt;.exactDot(other : List&lt;float&gt;) : float</code><a class="anchor" href="#List.exactDot">#</a>
+<p>The exact sum of the products of the items in turn, rounded once to the nearest float, where dot() rounds at every step (Python's math.sumprod of floats). Where a float is NaN or infinite, the products added one by one, as Python does then. An IllegalArgumentException where the lists' sizes differ.</p>
 </div>
 <div class="entry" id="List.runningSum"><code class="sig">fun List&lt;int&gt;.runningSum() : List&lt;int&gt;</code><a class="anchor" href="#List.runningSum">#</a>
 <p>Each item the sum of those up to it and itself: the prefix sums.</p>

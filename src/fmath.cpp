@@ -765,4 +765,303 @@ double hypot(double x, double y) {
     return scale2(sqrtDD(s).hi, e + k);
 }
 
+
+// ---- More functions (docs/math-plan.html): cbrt, gamma, lnGamma, erf, erfc, fma, ieeeRemainder,
+// hypot of many ----
+
+namespace {
+
+// (v.hi + v.lo) × 2^m rounded once to a float, a subnormal one too: v.hi is already v rounded,
+// and only where scaling it rounds again, at a tie of the subnormal steps, does v.lo say which way.
+double roundScaled(DD v, int m) {
+    const double r = scale2(v.hi, m);
+    if (absOf(r) >= 0x1p-1022 || v.lo == 0.0 || isInf(r)) return r;
+    const double back = scale2(r, -m);  // exact: r is a whole number of subnormal steps
+    const double d = v.hi - back;       // exact: the two are within a step of each other
+    const int halfStep = -1075 - m;
+    if (halfStep < -1022 || halfStep > 1023) return r;
+    if (absOf(d) == pow2(halfStep) && (d > 0) == (v.lo > 0)) return r + withSign(0x1p-1074, d);
+    return r;
+}
+
+// e^z as two doubles times 2^m, to some 2^-100 of it (expCore's 2^-64 is not enough where erfc
+// is 1 - erf): z less n ln 2, ln 2 in two doubles, then e^r by its series to past 2^-110.
+DD expPrecise(DD z, int& m) {
+    constexpr DD kLn2 = {0x1.62e42fefa39efp-1, 0x1.abc9e3b39803fp-56};
+    const double n = nearestInt(z.hi / kLn2.hi);
+    const DD r = add(z, neg(mulD(kLn2, n)));
+    DD term = {1.0, 0.0};
+    DD sum = term;
+    for (int k = 1; k < 60; k++) {
+        term = div(mul(term, r), {static_cast<double>(k), 0.0});
+        sum = add(sum, term);
+        if (absOf(term.hi) < 0x1p-112) break;
+    }
+    m = static_cast<int>(n);
+    return sum;
+}
+
+// 2/sqrt(pi) and 1/sqrt(pi) as two doubles.
+constexpr DD kTwoOverSqrtPi = {0x1.20dd750429b6dp+0, 0x1.1ae3a914fed80p-56};
+constexpr DD kOneOverSqrtPi = {0x1.20dd750429b6dp-1, 0x1.1ae3a914fed80p-57};
+
+// erf(x) for 0 < x < 6 as two doubles times 2^m: 2/sqrt(pi) e^(-x^2) times the sum of
+// 2^n x^(2n+1) / (1·3·5···(2n+1)), whose terms are all above 0, so nothing cancels.
+DD erfSeries(double x, int& m) {
+    DD term = {x, 0.0};
+    DD sum = term;
+    const DD x2 = twoProd(x, x);
+    const DD twoX2 = {2.0 * x2.hi, 2.0 * x2.lo};
+    for (int n = 1; n < 2000; n++) {
+        term = div(mul(term, twoX2), {2.0 * n + 1.0, 0.0});
+        sum = add(sum, term);
+        if (term.hi < sum.hi * 0x1p-112) break;
+    }
+    const DD e = expPrecise(neg(x2), m);
+    return mul(mul(sum, e), kTwoOverSqrtPi);
+}
+
+// erfc(x) for x >= 4 as two doubles times 2^m: e^(-x^2) / sqrt(pi) over x + (1/2) / (x + 1 /
+// (x + (3/2) / (x + ...))), the continued fraction worked from its far end.
+DD erfcFraction(double x, int& m) {
+    const DD xd = {x, 0.0};
+    // Terms enough that the fraction is settled to past 2^-110: more where x is small.
+    const int terms = static_cast<int>(4000.0 / (x * x)) + 40;
+    DD f = xd;
+    for (int k = terms; k >= 1; k--) f = add(xd, div({0.5 * k, 0.0}, f));
+    const DD x2 = twoProd(x, x);
+    const DD e = expPrecise(neg(x2), m);
+    return div(mul(e, kOneOverSqrtPi), f);
+}
+
+// erf (complement false) or erfc (true) of a finite x.
+double erfOrErfc(double x, bool complement) {
+    if (x == 0.0) return complement ? 1.0 : x;
+    const bool negative = x < 0.0;
+    const double ax = absOf(x);
+    if (!complement) {
+        if (ax >= 6.0) return negative ? -1.0 : 1.0;
+        if (ax < 0x1p-60) {
+            // 2x/sqrt(pi): the rest of the series is under 2^-120 of it. Scaled up first, so a
+            // subnormal x is multiplied exactly.
+            const DD p = mulD(kTwoOverSqrtPi, scale2(ax, 200));
+            const double r = roundScaled(quickTwoSum(p.hi, p.lo), -200);
+            return negative ? -r : r;
+        }
+        int m;
+        const DD s = erfSeries(ax, m);
+        const double r = roundScaled(s, m);
+        return negative ? -r : r;
+    }
+    if (x >= 27.3) return 0.0;
+    if (x <= -6.0) return 2.0;
+    if (x >= 4.0) {
+        int m;
+        const DD f = erfcFraction(x, m);
+        return roundScaled(f, m);
+    }
+    if (ax < 0x1p-60) return 1.0;
+    // 1 - erf(x), or 1 + erf(|x|): erfc(4) is 1.5e-8, so at most 27 bits of 106 cancel.
+    int m;
+    const DD s = erfSeries(ax, m);
+    const DD e = {scale2(s.hi, m), scale2(s.lo, m)};  // exact: erf(x) here is above 2^-61
+    const DD r = negative ? addD(e, 1.0) : addD(neg(e), 1.0);
+    return r.hi;
+}
+
+// The Lanczos approximation, as CPython's m_tgamma and m_lgamma use it (Modules/mathmodule.c,
+// Copyright (c) 2001 Python Software Foundation; PSF License Agreement): g, g - 1/2, and the
+// sum's numerator and denominator.
+constexpr double kLanczosG = 6.024680040776729583740234375;
+constexpr double kLanczosGMinusHalf = 5.524680040776729583740234375;
+constexpr double kLanczosNum[13] = {
+    23531376880.410759688572007674451636754734846804940, 42919803642.649098768957899047001988850926355848959,
+    35711959237.355668049440185451547166705960488635843, 17921034426.037209699919755754458931112671403265390,
+    6039542586.3520280050642916443072979210699388420708, 1439720407.3117216736632230727949123939715485786772,
+    248874557.86205415651146038641322942321632125127801, 31426415.585400194380614231628318205362874684987640,
+    2876370.6289353724412254090516208496135991145378768, 186056.26539522349504029498971604569928220784236328,
+    8071.6720023658162106380029022722506138218516325024, 210.82427775157934587250973392071336271166969580291,
+    2.5066282746310002701649081771338373386264310793408};
+constexpr double kLanczosDen[13] = {0.0, 39916800.0, 120543840.0, 150917976.0, 105258076.0, 45995730.0, 13339535.0,
+                                    2637558.0, 357423.0, 32670.0, 1925.0, 66.0, 1.0};
+constexpr double kGammaIntegral[23] = {
+    1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0, 3628800.0, 39916800.0, 479001600.0,
+    6227020800.0, 87178291200.0, 1307674368000.0, 20922789888000.0, 355687428096000.0, 6402373705728000.0,
+    121645100408832000.0, 2432902008176640000.0, 51090942171709440000.0, 1124000727777607680000.0};
+constexpr double kLogPi = 1.144729885849400174143427351353058711647;
+
+double lanczosSum(double x) {
+    double num = 0.0, den = 0.0;
+    if (x < 5.0) {
+        for (int i = 12; i >= 0; i--) {
+            num = num * x + kLanczosNum[i];
+            den = den * x + kLanczosDen[i];
+        }
+    } else {
+        for (int i = 0; i < 13; i++) {
+            num = num / x + kLanczosNum[i];
+            den = den / x + kLanczosDen[i];
+        }
+    }
+    return num / den;
+}
+
+// sin(pi x), exact at the whole and half numbers, as CPython's m_sinpi.
+double sinPi(double x) {
+    const double y = std::fmod(absOf(x), 2.0);  // exact
+    const double n = std::round(2.0 * y);      // exact
+    double r;
+    if (n == 0.0) {
+        r = sin(kPi.hi * y);
+    } else if (n == 1.0) {
+        r = cos(kPi.hi * (y - 0.5));
+    } else if (n == 2.0) {
+        r = sin(kPi.hi * (1.0 - y));
+    } else if (n == 3.0) {
+        r = -cos(kPi.hi * (y - 1.5));
+    } else {
+        r = sin(kPi.hi * (y - 2.0));
+    }
+    return withSign(1.0, x) * r;
+}
+
+bool isWhole(double x) { return std::floor(x) == x; }
+
+}  // namespace
+
+double cbrt(double x) {
+    if (isNaN(x) || isInf(x) || x == 0.0) return x + x;
+    double ax = absOf(x);
+    int k = 0;
+    if (ax < 0x1p-1000) {  // a subnormal or near one: scaled by 2^600, its root by 2^200
+        ax *= 0x1p600;
+        k = -200;
+    } else if (ax > 0x1p1000) {
+        ax *= 0x1p-600;
+        k = 200;
+    }
+    // A guess to some 13 digits, one step of Newton's way in doubles to past 16, then what the
+    // cube still lacks, worked out in two doubles, as one correction: the nearest float, and an
+    // exact cube's root exactly.
+    double y = pow(ax, 1.0 / 3.0);
+    y = y - (y * y * y - ax) / (3.0 * y * y);
+    const DD y3 = mulD(twoProd(y, y), y);
+    const DD rest = addD(neg(y3), ax);
+    const DD r = quickTwoSum(y, (rest.hi + rest.lo) / (3.0 * y * y));
+    const double out = scale2(r.hi, k);
+    return x < 0.0 ? -out : out;
+}
+
+double gamma(double x) {
+    if (isNaN(x) || x == kInf) return x;
+    if (x == -kInf) return kNaN;
+    if (x == 0.0) return withSign(kInf, x);
+    if (isWhole(x) && x < 0.0) return kNaN;
+    if (isWhole(x) && x <= 23.0) return kGammaIntegral[static_cast<int>(x) - 1];
+    const double absx = absOf(x);
+    if (absx < 1e-20) return 1.0 / x;
+    if (absx > 200.0) return x < 0.0 ? 0.0 / sinPi(x) : kInf;
+    const double y = absx + kLanczosGMinusHalf;
+    double z;
+    if (absx > kLanczosGMinusHalf) {
+        const double q = y - absx;
+        z = q - kLanczosGMinusHalf;
+    } else {
+        const double q = y - kLanczosGMinusHalf;
+        z = q - absx;
+    }
+    z = z * kLanczosG / y;
+    double r;
+    if (x < 0.0) {
+        r = -kPi.hi / sinPi(absx) / absx * exp(y) / lanczosSum(absx);
+        r -= z * r;
+        if (absx < 140.0) {
+            r /= pow(y, absx - 0.5);
+        } else {
+            const double sqrtpow = pow(y, absx / 2.0 - 0.25);
+            r /= sqrtpow;
+            r /= sqrtpow;
+        }
+    } else {
+        r = lanczosSum(absx) / exp(y);
+        r += z * r;
+        if (absx < 140.0) {
+            r *= pow(y, absx - 0.5);
+        } else {
+            const double sqrtpow = pow(y, absx / 2.0 - 0.25);
+            r *= sqrtpow;
+            r *= sqrtpow;
+        }
+    }
+    return r;
+}
+
+double lnGamma(double x) {
+    if (isNaN(x)) return x;
+    if (isInf(x)) return kInf;
+    if (isWhole(x) && x <= 2.0) return x <= 0.0 ? kInf : 0.0;
+    const double absx = absOf(x);
+    if (absx < 1e-20) return -log(absx);
+    double r = log(lanczosSum(absx)) - kLanczosG;
+    r += (absx - 0.5) * (log(absx + kLanczosG - 0.5) - 1.0);
+    if (x < 0.0) r = kLogPi - log(absOf(sinPi(absx))) - log(absx) - r;
+    return r;
+}
+
+double erf(double x) {
+    if (isNaN(x)) return x;
+    if (isInf(x)) return x > 0 ? 1.0 : -1.0;
+    return erfOrErfc(x, false);
+}
+
+double erfc(double x) {
+    if (isNaN(x)) return x;
+    if (isInf(x)) return x > 0 ? 0.0 : 2.0;
+    return erfOrErfc(x, true);
+}
+
+double fma(double a, double b, double c) { return std::fma(a, b, c); }
+
+double ieeeRemainder(double x, double y) {
+    if (isNaN(x) || isNaN(y)) return x + y;
+    if (isInf(x) || y == 0.0) return kNaN;
+    if (isInf(y)) return x;
+    // As CPython's m_remainder: from fmod, which is exact, x - n y for the n nearest x / y, ties to even.
+    const double absx = absOf(x), absy = absOf(y);
+    const double m = std::fmod(absx, absy);
+    const double c = absy - m;
+    double r;
+    if (m < c) {
+        r = m;
+    } else if (m > c) {
+        r = -c;
+    } else {
+        r = m - 2.0 * std::fmod(0.5 * (absx - m), absy);
+    }
+    return withSign(1.0, x) * r;
+}
+
+double hypot(const double* values, size_t count) {
+    bool nan = false;
+    double big = 0.0;
+    for (size_t i = 0; i < count; i++) {
+        if (isInf(values[i])) return kInf;
+        if (isNaN(values[i])) nan = true;
+        if (absOf(values[i]) > big) big = absOf(values[i]);
+    }
+    if (nan) return kNaN;
+    if (big == 0.0) return 0.0;
+    int k = 0;
+    if (big < 0x1p-1000) k = 600;  // subnormals scaled up first
+    const int e = static_cast<int>((bitsOf(scale2(big, k)) >> 52) & 0x7FF) - 1023;
+    // Each scaled so that the largest is from 1 to 2 (exact, but for a part too small to count),
+    // its square exact in two doubles, the squares added in two doubles.
+    DD sum = {0.0, 0.0};
+    for (size_t i = 0; i < count; i++) {
+        const double v = scale2(absOf(values[i]), k - e);
+        sum = add(sum, twoProd(v, v));
+    }
+    return roundScaled(sqrtDD(sum), e - k);
+}
+
 }  // namespace ww::fmath

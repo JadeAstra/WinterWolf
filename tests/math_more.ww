@@ -1,0 +1,72 @@
+// What docs/math-plan.html gave ww (0.9.5078): Math.cbrt, gamma, lnGamma, erf, erfc, fma,
+// ieeeRemainder, toDegrees, toRadians, hypot and distance of lists; a float's withSign, nextUp,
+// nextDown, nextTowards and ulp; lists' exactSum and exactDot; BigInt.factorial, binomial,
+// permutations and lcm. Over many inputs each folds into one number as
+// tools/fmath/python_more.py folds CPython 3.14's answers (and, for cbrt, the nearest float to
+// the true cube root, which glibc's is not always). Quick (WW_TEST_QUICK=1, under GC stress, where
+// the BigInts' loops take many minutes): the first 200 inputs of each.
+
+val m = 1000000007
+val g = 0.6180339887498949
+val quick = Program.environment["WW_TEST_QUICK"] == "1"
+val n = quick ? 200 : 4000
+fun part(x : float) : int => x.isNaN() ? 1 : x.toBits().mod(m)
+fun fold(h : int, v : int) : int => (h * 1000003 + v + 1) % m
+fun frac(i : int) : float => (i.toFloat() * g) % 1.0
+fun input(i : int, lo : int, hi : int) : float => Math.ldexp(0.5 + frac(i), lo + (i * 7919) % (hi - lo))
+fun sign(i : int) : float => i % 2 == 1 ? -1.0 : 1.0
+fun run(f : (int) -> float) : int {
+  var h = 0
+  for (i in 0..<n) { h = fold(h, part(f(i))) }
+  return h
+}
+
+val got = [
+  run { i -> Math.erf(-7 + 14 * frac(i)) },
+  run { i -> Math.erfc(-7 + 35 * frac(i)) },
+  run { i -> Math.erf(sign(i) * input(i, -1074, 0)) },
+  run { i -> Math.fma(-10 + 20 * frac(i), -10 + 20 * frac(i + 1), -100 + 200 * frac(i + 2)) },
+  run { i -> Math.ieeeRemainder(sign(i) * input(i, -1074, 1024), input(i + 5, -1074, 1024)) },
+  run { i -> Math.hypot([input(i, -1074, 1024), input(i + 1, -200, 200), -input(i + 2, -200, 200)]) },
+  run { i -> Math.distance([frac(i), 3 * frac(i + 1)], [-frac(i + 2), frac(i + 3)]) },
+  run { i -> List<float>(1 + i % 9) { k -> ((i + k) % 3 == 0 ? -1.0 : 1.0) * input(i + k, -60, 60) }.exactSum() },
+  run { i -> List<float>(1 + i % 7) { k -> frac(i + k) }.exactDot(List<float>(1 + i % 7) { k -> -frac(i + k + 3) }) },
+  run { i -> Math.cbrt(sign(i) * input(i, -1074, 1024)) }]
+var integers = 0
+for (i in 0..<n) {
+  val sum = BigInt.binomial(i % 200, (i * 7) % 60) + BigInt.permutations(i % 40, i % 12) + BigInt.factorial(i % 30) + BigInt.of(i).lcm(360)
+  integers = fold(integers, (sum % BigInt.of(m)).toInt())
+}
+// CPython 3.14.4's, from tools/fmath/python_more.py: all 4000, then the first 200.
+val whole = [259746846, 280807206, 504505354, 734867596, 905069025, 4176248, 749437809, 483719391, 522337280, 750898513, 708283191]
+val quickSet = [159248379, 967378980, 79725410, 609997649, 628555974, 463674781, 727941080, 310225501, 772533921, 724996351, 16149796]
+print(got + [integers] == (quick ? quickSet : whole))
+// expect: true
+
+// A few by themselves.
+print(Math.cbrt(27), Math.cbrt(-8), Math.cbrt(2), Math.cbrt(0.0), Math.cbrt(-1.0 / 0.0))
+// expect: 3.0 -2.0 1.2599210498948732 0.0 -inf
+print(Math.gamma(5), Math.gamma(0.5), Math.gamma(-2.5), Math.gamma(-3), Math.gamma(-0.0), Math.gamma(172))
+// expect: 24.0 1.7724538509055159 -0.9453087204829417 nan -inf inf
+print(Math.lnGamma(100), Math.lnGamma(-2.5), Math.lnGamma(1), Math.lnGamma(0), Math.lnGamma(1e300))
+// expect: 359.1342053695754 -0.05624371649767457 0.0 inf 6.897755278982137e+302
+print(Math.erf(0.5), Math.erf(-3), Math.erf(1e-310), Math.erfc(5), Math.erfc(27), Math.erfc(30), Math.erfc(-1))
+// expect: 0.5204998778130465 -0.9999779095030014 1.1283791670955e-310 1.537459794428035e-12 5.23705e-319 0.0 1.8427007929497148
+print(Math.fma(0.1, 10, -1), 0.1 * 10 - 1, Math.ieeeRemainder(7, 4), 7 % 4, Math.ieeeRemainder(-7.5, 2), Math.ieeeRemainder(1, 0))
+// expect: 5.551115123125783e-17 0.0 -1.0 3 0.5 nan
+print(Math.toDegrees(Math.pi), Math.toRadians(180), Math.hypot([1, 2, 2]), Math.hypot([]), Math.hypot([3e300, 4e300]), Math.distance([0, 0], [3, 4]))
+// expect: 180.0 3.141592653589793 3.0 0.0 5e+300 5.0
+try { Math.distance([1], [1, 2]) } catch (e : IllegalArgumentException) { print(e.message) }
+// expect: Math.distance(): the points have 1 and 2 coordinates
+print(3.0.withSign(-0.0), (-2.0).withSign(1.0), 1.0.nextUp(), 1.0.nextDown(), 0.0.nextUp(), (-0.0).nextDown(), 1.0.nextTowards(0.0), 1.0.nextTowards(1.0))
+// expect: -3.0 2.0 1.0000000000000002 0.9999999999999999 5e-324 -5e-324 0.9999999999999999 1.0
+print(1.0.ulp, 0.0.ulp, (1.7976931348623157e308).ulp, (1.0 / 0.0).ulp, (1.7976931348623157e308).nextUp())
+// expect: 2.220446049250313e-16 5e-324 1.99584030953472e+292 inf inf
+print(List<float>(10) { 0.1 }.sum(), List<float>(10) { 0.1 }.exactSum(), [1e100, 1.0, -1e100].exactSum(), [0.1, 0.2].dot([3.0, 3.0]), [0.1, 0.2].exactDot([3.0, 3.0]))
+// expect: 0.9999999999999999 1.0 1.0 0.9000000000000001 0.9
+print([1.0 / 0.0, 1.0].exactSum(), [1.0 / 0.0, -1.0 / 0.0].exactSum(), [0.0 / 0.0, 1.0].exactSum())
+// expect: inf nan nan
+try { [1e308, 1e308, -1e308].exactSum() } catch (e : ArithmeticException) { print(e.message) }
+// expect: a sum on the way passed the largest float
+print(BigInt.factorial(25), BigInt.binomial(52, 5), BigInt.binomial(5, 7), BigInt.permutations(5, 2), BigInt.of(4).lcm(6), BigInt.of(0).lcm(6))
+// expect: 15511210043330985984000000 2598960 0 20 12 0

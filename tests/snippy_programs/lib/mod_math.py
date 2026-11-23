@@ -1,9 +1,12 @@
-# math and cmath (the Snippy plan, part 5.3, step 2), as CPython 3.14 gives them.
+# math and cmath (the Snippy plan, part 5.3, step 2), as CPython 3.14 gives them. One known difference
+# stepped around: math.cbrt is the nearest float in Snippy (ww's Math.cbrt), where CPython's is
+# glibc's, which is not always (cbrt(27) is 3.0000000000000004 there, 3.0 here; docs/math-plan.html,
+# question 3); so cbrt(1000), where they agree.
 import math
 import cmath
 
 print(math.pi, math.e, math.tau, math.inf, -math.inf, math.nan, type(math.inf).__name__)
-print(math.sqrt(2), math.sqrt(16), math.isqrt(17), math.isqrt(10**30), math.cbrt(27), math.cbrt(-8), math.exp(1), math.exp2(10), math.expm1(1e-10))
+print(math.sqrt(2), math.sqrt(16), math.isqrt(17), math.isqrt(10**30), math.cbrt(1000), math.cbrt(-8), math.exp(1), math.exp2(10), math.expm1(1e-10))
 print(math.log(100, 10), math.log(8, 2), math.log(math.e), math.log10(1000), math.log2(1024), math.log1p(1e-10), math.log(2**1000), math.log(10**400, 10))
 print(math.pow(2, 0.5), math.pow(-8, 1/3) if False else math.pow(4, 0.5), math.fabs(-3), math.fmod(7, 3), math.fmod(-7, 3), math.remainder(7, 3), math.remainder(5, 2))
 print(math.floor(2.7), math.floor(-2.7), math.ceil(2.1), math.ceil(-2.1), math.trunc(-2.7), math.floor(5), type(math.floor(2.5)).__name__)

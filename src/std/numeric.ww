@@ -98,6 +98,140 @@ fun List<float>.dot(other : List<Number>) : float => __num.dot(this, other) as f
 // The sum of the products of the items in turn: an int for ints, a float otherwise.
 fun <T : Number> List<T>.dot(other : List<Number>) : Number => __num.dot(this, other) as Number
 
+// The exact sum of the floats, rounded once to the nearest float, where sum() rounds at every
+// step (Python's math.fsum; Shewchuk's partials, as CPython works it out): [0.1] * 10 gives 1.0.
+// NaN where one is NaN, or where both infinities are there; an infinity where one is. An
+// ArithmeticException where a sum on the way passes the largest float though the floats are
+// finite (as Python's fsum raises OverflowError), the exact sum's own overflow among them.
+//   [0.1, 0.1, 0.1].exactSum()   // 0.30000000000000004 by sum(), 0.3 here
+fun List<float>.exactSum() : float {
+  val partials : open List<float> = []
+  var specialSum = 0.0
+  var infSum = 0.0
+  for xsave in this {
+    var x = xsave
+    var i = 0
+    for j in 0..<partials.size {
+      var y = partials[j]
+      if (Math.abs(x) < Math.abs(y)) {
+        val t = x
+        x = y
+        y = t
+      }
+      val hi = x + y
+      val yr = hi - x
+      val lo = y - yr
+      if (lo != 0.0) {
+        partials[i] = lo
+        i += 1
+      }
+      x = hi
+    }
+    var n = i
+    if (x != 0.0) {
+      if (x.isNaN() or x.isInfinite()) {
+        // From a NaN or an infinity among the floats, or from a sum that overflowed.
+        if (!xsave.isNaN() and !xsave.isInfinite()) { throw ArithmeticException("a sum on the way passed the largest float") }
+        if (xsave.isInfinite()) { infSum += xsave }
+        specialSum += xsave
+        n = 0
+      } else {
+        if (n < partials.size) { partials[n] = x } else { partials.add(x) }
+        n += 1
+      }
+    }
+    while (partials.size > n) { partials.removeAt(partials.size - 1) }
+  }
+  if (specialSum != 0.0) { return infSum.isNaN() ? infSum : specialSum }
+  var hi = 0.0
+  var n = partials.size
+  if (n > 0) {
+    n -= 1
+    hi = partials[n]
+    var lo = 0.0
+    while (n > 0) {
+      val x = hi
+      n -= 1
+      val y = partials[n]
+      hi = x + y
+      val yr = hi - x
+      lo = y - yr
+      if (lo != 0.0) { break }
+    }
+    // A half-way case rounded as it would be with the rest of the partials, to even.
+    if (n > 0 and ((lo < 0.0 and partials[n - 1] < 0.0) or (lo > 0.0 and partials[n - 1] > 0.0))) {
+      val y = lo * 2.0
+      val x = hi + y
+      val yr = x - hi
+      if (y == yr) { hi = x }
+    }
+  }
+  return hi
+}
+
+// The exact sum of the products of the items in turn, rounded once to the nearest float, where
+// dot() rounds at every step (Python's math.sumprod of floats). Where a float is NaN or infinite,
+// the products added one by one, as Python does then. An IllegalArgumentException where the
+// lists' sizes differ.
+fun List<float>.exactDot(other : List<float>) : float {
+  if (size != other.size) { throw IllegalArgumentException("exactDot of lists of ${size} and ${other.size} items") }
+  if (this.all { it.isFinite() } and other.all { it.isFinite() }) {
+    var low = 0
+    val ms : open List<BigInt> = []
+    val es : open List<int> = []
+    for i in 0..<size {
+      val a = __exactOf(this[i])
+      val b = __exactOf(other[i])
+      ms.add(a.first * b.first)
+      es.add(a.second + b.second)
+      if (i == 0 or es[i] < low) { low = es[i] }
+    }
+    var total = BigInt.of(0)
+    for i in 0..<size { total = total + (ms[i] << (es[i] - low)) }
+    return __exactToFloat(total, low)
+  }
+  var total = 0.0
+  for i in 0..<size { total = total + this[i] * other[i] }
+  return total
+}
+
+// A finite float as m × 2^e, m a BigInt with the float's sign.
+fun __exactOf(x : float) : Pair<BigInt, int> {
+  val bits = x.toBits()
+  val field = (bits >>> 52) & 0x7FF
+  var mant = bits & 0xFFFFFFFFFFFFF
+  var e = -1074
+  if (field != 0) {
+    mant = mant | (1 << 52)
+    e = field - 1075
+  }
+  val m = BigInt.of(mant)
+  return Pair(bits < 0 ? -m : m, e)
+}
+
+// m × 2^e as the nearest float, ties to even; an infinity past the largest.
+fun __exactToFloat(m0 : BigInt, e : int) : float {
+  if (m0.isZero) { return 0.0 }
+  val negative = m0 < 0
+  val m = m0.abs()
+  val top = m.bitLength + e
+  if (top > 1024) { return negative ? -1.0 / 0.0 : 1.0 / 0.0 }
+  var lsb = top - 53
+  if (lsb < -1074) { lsb = -1074 }
+  val shift = lsb - e
+  var r = m
+  if (shift > 0) {
+    r = m >> shift
+    val rest = m - (r << shift)
+    val half = BigInt.of(1) << (shift - 1)
+    if (rest > half or (rest == half and r.testBit(0))) { r = r + 1 }
+  } else if (shift < 0) {
+    r = m << (-shift)
+  }
+  // r has 54 bits at most: exact as a float, and so is its product with a power of two.
+  return Math.ldexp(negative ? -r.toFloat() : r.toFloat(), lsb)
+}
+
 // Each item the sum of those up to it and itself: the prefix sums.
 fun List<int>.runningSum() : List<int> => __num.running(this, null) as List<int>
 // Each item the sum of those up to it and itself, as floats.

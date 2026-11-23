@@ -39,6 +39,16 @@ double atanh(double x);
 double pow(double x, double y);
 double hypot(double x, double y);
 
+// docs/math-plan.html (0.9.5078): what Snippy's math computed by itself, now ww's.
+double cbrt(double x);                         // the nearest float; an exact cube's root exactly
+double gamma(double x);                        // CPython's Lanczos way; NaN at 0 > whole x, ±inf at ±0
+double lnGamma(double x);                      // ln |gamma(x)|; inf at 0 >= whole x
+double erf(double x);                          // the nearest float
+double erfc(double x);                         // 1 - erf(x), the nearest float
+double fma(double a, double b, double c);      // a * b + c rounded once
+double ieeeRemainder(double x, double y);      // x - n y, n the whole number nearest x / y, ties to even
+double hypot(const double* values, size_t count);  // the length of a vector, the nearest float
+
 // x × 2^e, rounded once (only where the result is subnormal or past the largest float does it
 // round at all); NaN, infinities and zeros as they are. C's ldexp, Java's Math.scalb.
 double ldexp(double x, int64_t e);

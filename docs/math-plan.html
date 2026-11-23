@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Math in one place</title>
+<style>
+:root {
+  --bg: #fbfaf7; --surface: #ffffff; --ink: #1d2422; --muted: #5d6763; --line: #dfe3e0;
+  --accent: #1f5fa8; --accent-soft: #e8f0fa; --decide: #a8551f; --decide-soft: #fbefe5;
+  --code-bg: #eef1ef;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161a19; --surface: #1d2221; --ink: #e4e9e6; --muted: #9aa5a0; --line: #2e3533;
+    --accent: #7fb2ec; --accent-soft: #1e2a38; --decide: #e7a06b; --decide-soft: #3a2a1f;
+    --code-bg: #262c2a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161a19; --surface: #1d2221; --ink: #e4e9e6; --muted: #9aa5a0; --line: #2e3533;
+  --accent: #7fb2ec; --accent-soft: #1e2a38; --decide: #e7a06b; --decide-soft: #3a2a1f;
+  --code-bg: #262c2a;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+main { max-width: 880px; margin: 0 auto; padding: 40px 16px 80px; }
+h1 { font-size: 1.9rem; line-height: 1.25; margin: 0 0 8px; }
+.lede { color: var(--muted); margin: 0 0 28px; }
+h2 { font-size: 1.3rem; line-height: 1.3; margin: 32px 0 12px; }
+h3 { font-size: 1.05rem; margin: 0 0 8px; }
+p { margin: 0 0 12px; }
+ul { margin: 0 0 12px; padding-left: 22px; }
+li { margin: 4px 0; }
+a { color: var(--accent); }
+code {
+  font: 0.88em/1.4 Consolas, "Cascadia Mono", monospace; background: var(--code-bg);
+  padding: 1px 5px; border-radius: 4px;
+}
+nav {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 20px; margin: 0 0 8px;
+}
+nav h2 { font-size: 1rem; margin: 0 0 8px; color: var(--muted); }
+nav ul { list-style: none; padding: 0; margin: 0; }
+nav a { text-decoration: none; color: var(--ink); }
+nav a:hover { color: var(--accent); }
+.code { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 6px; }
+section.decision {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 20px 24px 16px; margin: 0 0 18px;
+}
+.verdict {
+  display: flex; align-items: center; gap: 14px; background: var(--decide-soft);
+  border: 1px dashed var(--decide); border-radius: 6px; padding: 10px 14px; margin-top: 12px;
+}
+.label { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.verdict .label { color: var(--decide); white-space: nowrap; }
+.verdict .blank { flex: 1; border-bottom: 1px solid var(--decide); height: 1.2em; opacity: 0.6; }
+.verdict .note { font-size: 0.92rem; }
+.verdict.decided { border-style: solid; align-items: flex-start; }
+.verdict.decided .label { padding-top: 2px; }
+.table { overflow-x: auto; margin: 4px 0 18px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; border-top: none; border-bottom: 2px solid var(--line); }
+td.part { white-space: nowrap; color: var(--muted); }
+td.when { min-width: 9em; }
+.note { color: var(--muted); font-size: 0.93rem; }
+@media (max-width: 600px) {
+  main { padding-top: 24px; }
+  h1 { font-size: 1.5rem; }
+  section.decision { padding: 14px 14px 10px; }
+}
+h4 { font-size: 1rem; margin: 18px 0 8px; }
+h5 { font-size: 0.95rem; margin: 14px 0 6px; }
+section.source { border-top: 2px solid var(--line); margin-top: 48px; padding-top: 8px; }
+.from { color: var(--muted); font-size: 0.9rem; margin: 0 0 16px; }
+pre { background: var(--code-bg); padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+</style>
+<body>
+<main>
+<h1>Plan: math in one place</h1>
+<p class="lede">Written 2026-11-23, at the user's word ("yes", to: move the math functions only Snippy has into ww, public, and give ww its own cbrt, which also takes out the code copied from glibc). As with case mapping (0.9.5073, "ww should gain what's needed and make them public, snippy shouldn't have anything of it's own there"): ww gains each function, public, and Snippy's <code>math</code> keeps only Python's names, argument checks and messages. Questions for the user at the end, each with a recommendation; nothing is built before they are decided. All four decided 2026-11-23 as recommended ("go with Recommended for all 4"), and <strong>built in 0.9.5078</strong> (<a href="#mp-built">below</a>).</p>
+<nav>
+<h2>Contents</h2>
+<ul>
+<li><a href="#mp-now">Where they are now</a></li>
+<li><a href="#mp-names">The names</a></li>
+<li><a href="#mp-same">What does not change</a></li>
+<li><a href="#mp-questions">Questions for the user</a></li>
+<li><a href="#mp-built">Built</a></li>
+</ul>
+</nav>
+
+<h2 id="mp-now">Where they are now</h2>
+<p>Every real function ww computes is in one place, <code>src/fmath.cpp</code> (ww's own, and since 0.9.5076 glibc's exp, expm1, log1p, sinh, cosh and tanh); nothing in ww's C++ calls the system's math library. Over it are names: <code>Math</code> for ww programs, <code>Complex</code>, the whole-list functions, Formula's spreadsheet functions, and Snippy's <code>math</code> and <code>cmath</code>, which is now only Complex. What is more than one is what only Snippy computes (<code>lib/Snippy/Runtime/ModMath.ww</code>), which no ww program can reach:</p>
+<ul>
+<li><strong>Floats:</strong> gamma and lgamma (CPython's Lanczos sums), erf and erfc (worked out to more bits and rounded once), cbrt, fma, remainder, copysign, nextafter, ulp, degrees and radians, hypot of any number of coordinates and dist (CPython's <code>vector_norm</code>), fsum and sumprod.</li>
+<li><strong>Integers:</strong> factorial, comb and perm (products of ranges), lcm.</li>
+<li><strong>Two hypots, three ways:</strong> <code>Math.hypot(x, y)</code> in C++ and Snippy's <code>__pyNorm</code> in WinterWolf are the same rule (the nearest float, as CPython's <code>math.hypot</code>) written twice; Complex's <code>__cmHypot</code> (0.9.5076) is glibc's, as CPython's cmath and <code>abs()</code> of a complex call, and stays: it is a different answer on purpose.</li>
+<li><strong>cbrt is glibc's code.</strong> <code>pyCbrt</code> (0.9.5059) is glibc's <code>sysdeps/ieee754/dbl-64/s_cbrt.c</code>: its polynomial's coefficients, its table of 2^(±1/3) and its Halley step. That file is under the LGPL, which ww's own code may not take (glibc's IBM sin, cos, tan and atan2 are left alone for the same reason). It goes.</li>
+</ul>
+<p>isqrt and gcd are already ww's (<code>BigInt.sqrt()</code>, <code>BigInt.gcd</code>), and fmod is ww's float <code>%</code>.</p>
+
+<h2 id="mp-names">The names</h2>
+<p>As Kotlin and Java name them where they have them (ww's rule: 0.9.5074, U1 to U26), and where neither has one, the plainest word. Each gives the bits Snippy gives now, so that Snippy's answers do not change, except cbrt (question 3).</p>
+<div class="table"><table>
+<thead><tr><th>ww</th><th>Snippy's (Python's)</th><th>Others</th></tr></thead>
+<tbody>
+<tr><td><code>Math.cbrt(x)</code></td><td><code>cbrt</code></td><td>Java, Kotlin <code>cbrt</code></td></tr>
+<tr><td><code>Math.gamma(x)</code>, <code>Math.lnGamma(x)</code></td><td><code>gamma</code>, <code>lgamma</code></td><td>C <code>tgamma</code>, <code>lgamma</code>; Apache Commons <code>Gamma.gamma</code>, <code>logGamma</code>; ww's natural log is <code>ln</code></td></tr>
+<tr><td><code>Math.erf(x)</code>, <code>Math.erfc(x)</code></td><td><code>erf</code>, <code>erfc</code></td><td>C, Julia, R</td></tr>
+<tr><td><code>Math.fma(a, b, c)</code></td><td><code>fma</code></td><td>Java <code>Math.fma</code></td></tr>
+<tr><td><code>Math.ieeeRemainder(x, y)</code></td><td><code>remainder</code></td><td>Java <code>IEEEremainder</code>, Kotlin <code>IEEErem</code>; ww's <code>%</code> and <code>mod</code> are the other two remainders</td></tr>
+<tr><td><code>Math.toDegrees(x)</code>, <code>Math.toRadians(x)</code></td><td><code>degrees</code>, <code>radians</code></td><td>Java</td></tr>
+<tr><td><code>Math.hypot(coordinates)</code>, <code>Math.distance(p, q)</code></td><td><code>hypot(*coords)</code>, <code>dist</code></td><td>a list of numbers, beside the two-number <code>hypot</code></td></tr>
+<tr><td><code>x.withSign(sign)</code></td><td><code>copysign</code></td><td>Kotlin <code>withSign</code>, Java <code>copySign</code></td></tr>
+<tr><td><code>x.nextUp()</code>, <code>x.nextDown()</code>, <code>x.nextTowards(to)</code>, <code>x.ulp</code></td><td><code>nextafter</code>, <code>ulp</code></td><td>Kotlin (the same four), Java <code>nextUp</code>, <code>nextDown</code>, <code>nextAfter</code>, <code>ulp</code></td></tr>
+<tr><td><code>values.exactSum()</code>, <code>values.exactDot(other)</code></td><td><code>fsum</code>, <code>sumprod</code></td><td>on <code>List&lt;float&gt;</code>: the exact sum (or sum of products), rounded once (question 4)</td></tr>
+<tr><td><code>BigInt.factorial(n)</code>, <code>BigInt.binomial(n, k)</code>, <code>BigInt.permutations(n, k)</code></td><td><code>factorial</code>, <code>comb</code>, <code>perm</code></td><td>Julia <code>factorial</code>, <code>binomial</code>; Apache Commons <code>binomialCoefficient</code></td></tr>
+<tr><td><code>a.lcm(b)</code> on BigInt</td><td><code>lcm</code></td><td>beside <code>BigInt.gcd</code></td></tr>
+</tbody></table></div>
+<p>Kept in Snippy, being Python's own and not math: <code>isclose</code>, <code>prod</code> of any objects, <code>modf</code>, and each function's argument checks and ValueError and OverflowError messages.</p>
+
+<h2 id="mp-same">What does not change</h2>
+<ul>
+<li>Snippy's answers, but for cbrt: each function moves as it is, checked by <code>tests/snippy_programs/lib/mod_math.py</code> and <code>mod_fractions_statistics.py</code> (statistics uses erfc).</li>
+<li><code>Math.hypot(x, y)</code>, and Complex's glibc hypot.</li>
+<li>The same bits on every system: the float functions in <code>src/fmath.cpp</code> beside the rest (question 2), with no multiply and add fused but where written as <code>std::fma</code>.</li>
+</ul>
+<p>Each new function gets a test of its own (<code>tests/math_more.ww</code>), its values from CPython where CPython's are the same rule, and <code>docs/language.html</code> describes each.</p>
+
+<h2 id="mp-questions">Questions for the user</h2>
+<p>Each with the recommendation and why.</p>
+
+<section class="decision">
+<h3><span class="code">1</span>The names</h3>
+<p>As in the table above, or other names for any of them.</p>
+<p><em>Recommended:</em> the table. Each is Kotlin's or Java's where they have one, and <code>lnGamma</code> follows ww's <code>ln</code>.</p>
+<div class="verdict decided"><span class="label">Decided</span><span class="note">2026-11-23, the user ("go with Recommended for all 4"): as recommended.</span></div>
+</section>
+
+<section class="decision">
+<h3><span class="code">2</span>Where the float functions are computed</h3>
+<ul>
+<li><strong>In C++, in <code>src/fmath.cpp</code></strong> beside sin and exp, with its double-double arithmetic for the extra bits erf and gamma need (Snippy's do it with BigInts now).</li>
+<li><strong>In WinterWolf</strong>, moved from Snippy nearly as they are. <code>Math</code> is an external object, which cannot hold a function with a WinterWolf body (A2 met this: <code>frexp</code> became a float's method), so either the compiler learns to let it, or these become floats' methods (<code>x.gamma()</code>) and list functions.</li>
+</ul>
+<p><em>Recommended:</em> C++. It is where every other real function is, it is many times faster than BigInt arithmetic, and it keeps <code>Math</code> one object. The ww-first rule asks for WinterWolf unless C++ is needed; here <code>Math</code>'s being external is what needs it, short of a compiler change.</p>
+<div class="verdict decided"><span class="label">Decided</span><span class="note">2026-11-23, the user ("go with Recommended for all 4"): as recommended.</span></div>
+</section>
+
+<section class="decision">
+<h3><span class="code">3</span>cbrt</h3>
+<ul>
+<li><strong>ww's own</strong>: the nearest float, exact for exact cubes (<code>cbrt(27)</code> is 3.0). CPython on Linux gives glibc's, which is not always the nearest (<code>3.0000000000000004</code>), so Snippy's <code>math.cbrt</code> then differs from CPython in the last digit now and then; <code>mod_math.py</code>'s line of cbrt values changes to ones where they agree, and the difference is written down.</li>
+<li><strong>No cbrt</strong>: glibc's taken out and nothing put in its place.</li>
+</ul>
+<p><em>Recommended:</em> ww's own. glibc's bits cannot be had without glibc's code; the nearest float is the better answer, and it is what Java's and Kotlin's cbrt aim for.</p>
+<div class="verdict decided"><span class="label">Decided</span><span class="note">2026-11-23, the user ("go with Recommended for all 4"): as recommended.</span></div>
+</section>
+
+<section class="decision">
+<h3><span class="code">4</span>fsum's and sumprod's names</h3>
+<ul>
+<li><strong><code>exactSum()</code> and <code>exactDot(other)</code></strong> on lists of floats, beside <code>sum()</code> and <code>dot()</code>, which add as they go.</li>
+<li><strong><code>Math.fsum(values)</code> and <code>Math.sumprod(p, q)</code></strong>, Python's names.</li>
+<li><strong>Make <code>sum()</code> and <code>dot()</code> exact</strong> for floats: one name each, but slower, and the answers of existing programs change.</li>
+</ul>
+<p><em>Recommended:</em> <code>exactSum()</code> and <code>exactDot()</code>. Neither Kotlin nor Java has one to copy; these say what they do and sit beside the plain ones.</p>
+<div class="verdict decided"><span class="label">Decided</span><span class="note">2026-11-23, the user ("go with Recommended for all 4"): as recommended.</span></div>
+</section>
+
+<h2 id="mp-built">Built (0.9.5078)</h2>
+<p>Every name in the table, as decided. In <code>src/fmath.cpp</code>: cbrt (a guess from pow, a Newton step, then the cube's shortfall in two doubles as one correction: the nearest float on all 44,796 inputs checked exactly with fractions, every exact cube's root exact), gamma and lnGamma (CPython's Lanczos steps, the same as Snippy's were), erf and erfc (a series with no cancelling terms, and a continued fraction from 4 up, both in two doubles; e^z worked out to 2^-100 for them, as fmath's own e^z kernel, good to 2^-64, is not enough where erfc is 1 - erf), fma, ieeeRemainder (CPython's <code>m_remainder</code>, from fmod), and the length of a vector of any size (squares in two doubles). In WinterWolf: the floats' withSign, nextUp, nextDown, nextTowards and ulp (builtins.ww), exactSum and exactDot (numeric.ww), BigInt's factorial, binomial, permutations and lcm (bigint.ww). Snippy's math is now Python's names and checks over these: <code>lib/Snippy/Runtime/ModMath.ww</code> went from 870 lines to 463, and glibc's cbrt is gone.</p>
+<p>Checked against what Snippy gave before, on 247,000 inputs: gamma, lnGamma, hypot of three, fma and remainder the same bits everywhere; erf and erfc the same everywhere but below about 2^-147, where Snippy's fixed point of 200 bits lost the digits of erf (giving 0 below about 2^-200): the new answer is the nearer one in all 4,325 such cases, against a 140-digit series. Against CPython 3.14 on Linux: erf, erfc, fma, remainder and hypot of three the same on every input; gamma (42 of 34,514) and lgamma (5 of 30,000) differ in the last digit, through ww's own exp, pow and sin under them, as they did before; cbrt is the nearest float where glibc's is not (<code>Math.cbrt(27)</code> is 3.0, CPython's <code>3.0000000000000004</code>), so <code>mod_math.py</code>'s line takes cbrt(1000) instead. Tests: <code>tests/math_more.ww</code> (numbers from <code>tools/fmath/python_more.py</code>), and every Snippy program as CPython's.</p>
+
+</main>
+</body>
+</html>

@@ -738,9 +738,38 @@ void registerMath(VM& vm) {
         return Value::number(d);
     });
 
-    def("hypot", 2, 2, [](VM& vm, int, Value* args) -> Value {
-        return Value::number(fmath::hypot(vm.toNumber(args[0], "Math.hypot() argument"), vm.toNumber(args[1], "Math.hypot() argument")));
+    // hypot(x, y), or hypot(coordinates): a list's length as a vector.
+    def("hypot", 1, 2, [](VM& vm, int argc, Value* args) -> Value {
+        if (argc == 2) return Value::number(fmath::hypot(vm.toNumber(args[0], "Math.hypot() argument"), vm.toNumber(args[1], "Math.hypot() argument")));
+        if (!args[0].isObjType(ObjType::List)) throw vm.runtimeError(Thrown::IllegalArgumentException, "Math.hypot() takes two numbers or a list of them");
+        std::vector<double> v;
+        for (const Value& x : vm.listCopy(asList(args[0]))) v.push_back(vm.toNumber(x, "Math.hypot() coordinate"));
+        return Value::number(fmath::hypot(v.data(), v.size()));
     });
+    // The distance between two points, each a list of coordinates (docs/math-plan.html).
+    def("distance", 2, 2, [](VM& vm, int, Value* args) -> Value {
+        if (!args[0].isObjType(ObjType::List) || !args[1].isObjType(ObjType::List))
+            throw vm.runtimeError(Thrown::IllegalArgumentException, "Math.distance() takes two lists of coordinates");
+        const std::vector<Value> p = vm.listCopy(asList(args[0])), q = vm.listCopy(asList(args[1]));
+        if (p.size() != q.size()) throw vm.runtimeError(Thrown::IllegalArgumentException, "Math.distance(): the points have " + std::to_string(p.size()) + " and " + std::to_string(q.size()) + " coordinates");
+        std::vector<double> d;
+        for (size_t i = 0; i < p.size(); i++) d.push_back(std::fabs(vm.toNumber(p[i], "Math.distance() coordinate") - vm.toNumber(q[i], "Math.distance() coordinate")));
+        return Value::number(fmath::hypot(d.data(), d.size()));
+    });
+    // docs/math-plan.html: what Snippy's math computed by itself, now ww's.
+    def("cbrt", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(fmath::cbrt(vm.toNumber(args[0], "Math.cbrt() argument"))); });
+    def("gamma", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(fmath::gamma(vm.toNumber(args[0], "Math.gamma() argument"))); });
+    def("lnGamma", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(fmath::lnGamma(vm.toNumber(args[0], "Math.lnGamma() argument"))); });
+    def("erf", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(fmath::erf(vm.toNumber(args[0], "Math.erf() argument"))); });
+    def("erfc", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(fmath::erfc(vm.toNumber(args[0], "Math.erfc() argument"))); });
+    def("fma", 3, 3, [](VM& vm, int, Value* args) -> Value {
+        return Value::number(fmath::fma(vm.toNumber(args[0], "Math.fma() argument"), vm.toNumber(args[1], "Math.fma() argument"), vm.toNumber(args[2], "Math.fma() argument")));
+    });
+    def("ieeeRemainder", 2, 2, [](VM& vm, int, Value* args) -> Value {
+        return Value::number(fmath::ieeeRemainder(vm.toNumber(args[0], "Math.ieeeRemainder() argument"), vm.toNumber(args[1], "Math.ieeeRemainder() argument")));
+    });
+    def("toDegrees", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(vm.toNumber(args[0], "Math.toDegrees() argument") * (180.0 / 3.141592653589793)); });
+    def("toRadians", 1, 1, [](VM& vm, int, Value* args) -> Value { return Value::number(vm.toNumber(args[0], "Math.toRadians() argument") * (3.141592653589793 / 180.0)); });
     def("sign", 1, 1, [](VM& vm, int, Value* args) -> Value {
         args[0] = asWideInt(args[0]);   // a byte is an int here
         if (args[0].isInt()) return Value::integer((args[0].as.i > 0) - (args[0].as.i < 0));
