@@ -1,0 +1,78 @@
+// ww's Complex functions are CPython's cmath (W6 of docs/snippy-ww-checklist.html): over every
+// pair of awkward values, each function's answers and exceptions folded into one number as
+// tools/complex/python_cmath.py folds CPython 3.14's on Linux; abs() over many pairs, as CPython's
+// abs() of a complex (glibc's hypot). Snippy's cmath module is these.
+//
+// Off this grid, where the answer comes from ww's own sin, cos, tan, atan2 or ln, a part may
+// still be an ulp or few from CPython's (some 0.2% of answers): those five are not glibc's.
+
+val m = 1000000007
+val inf = 1.0 / 0.0
+val nan = 0.0 / 0.0
+val base = [0.0, 1e-310, 1e-200, 1e-8, 0.3, 0.5, 0.9, 1.0, 1.1, 2.0, 10.0, 100.0, 708.0, 710.0, 1e150, 1e300, 1.7e308]
+val vals = base + base.map { -it } + [inf, -inf, nan]
+fun part(x : float) : int => x.isNaN() ? 1 : x.toBits().mod(m)
+fun fold(h0 : int, z : Complex) : int {
+  val h = (h0 * 1000003 + part(z.re) + 1) % m
+  return (h * 1000003 + part(z.im) + 1) % m
+}
+val names = ["sqrt", "exp", "log", "log10", "sin", "cos", "tan", "sinh", "cosh", "tanh", "asin", "acos", "atan", "asinh", "acosh", "atanh"]
+val funcs : List<(Complex) -> Complex> = [{ z -> z.sqrt() }, { z -> z.exp() }, { z -> z.log() }, { z -> z.log10() },
+  { z -> z.sin() }, { z -> z.cos() }, { z -> z.tan() }, { z -> z.sinh() }, { z -> z.cosh() }, { z -> z.tanh() },
+  { z -> z.asin() }, { z -> z.acos() }, { z -> z.atan() }, { z -> z.asinh() }, { z -> z.acosh() }, { z -> z.atanh() }]
+val expected = [640660531, 561753351, 710607856, 812461350, 290527536, 145893438, 927856523, 362458843,
+  214855611, 446353851, 861405217, 165687008, 882182689, 67654234, 154967616, 281281840]
+val wrong : open List<string> = []
+for (k in 0..<16) {
+  var h = 0
+  for (a in vals) { for (b in vals) {
+    try {
+      h = fold(h, funcs[k](Complex(a, b)))
+    } catch (e : IllegalArgumentException) {
+      h = (h * 1000003 + 2) % m
+    } catch (e : ArithmeticException) {
+      h = (h * 1000003 + 3) % m
+    }
+  } }
+  if (h != expected[k]) { wrong.add(names[k]) }
+}
+print(wrong)   // expect: []
+
+// abs(): glibc's hypot, an infinity from finite parts where CPython raises OverflowError.
+val g = 0.6180339887498949
+val gh = 0.7548776662466927
+val exponents = [0, -3, 40, -600, 515, -1030, 900]
+var h = 0
+for (i in 0..<20000) {
+  val e1 = exponents[i % 7] + (i * 7919) % 40 - 20
+  val e2 = e1 + (i * 104729) % 120 - 60
+  val a = (i % 2 == 1 ? -1.0 : 1.0) * Math.ldexp(0.5 + (i.toFloat() * g) % 1.0, e1)
+  val b = Math.ldexp(0.5 + (i.toFloat() * gh) % 1.0, e2)
+  val r = Complex(a, b).abs()
+  h = r.isInfinite() ? (h * 1000003 + 3) % m : (h * 1000003 + part(r) + 1) % m
+}
+print(h == 676430675)   // expect: true
+
+// The errors, as CPython raises them.
+fun tried(f : () -> Complex) : string {
+  try {
+    return f().toString()
+  } catch (e : IllegalArgumentException) {
+    return "IllegalArgumentException: ${e.message}"
+  } catch (e : ArithmeticException) {
+    return "ArithmeticException: ${e.message}"
+  }
+}
+print(tried { Complex(0.0, 0.0).log() })   // expect: IllegalArgumentException: math domain error
+print(tried { Complex(-1.0, 0.0).atanh() })   // expect: IllegalArgumentException: math domain error
+print(tried { Complex(0.0, 1.0).atan() })   // expect: IllegalArgumentException: math domain error
+print(tried { Complex(1.0, inf).exp() })   // expect: IllegalArgumentException: math domain error
+print(tried { Complex(inf, 1.0).tan() })   // expect: IllegalArgumentException: math domain error
+print(tried { Complex(800.0, 1.0).cosh() })   // expect: ArithmeticException: math range error
+print(tried { Complex(1.0, 800.0).sin() })   // expect: ArithmeticException: math range error
+print(tried { Complex.fromPolar(2.0, inf) })   // expect: IllegalArgumentException: math domain error
+// No error where CPython gives an answer: infinities in, the special values out.
+print(tried { Complex(inf, 1.0).exp() }, tried { Complex(-inf, inf).exp() }, tried { Complex(nan, inf).cosh() }, tried { Complex(1.0, inf).atanh() })
+// expect: inf+infi 0.0+0.0i nan+nani 0.0+1.5707963267948966i
+print(Complex(-0.0, 0.0).sqrt(), Complex(-inf, nan).sqrt(), Complex(1e308, 1e308).sqrt(), Complex(1e-310, 1e-310).sqrt())
+// expect: 0.0+0.0i nan+infi 1.09868411346781e+154+4.5508986056222734e+153i 1.0986841134678082e-155+4.550898605622267e-156i

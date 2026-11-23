@@ -1,17 +1,8 @@
 import Snippy.Text.*
-// cmath (the Snippy plan, part 5.3, step 2): complex functions as CPython's cmath module
-// computes them for finite values, from real functions in the same order (its square root
-// scaled by 8, its log through log1p near the unit circle, its inverse functions through two
-// square roots), so that each gives CPython's digits. A value with an infinity or a NaN in it
-// gives what the same formulas give.
-
-internal val __pyLn2 = 0.6931471805599453094
-internal val __pyLn10 = 2.302585092994045684
-internal val __pyDblMin = 2.2250738585072014e-308
-internal val __pyLargeDouble = 1.7976931348623157e308 / 4.0
-internal val __pySqrtLargeDouble = Math.sqrt(1.7976931348623157e308 / 4.0)
-internal val __pyLogLargeDouble = Math.ln(1.7976931348623157e308 / 4.0)
-internal val __pySqrtDblMin = Math.sqrt(2.2250738585072014e-308)
+// cmath (the Snippy plan, part 5.3, step 2): ww's Complex functions, which are CPython's cmath
+// step for step (W6 of docs/snippy-ww-checklist.html): its answers, its special values, and its
+// errors, which ww throws as IllegalArgumentException ("math domain error") and
+// ArithmeticException ("math range error") and Snippy raises as ValueError and OverflowError.
 
 // A complex argument, as cmath takes one: complex, a real number, or an object with
 // __complex__, __float__ or __index__.
@@ -28,166 +19,16 @@ fun pyComplexArg(x : any?) : Complex {
   return Complex(pyRealArg(x), 0.0)
 }
 
-internal fun __pyCsqrt(z : Complex) : Complex {
-  if (z.re == 0.0 and z.im == 0.0) { return Complex(0.0, z.im) }
-  if (z.re.isNaN() or z.im.isNaN() or z.re.isInfinite() or z.im.isInfinite()) {
-    if (z.im.isInfinite()) { return Complex(pyInf, z.im) }
-    if (z.re == pyInf) { return Complex(pyInf, z.im.isNaN() ? z.im : pyCopySign(0.0, z.im)) }
-    if (z.re == -pyInf) { return Complex(z.im.isNaN() ? z.im : 0.0, pyCopySign(pyInf, z.im)) }
-    return Complex(pyNaN, pyNaN)
+// `f`'s answer, its exceptions raised as CPython raises them.
+internal fun __pyCmath(f : () -> Complex) : Complex {
+  try {
+    return f()
+  } catch (e : IllegalArgumentException) {
+    throw pyValueError(e.message ?: "math domain error")
+  } catch (e : ArithmeticException) {
+    throw pyOverflowError(e.message ?: "math range error")
   }
-  var ax = Math.abs(z.re)
-  val ay = Math.abs(z.im)
-  var s = 0.0
-  if (ax < __pyDblMin and ay < __pyDblMin) {
-    ax = ax * 2.0.pow(53)
-    s = 2.0 * Math.sqrt(ax + Math.hypot(ax, ay * 2.0.pow(53)))
-    s = s * 2.0.pow(-27)
-  } else {
-    ax = ax / 8.0
-    s = 2.0 * Math.sqrt(ax + Math.hypot(ax, ay / 8.0))
-  }
-  val d = ay / (2.0 * s)
-  return z.re >= 0.0 ? Complex(s, pyCopySign(d, z.im)) : Complex(d, pyCopySign(s, z.im))
 }
-
-internal fun __pyClog(z : Complex) : Complex {
-  val ax = Math.abs(z.re)
-  val ay = Math.abs(z.im)
-  var real = 0.0
-  if (ax > __pyLargeDouble or ay > __pyLargeDouble) {
-    real = Math.ln(Math.hypot(ax / 2.0, ay / 2.0)) + __pyLn2
-  } else if (ax < __pyDblMin and ay < __pyDblMin) {
-    if (ax > 0.0 or ay > 0.0) {
-      real = Math.ln(Math.hypot(ax * 2.0.pow(53), ay * 2.0.pow(53))) - 53.0 * __pyLn2
-    } else {
-      throw pyValueError("math domain error")
-    }
-  } else {
-    val h = Math.hypot(ax, ay)
-    if (0.71 <= h and h <= 1.73) {
-      val am = ax > ay ? ax : ay
-      val an = ax > ay ? ay : ax
-      real = Math.log1p((am - 1.0) * (am + 1.0) + an * an) / 2.0
-    } else {
-      real = Math.ln(h)
-    }
-  }
-  return Complex(real, Math.atan2(z.im, z.re))
-}
-
-internal fun __pyCasinh(z : Complex) : Complex {
-  if (Math.abs(z.re) > __pyLargeDouble or Math.abs(z.im) > __pyLargeDouble) {
-    val l = Math.ln(Math.hypot(z.re / 2.0, z.im / 2.0)) + __pyLn2 * 2.0
-    val real = z.im >= 0.0 ? pyCopySign(l, z.re) : -pyCopySign(l, -z.re)
-    return Complex(real, Math.atan2(z.im, Math.abs(z.re)))
-  }
-  val s1 = __pyCsqrt(Complex(1.0 + z.im, -z.re))
-  val s2 = __pyCsqrt(Complex(1.0 - z.im, z.re))
-  return Complex(Math.asinh(s1.re * s2.im - s2.re * s1.im), Math.atan2(z.im, s1.re * s2.re - s1.im * s2.im))
-}
-
-internal fun __pyCasin(z : Complex) : Complex {
-  val s = __pyCasinh(Complex(-z.im, z.re))
-  return Complex(s.im, -s.re)
-}
-
-internal fun __pyCacos(z : Complex) : Complex {
-  if (Math.abs(z.re) > __pyLargeDouble or Math.abs(z.im) > __pyLargeDouble) {
-    val real = Math.atan2(Math.abs(z.im), z.re)
-    val l = Math.ln(Math.hypot(z.re / 2.0, z.im / 2.0)) + __pyLn2 * 2.0
-    return Complex(real, z.re < 0.0 ? -pyCopySign(l, z.im) : pyCopySign(l, -z.im))
-  }
-  val s1 = __pyCsqrt(Complex(1.0 - z.re, -z.im))
-  val s2 = __pyCsqrt(Complex(1.0 + z.re, z.im))
-  return Complex(2.0 * Math.atan2(s1.re, s2.re), Math.asinh(s2.re * s1.im - s2.im * s1.re))
-}
-
-internal fun __pyCacosh(z : Complex) : Complex {
-  if (Math.abs(z.re) > __pyLargeDouble or Math.abs(z.im) > __pyLargeDouble) {
-    return Complex(Math.ln(Math.hypot(z.re / 2.0, z.im / 2.0)) + __pyLn2 * 2.0, Math.atan2(z.im, z.re))
-  }
-  val s1 = __pyCsqrt(Complex(z.re - 1.0, z.im))
-  val s2 = __pyCsqrt(Complex(z.re + 1.0, z.im))
-  return Complex(Math.asinh(s1.re * s2.re + s1.im * s2.im), 2.0 * Math.atan2(s1.im, s2.re))
-}
-
-internal fun __pyCatanh(z : Complex) : Complex {
-  if (z.re < 0.0) {
-    val r = __pyCatanh(Complex(-z.re, -z.im))
-    return Complex(-r.re, -r.im)
-  }
-  val ay = Math.abs(z.im)
-  if (z.re > __pySqrtLargeDouble or ay > __pySqrtLargeDouble) {
-    val h = Math.hypot(z.re / 2.0, z.im / 2.0)
-    return Complex(z.re / 4.0 / h / h, -pyCopySign(Math.pi / 2.0, -z.im))
-  }
-  if (z.re == 1.0 and ay < __pySqrtDblMin) {
-    if (ay == 0.0) { throw pyValueError("math domain error") }
-    return Complex(-Math.ln(Math.sqrt(ay) / Math.sqrt(Math.hypot(ay, 2.0))), pyCopySign(Math.atan2(2.0, -ay) / 2.0, z.im))
-  }
-  val real = Math.log1p(4.0 * z.re / ((1.0 - z.re) * (1.0 - z.re) + ay * ay)) / 4.0
-  val imag = -Math.atan2(-2.0 * z.im, (1.0 - z.re) * (1.0 + z.re) - ay * ay) / 2.0
-  return Complex(real, imag)
-}
-
-internal fun __pyCatan(z : Complex) : Complex {
-  val s = __pyCatanh(Complex(-z.im, z.re))
-  return Complex(s.im, -s.re)
-}
-
-internal fun __pyCcosh(z : Complex) : Complex {
-  if (Math.abs(z.re) > __pyLogLargeDouble) {
-    val x1 = z.re - pyCopySign(1.0, z.re)
-    val real = Math.cos(z.im) * Math.cosh(x1) * Math.e
-    val imag = Math.sin(z.im) * Math.sinh(x1) * Math.e
-    if (real.isInfinite() or imag.isInfinite()) { throw pyOverflowError("math range error") }
-    return Complex(real, imag)
-  }
-  return Complex(Math.cos(z.im) * Math.cosh(z.re), Math.sin(z.im) * Math.sinh(z.re))
-}
-
-internal fun __pyCsinh(z : Complex) : Complex {
-  if (Math.abs(z.re) > __pyLogLargeDouble) {
-    val x1 = z.re - pyCopySign(1.0, z.re)
-    val real = Math.cos(z.im) * Math.sinh(x1) * Math.e
-    val imag = Math.sin(z.im) * Math.cosh(x1) * Math.e
-    if (real.isInfinite() or imag.isInfinite()) { throw pyOverflowError("math range error") }
-    return Complex(real, imag)
-  }
-  return Complex(Math.cos(z.im) * Math.sinh(z.re), Math.sin(z.im) * Math.cosh(z.re))
-}
-
-internal fun __pyCtanh(z : Complex) : Complex {
-  if (Math.abs(z.re) > __pyLogLargeDouble) {
-    return Complex(pyCopySign(1.0, z.re), 4.0 * Math.sin(z.im) * Math.cos(z.im) * Math.exp(-2.0 * Math.abs(z.re)))
-  }
-  val tx = Math.tanh(z.re)
-  val ty = Math.tan(z.im)
-  val cx = 1.0 / Math.cosh(z.re)
-  val txty = tx * ty
-  val denom = 1.0 + txty * txty
-  return Complex(tx * (1.0 + ty * ty) / denom, ((ty / denom) * cx) * cx)
-}
-
-internal fun __pyCexp(z : Complex) : Complex {
-  var real = 0.0
-  var imag = 0.0
-  if (z.re > __pyLogLargeDouble) {
-    val l = Math.exp(z.re - 1.0)
-    real = l * Math.cos(z.im) * Math.e
-    imag = l * Math.sin(z.im) * Math.e
-  } else {
-    val l = Math.exp(z.re)
-    real = l * Math.cos(z.im)
-    imag = l * Math.sin(z.im)
-  }
-  if ((real.isInfinite() or imag.isInfinite()) and !z.re.isInfinite()) { throw pyOverflowError("math range error") }
-  return Complex(real, imag)
-}
-
-internal fun __pyCquot(a : Complex, b : Complex) : Complex => pyToComplexValue(pyDiv(a, b))
-internal fun pyToComplexValue(x : any?) : Complex => x is Complex ? x as Complex : Complex(pyToFloat(x), 0.0)
 
 fun pyCmathModule() : PyModule {
   val m : open Map<string, any?> = {:}
@@ -202,33 +43,35 @@ fun pyCmathModule() : PyModule {
     m[name] = __pyB(name) { a ->
       __pyCheckCount(name, a, 1, 1)
       val z = pyComplexArg(a.pos[0])
-      val r = f(z)
-      // A NaN from numbers, or an infinity from finite ones: CPython's EDOM and ERANGE.
-      val finiteIn = !z.re.isNaN() and !z.im.isNaN() and !z.re.isInfinite() and !z.im.isInfinite()
-      if (finiteIn and (r.re.isNaN() or r.im.isNaN())) { throw pyValueError("math domain error") }
-      if (finiteIn and (r.re.isInfinite() or r.im.isInfinite())) { throw pyOverflowError("math range error") }
-      r
+      __pyCmath { f(z) }
     }
   }
-  one("sqrt", { z -> __pyCsqrt(z) })
-  one("exp", { z -> __pyCexp(z) })
-  one("log10", { z -> val r = __pyClog(z); Complex(r.re / __pyLn10, r.im / __pyLn10) })
-  one("asinh", { z -> __pyCasinh(z) })
-  one("asin", { z -> __pyCasin(z) })
-  one("acos", { z -> __pyCacos(z) })
-  one("acosh", { z -> __pyCacosh(z) })
-  one("atanh", { z -> __pyCatanh(z) })
-  one("atan", { z -> __pyCatan(z) })
-  one("cosh", { z -> __pyCcosh(z) })
-  one("sinh", { z -> __pyCsinh(z) })
-  one("tanh", { z -> __pyCtanh(z) })
-  one("cos", { z -> __pyCcosh(Complex(-z.im, z.re)) })
-  one("sin", { z -> val s = __pyCsinh(Complex(-z.im, z.re)); Complex(s.im, -s.re) })
-  one("tan", { z -> val s = __pyCtanh(Complex(-z.im, z.re)); Complex(s.im, -s.re) })
+  one("sqrt", { z -> z.sqrt() })
+  one("exp", { z -> z.exp() })
+  one("log10", { z -> z.log10() })
+  one("asinh", { z -> z.asinh() })
+  one("asin", { z -> z.asin() })
+  one("acos", { z -> z.acos() })
+  one("acosh", { z -> z.acosh() })
+  one("atanh", { z -> z.atanh() })
+  one("atan", { z -> z.atan() })
+  one("cosh", { z -> z.cosh() })
+  one("sinh", { z -> z.sinh() })
+  one("tanh", { z -> z.tanh() })
+  one("cos", { z -> z.cos() })
+  one("sin", { z -> z.sin() })
+  one("tan", { z -> z.tan() })
   m["log"] = __pyB("log") { a ->
     __pyCheckCount("log", a, 1, 2)
-    val r = __pyClog(pyComplexArg(a.pos[0]))
-    if (a.pos.size < 2) { r } else { __pyCquot(r, __pyClog(pyComplexArg(a.pos[1]))) }
+    val x = pyComplexArg(a.pos[0])
+    if (a.pos.size < 2) { __pyCmath { x.log() } } else {
+      // As CPython: the base's error, or a base whose log is 0, raises; log(0) then gives -inf
+      // over it, without raising.
+      val lb = __pyCmath { pyComplexArg(a.pos[1]).log() }
+      if (lb.re == 0.0 and lb.im == 0.0) { throw pyValueError("math domain error") }
+      val lx = x.re == 0.0 and x.im == 0.0 ? Complex(-pyInf, Math.atan2(x.im, x.re)) : x.log()
+      lx / lb
+    }
   }
   m["phase"] = __pyB("phase") { a ->
     pyComplexArg(a.pos[0]).arg()
@@ -243,10 +86,7 @@ fun pyCmathModule() : PyModule {
     __pyCheckCount("rect", a, 2, 2)
     val r = pyRealArg(a.pos[0])
     val phi = pyRealArg(a.pos[1])
-    // ww's fromPolar is CPython's rect, its special values too (S9); a size other than 0 or NaN at
-    // an infinite angle is CPython's domain error.
-    if (r != 0.0 and !r.isNaN() and phi.isInfinite()) { throw pyValueError("math domain error") }
-    Complex.fromPolar(r, phi)
+    __pyCmath { Complex.fromPolar(r, phi) }
   }
   m["isfinite"] = __pyB("isfinite") { a ->
     val z = pyComplexArg(a.pos[0])
@@ -262,8 +102,8 @@ fun pyCmathModule() : PyModule {
     val abs = pyRealArg(a.get("abs_tol", 0.0))
     if (rel < 0.0 or abs < 0.0) { throw pyValueError("tolerances must be non-negative") }
     if (x.re == y.re and x.im == y.im) { true } else if (x.re.isInfinite() or x.im.isInfinite() or y.re.isInfinite() or y.im.isInfinite()) { false } else {
-      val diff = Math.hypot(x.re - y.re, x.im - y.im)
-      (diff <= rel * Math.hypot(y.re, y.im) or diff <= rel * Math.hypot(x.re, x.im)) or diff <= abs
+      val diff = (x - y).abs()
+      (diff <= rel * y.abs() or diff <= rel * x.abs()) or diff <= abs
     }
   }
   return pyNativeModule("cmath", m)

@@ -2127,7 +2127,7 @@ rgba.copyFrom(Bytes([255]), 0, 0, 3, 4, pixels)  // every alpha 255
 <section class="file" id="file-complex-ww">
 <h2>complex.ww</h2>
 <h3>Complex numbers (2026-11-19)</h3>
-<p>A complex number: a real part and an imaginary part, two floats, held as a value (no object of its own, copied where it is passed). The functions follow C99's and Python's cmath: their branch cuts are the same, signed zeros read the same way (1 - z keeps the sign of z's imaginary zero turned round, as a real number less a complex one does there).</p>
+<p>A complex number: a real part and an imaginary part, two floats, held as a value (no object of its own, copied where it is passed). The functions are CPython's cmath, step for step, so they give its answers: C99's branch cuts and special values, signed zeros read the same way (1 - z keeps the sign of z's imaginary zero turned round, as a real number less a complex one does there), and an exception where cmath raises one.</p>
 <pre>val z = Complex.of(3, 4)                    // 3.0+4.0i
 print(z.abs(), z * Complex.i, 1 / z, z.sqrt(), Complex.of(-1).sqrt())
 print(Complex.i.pow(2) == -1)               // true
@@ -2141,7 +2141,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The number <code>re</code> + <code>im</code> i, from ints or floats.</p>
 </div>
 <div class="entry member" id="Complex.fromPolar"><code class="sig">fun fromPolar(r : Number, theta : Number) : Complex</code><a class="anchor" href="#Complex.fromPolar">#</a>
-<p>The number of size <code>r</code> at the angle <code>theta</code> (radians) from the real axis, as Python's cmath.rect: r cos theta + r sin theta i, a zero angle keeping r and r * theta; an infinite or NaN size or angle as rect's table of special values gives it (an infinite size at a finite angle its infinities' signs from cos and sin; NaN at a zero angle NaN + 0i).</p>
+<p>The number of size <code>r</code> at the angle <code>theta</code> (radians) from the real axis, as Python's cmath.rect: r cos theta + r sin theta i, a zero angle keeping r and r * theta; an infinite or NaN size or angle as rect's table of special values gives it (an infinite size at a finite angle its infinities' signs from cos and sin; NaN at a zero angle NaN + 0i). A size other than 0 or NaN at an infinite angle throws an IllegalArgumentException &quot;math domain error&quot;, where rect raises ValueError.</p>
 </div>
 <div class="entry member" id="Complex.zero"><code class="sig">val zero : Complex</code><a class="anchor" href="#Complex.zero">#</a>
 <p>0.</p>
@@ -2192,7 +2192,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>Divided by an int.</p>
 </div>
 <div class="entry member" id="Complex.abs"><code class="sig">fun abs() : float</code><a class="anchor" href="#Complex.abs">#</a>
-<p>Its size: the distance from 0, without overflow on the way.</p>
+<p>Its size: the distance from 0, without overflow on the way; as CPython's abs() of a complex gives it (the C library's hypot, glibc's on Linux, not quite always the nearest float as Math.hypot is). An infinite part makes it infinite, NaN beside it or not.</p>
 </div>
 <div class="entry member" id="Complex.arg"><code class="sig">fun arg() : float</code><a class="anchor" href="#Complex.arg">#</a>
 <p>Its angle from the positive real axis, in radians, from -pi to pi.</p>
@@ -2231,13 +2231,13 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The logarithm in base 10.</p>
 </div>
 <div class="entry member" id="Complex.sin"><code class="sig">fun sin() : Complex</code><a class="anchor" href="#Complex.sin">#</a>
-<p>The sine.</p>
+<p>The sine: -i sinh(i z).</p>
 </div>
 <div class="entry member" id="Complex.cos"><code class="sig">fun cos() : Complex</code><a class="anchor" href="#Complex.cos">#</a>
-<p>The cosine.</p>
+<p>The cosine: cosh(i z).</p>
 </div>
 <div class="entry member" id="Complex.tan"><code class="sig">fun tan() : Complex</code><a class="anchor" href="#Complex.tan">#</a>
-<p>The tangent.</p>
+<p>The tangent: -i tanh(i z).</p>
 </div>
 <div class="entry member" id="Complex.sinh"><code class="sig">fun sinh() : Complex</code><a class="anchor" href="#Complex.sinh">#</a>
 <p>The hyperbolic sine.</p>
@@ -2246,16 +2246,16 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <p>The hyperbolic cosine.</p>
 </div>
 <div class="entry member" id="Complex.tanh"><code class="sig">fun tanh() : Complex</code><a class="anchor" href="#Complex.tanh">#</a>
-<p>The hyperbolic tangent; exact far from 0, where the parts' exponentials would overflow.</p>
+<p>The hyperbolic tangent.</p>
 </div>
 <div class="entry member" id="Complex.asin"><code class="sig">fun asin() : Complex</code><a class="anchor" href="#Complex.asin">#</a>
-<p>The inverse functions, each the principal value, their cuts where C99 puts them.</p>
+<p>The inverse functions, each the principal value, their cuts where C99 puts them. The inverse sine: -i asinh(i z).</p>
 </div>
 <div class="entry member" id="Complex.acos"><code class="sig">fun acos() : Complex</code><a class="anchor" href="#Complex.acos">#</a>
 <p>The inverse cosine, its real part from 0 to pi.</p>
 </div>
 <div class="entry member" id="Complex.atan"><code class="sig">fun atan() : Complex</code><a class="anchor" href="#Complex.atan">#</a>
-<p>The inverse tangent.</p>
+<p>The inverse tangent: -i atanh(i z).</p>
 </div>
 <div class="entry member" id="Complex.asinh"><code class="sig">fun asinh() : Complex</code><a class="anchor" href="#Complex.asinh">#</a>
 <p>The inverse hyperbolic sine.</p>
@@ -2305,6 +2305,7 @@ print(Complex.fromPolar(2, Math.pi / 2))    // 1.2246467991473532e-16+2.0i
 <div class="entry" id="float./"><code class="sig">op float./(other : Complex) : Complex</code><a class="anchor" href="#float./">#</a>
 <p>The float divided by a Complex: Smith's way as Complex / Complex, with no imaginary part on the left to add in (so its signs of zero come out as CPython's, and C11's: 2.0 / (-0.0 + 2i) is -0.0 - 1i), and the zeros recovered where an infinite divisor gives NaN + NaN i.</p>
 </div>
+<p>---- CPython's cmath (Modules/cmathmodule.c, CPython 3.14; Copyright (c) 2001 Python Software Foundation, under the PSF License Agreement), its steps for Complex's functions ----</p>
 </section>
 <section class="file" id="file-core-ww">
 <h2>core.ww</h2>

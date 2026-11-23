@@ -1,8 +1,9 @@
 // ---- Complex numbers (2026-11-19) ----
 // A complex number: a real part and an imaginary part, two floats, held as a value (no object of
-// its own, copied where it is passed). The functions follow C99's and Python's cmath: their
-// branch cuts are the same, signed zeros read the same way (1 - z keeps the sign of z's
-// imaginary zero turned round, as a real number less a complex one does there).
+// its own, copied where it is passed). The functions are CPython's cmath, step for step, so they
+// give its answers: C99's branch cuts and special values, signed zeros read the same way (1 - z
+// keeps the sign of z's imaginary zero turned round, as a real number less a complex one does
+// there), and an exception where cmath raises one.
 //
 //   val z = Complex.of(3, 4)                    // 3.0+4.0i
 //   print(z.abs(), z * Complex.i, 1 / z, z.sqrt(), Complex.of(-1).sqrt())
@@ -20,10 +21,13 @@ value Complex(val re : float, val im : float) {
     // The number of size `r` at the angle `theta` (radians) from the real axis, as Python's
     // cmath.rect: r cos theta + r sin theta i, a zero angle keeping r and r * theta; an infinite
     // or NaN size or angle as rect's table of special values gives it (an infinite size at a
-    // finite angle its infinities' signs from cos and sin; NaN at a zero angle NaN + 0i).
+    // finite angle its infinities' signs from cos and sin; NaN at a zero angle NaN + 0i). A size
+    // other than 0 or NaN at an infinite angle throws an IllegalArgumentException "math domain
+    // error", where rect raises ValueError.
     fun fromPolar(r : Number, theta : Number) : Complex {
       val m = r.toFloat()
       val t = theta.toFloat()
+      if (m != 0.0 and !m.isNaN() and t.isInfinite()) { throw __cmathDomain() }
       if (m.isFinite() and t.isFinite()) {
         return t == 0.0 ? Complex(m, m * t) : Complex(m * Math.cos(t), m * Math.sin(t))
       }
@@ -145,8 +149,10 @@ value Complex(val re : float, val im : float) {
   // Divided by an int.
   op /(other : int) : Complex => this / other.toFloat()
 
-  // Its size: the distance from 0, without overflow on the way.
-  fun abs() : float => Math.hypot(re, im)
+  // Its size: the distance from 0, without overflow on the way; as CPython's abs() of a complex
+  // gives it (the C library's hypot, glibc's on Linux, not quite always the nearest float as
+  // Math.hypot is). An infinite part makes it infinite, NaN beside it or not.
+  fun abs() : float => __cmHypot(re, im)
   // Its angle from the positive real axis, in radians, from -pi to pi.
   fun arg() : float => Math.atan2(im, re)
   // Its mirror in the real axis: the imaginary part's sign turned round.
@@ -181,120 +187,94 @@ value Complex(val re : float, val im : float) {
       return Complex(__complexNaN, __complexNaN)
     }
     if (w.im == 0.0 and w.re == w.re.toInt().toFloat() and Math.abs(w.re) < 1024.0) { return pow(w.re.toInt()) }
-    return (w * log()).exp()
+    return __cmathExp(w * __cmathLog(this))  // without exp's and log's exceptions
   }
   // To the power of a float `x`: e to the power x * log(this).
   fun pow(x : float) : Complex => pow(Complex(x, 0.0))
 
   // ---- Functions ----
+  // Each as CPython's cmath works it out (its Modules/cmathmodule.c: the same steps in the same
+  // order, its tables of special values from C99's Annex G), so each gives CPython's answer, its
+  // signs of zero and its infinities too. Where CPython raises, these throw: an
+  // IllegalArgumentException "math domain error" where it raises ValueError (log of 0; atanh of
+  // 1 or -1, atan of i or -i; exp, cosh, sinh, cos and sin of an infinite imaginary part (real
+  // for cos and sin) beside a number; tanh and tan likewise beside a finite one), an
+  // ArithmeticException "math range error" where it raises OverflowError (exp, cosh, sinh, cos
+  // and sin of a finite number whose answer is past the largest float).
 
   // The principal square root: its real part 0 or more, the cut along the negative real axis
   // (-1+0.0i gives i, -1-0.0i gives -i).
-  fun sqrt() : Complex {
-    if (re == 0.0 and im == 0.0) { return Complex(0.0, im) }
-    if (im.isInfinite()) { return Complex(__complexInfinity, im) }
-    val t = Math.sqrt((Math.abs(re) + Math.hypot(re, im)) / 2.0)
-    if (re >= 0.0) { return Complex(t, im / (2.0 * t)) }
-    return Complex(Math.abs(im) / (2.0 * t), __negative(im) ? -t : t)
-  }
+  fun sqrt() : Complex => __cmathSqrt(this)
   // e to its power.
   fun exp() : Complex {
-    val size = Math.exp(re)
-    if (im == 0.0) { return Complex(size, im) }
-    return Complex(size * Math.cos(im), size * Math.sin(im))
+    if (im.isInfinite() and (re.isFinite() or re > 0.0)) { throw __cmathDomain() }
+    return __cmathRange(this, __cmathExp(this))
   }
-  // The natural logarithm, its imaginary part from -pi to pi (the cut along the negative real axis).
+  // The natural logarithm, its imaginary part from -pi to pi (the cut along the negative real
+  // axis).
   fun log() : Complex {
-    val ax = Math.abs(re)
-    val ay = Math.abs(im)
-    val (big, small) = ax >= ay ? Pair(ax, ay) : Pair(ay, ax)
-    val h = Math.hypot(ax, ay)
-    // Near a size of 1, ln(size) from log1p, where ln loses the digits that matter.
-    if (h > 0.71 and h < 1.73) {
-      return Complex(Math.log1p((big - 1.0) * (big + 1.0) + small * small) / 2.0, arg())
-    }
-    return Complex(Math.ln(h), arg())
+    if (re == 0.0 and im == 0.0) { throw __cmathDomain() }
+    return __cmathLog(this)
   }
   // The logarithm in base 10.
-  fun log10() : Complex => log() / 2.302585092994046
-  // The sine.
-  fun sin() : Complex => Complex(Math.sin(re) * Math.cosh(im), Math.cos(re) * Math.sinh(im))
-  // The cosine.
-  fun cos() : Complex => Complex(Math.cos(re) * Math.cosh(im), -(Math.sin(re) * Math.sinh(im)))
-  // The tangent.
+  fun log10() : Complex {
+    val r = log()
+    return Complex(r.re / __cmLn10, r.im / __cmLn10)
+  }
+  // The sine: -i sinh(i z).
+  fun sin() : Complex {
+    if (re.isInfinite() and !im.isNaN()) { throw __cmathDomain() }
+    val s = __cmathRange(this, __cmathSinh(Complex(-im, re)))
+    return Complex(s.im, -s.re)
+  }
+  // The cosine: cosh(i z).
+  fun cos() : Complex {
+    if (re.isInfinite() and !im.isNaN()) { throw __cmathDomain() }
+    return __cmathRange(this, __cmathCosh(Complex(-im, re)))
+  }
+  // The tangent: -i tanh(i z).
   fun tan() : Complex {
-    // i tanh(-i z) turned round: tan(a + bi) = i tanh(b - ai)
-    val t = Complex(-im, re).tanh()
-    return Complex(t.im, -t.re)
+    if (re.isInfinite() and im.isFinite()) { throw __cmathDomain() }
+    val s = __cmathTanh(Complex(-im, re))
+    return Complex(s.im, -s.re)
   }
   // The hyperbolic sine.
-  fun sinh() : Complex => Complex(Math.sinh(re) * Math.cos(im), Math.cosh(re) * Math.sin(im))
+  fun sinh() : Complex {
+    if (im.isInfinite() and !re.isNaN()) { throw __cmathDomain() }
+    return __cmathRange(this, __cmathSinh(this))
+  }
   // The hyperbolic cosine.
-  fun cosh() : Complex => Complex(Math.cosh(re) * Math.cos(im), Math.sinh(re) * Math.sin(im))
-  // The hyperbolic tangent; exact far from 0, where the parts' exponentials would overflow.
+  fun cosh() : Complex {
+    if (im.isInfinite() and !re.isNaN()) { throw __cmathDomain() }
+    return __cmathRange(this, __cmathCosh(this))
+  }
+  // The hyperbolic tangent.
   fun tanh() : Complex {
-    // Past 20 in size the parts' exponentials overflow before tanh's own size changes.
-    if (Math.abs(re) > 20.0) {
-      val s = re > 0.0 ? 1.0 : -1.0
-      return Complex(s, 4.0 * Math.sin(im) * Math.cos(im) * Math.exp(-2.0 * Math.abs(re)))
-    }
-    val t = Math.tan(im)
-    val b = 1.0 + t * t
-    val s = Math.sinh(re)
-    val c = Math.sqrt(1.0 + s * s)
-    val d = 1.0 + b * s * s
-    return Complex(b * c * s / d, t / d)
+    if (im.isInfinite() and re.isFinite()) { throw __cmathDomain() }
+    return __cmathTanh(this)
   }
   // The inverse functions, each the principal value, their cuts where C99 puts them.
+  // The inverse sine: -i asinh(i z).
   fun asin() : Complex {
-    // asin(z) = -i asinh(i z)
-    val w = Complex(-im, re).asinh()
-    return Complex(w.im, -w.re)
+    val s = __cmathAsinh(Complex(-im, re))
+    return Complex(s.im, -s.re)
   }
   // The inverse cosine, its real part from 0 to pi.
-  fun acos() : Complex {
-    val a = (1.0 - this).sqrt()
-    val b = (this + 1.0).sqrt()
-    return Complex(2.0 * Math.atan2(a.re, b.re), Math.asinh(b.re * a.im - b.im * a.re))
-  }
-  // The inverse tangent.
+  fun acos() : Complex => __cmathAcos(this)
+  // The inverse tangent: -i atanh(i z).
   fun atan() : Complex {
-    // atan(z) = -i atanh(i z)
-    val w = Complex(-im, re).atanh()
-    return Complex(w.im, -w.re)
+    if (re == 0.0 and Math.abs(im) == 1.0) { throw __cmathDomain() }
+    val s = __cmathAtanh(Complex(-im, re))
+    return Complex(s.im, -s.re)
   }
   // The inverse hyperbolic sine.
-  fun asinh() : Complex {
-    val a = Complex(1.0 + im, -re).sqrt()
-    val b = Complex(1.0 - im, re).sqrt()
-    return Complex(Math.asinh(a.re * b.im - a.im * b.re), Math.atan2(im, a.re * b.re - a.im * b.im))
-  }
+  fun asinh() : Complex => __cmathAsinh(this)
   // The inverse hyperbolic cosine, its real part 0 or more.
-  fun acosh() : Complex {
-    val a = (this - 1.0).sqrt()
-    val b = (this + 1.0).sqrt()
-    return Complex(Math.asinh(a.re * b.re + a.im * b.im), 2.0 * Math.atan2(a.im, b.re))
-  }
+  fun acosh() : Complex => __cmathAcosh(this)
   // The inverse hyperbolic tangent.
   fun atanh() : Complex {
-    // Odd: worked out for a real part of 0 or more (CPython's way, digits kept near 0 and 1).
-    if (__negative(re)) {
-      val w = (-this).atanh()
-      return Complex(-w.re, -w.im)
-    }
-    val ay = Math.abs(im)
-    if (re > 1.0e150 or ay > 1.0e150) {
-      val h = Math.hypot(re / 2.0, im / 2.0)
-      return Complex(re / h / h / 4.0, __negative(im) ? -Math.pi / 2.0 : Math.pi / 2.0)
-    }
-    if (re == 1.0 and ay < 1.0e-150) {
-      val partRe = ay == 0.0 ? __complexInfinity : -Math.ln(Math.sqrt(ay) / Math.sqrt(Math.hypot(ay, 2.0)))
-      val partIm = Math.atan2(2.0, -ay) / 2.0
-      return Complex(partRe, __negative(im) ? -partIm : partIm)
-    }
-    val oneLess = 1.0 - re
-    return Complex(Math.log1p(4.0 * re / (oneLess * oneLess + ay * ay)) / 4.0,
-                   -Math.atan2(-2.0 * im, oneLess * (1.0 + re) - ay * ay) / 2.0)
+    if (im == 0.0 and Math.abs(re) == 1.0) { throw __cmathDomain() }
+    return __cmathAtanh(this)
   }
 
   // ---- Comparing ----
@@ -375,3 +355,350 @@ fun __negative(x : float) : bool => x < 0.0 or (x == 0.0 and 1.0 / x < 0.0)
 
 val __complexNaN = 0.0 / 0.0
 val __complexInfinity = 1.0 / 0.0
+
+// ---- CPython's cmath (Modules/cmathmodule.c, CPython 3.14; Copyright (c) 2001 Python Software
+// Foundation, under the PSF License Agreement), its steps for Complex's functions ----
+
+val __cmP = Math.pi
+val __cmP12 = 0.5 * Math.pi
+val __cmP14 = 0.25 * Math.pi
+val __cmP34 = 0.75 * Math.pi
+val __cmInf = 1.0 / 0.0
+val __cmNaN = 0.0 / 0.0
+val __cmE = Math.e
+val __cmLn2 = 0.6931471805599453
+val __cmLn10 = 2.302585092994046
+val __cmDblMin = 2.2250738585072014e-308
+// DBL_MAX / 4, past which the inverse functions and log scale down so as not to overflow; its
+// square root, and its logarithm, past which exp, cosh, sinh and tanh take another way.
+val __cmLarge = 1.7976931348623157e308 / 4.0
+val __cmSqrtLarge = 6.703903964971298e+153
+val __cmLogLarge = 708.3964185322641
+val __cmSqrtDblMin = 1.4916681462400413e-154
+
+fun __cmathDomain() : IllegalArgumentException => IllegalArgumentException("math domain error")
+
+// `r`, unless `z` is finite and `r` is not: CPython's OverflowError.
+fun __cmathRange(z : Complex, r : Complex) : Complex {
+  if (z.re.isFinite() and z.im.isFinite() and (r.re.isInfinite() or r.im.isInfinite())) {
+    throw ArithmeticException("math range error")
+  }
+  return r
+}
+
+// `magnitude`'s size with `sign`'s sign bit (a NaN's too), as C's copysign.
+fun __cmCopySign(magnitude : float, sign : float) : float => sign.toBits() < 0 ? -Math.abs(magnitude) : Math.abs(magnitude)
+
+// CPython's kinds of float for its tables: 0 -inf, 1 below 0, 2 -0.0, 3 0.0, 4 above 0, 5 inf, 6 NaN.
+fun __cmKind(x : float) : int {
+  if (x.isNaN()) { return 6 }
+  if (x.isInfinite()) { return x > 0.0 ? 5 : 0 }
+  if (x == 0.0) { return x.toBits() < 0 ? 2 : 3 }
+  return x > 0.0 ? 4 : 1
+}
+
+// The answer for `z` from a table of special values: seven rows by the real part's kind, seven
+// pairs in each by the imaginary part's.
+fun __cmSpecial(table : List<float>, z : Complex) : Complex {
+  val k = (__cmKind(z.re) * 7 + __cmKind(z.im)) * 2
+  return Complex(table[k], table[k + 1])
+}
+
+fun __cmathSqrt(z : Complex) : Complex {
+  // s = sqrt((x + hypot(x, y)) / 2) as 2 sqrt(x/8 + hypot(x/8, y/8)), which cannot overflow; both
+  // parts scaled up by 2^53 where both are below the smallest normal float.
+  if (!z.re.isFinite() or !z.im.isFinite()) { return __cmSpecial(__cmSqrtTable, z) }
+  if (z.re == 0.0 and z.im == 0.0) { return Complex(0.0, z.im) }
+  var ax = Math.abs(z.re)
+  val ay = Math.abs(z.im)
+  var s = 0.0
+  if (ax < __cmDblMin and ay < __cmDblMin) {
+    ax = Math.ldexp(ax, 53)
+    s = Math.ldexp(Math.sqrt(ax + __cmHypot(ax, Math.ldexp(ay, 53))), -27)
+  } else {
+    ax = ax / 8.0
+    s = 2.0 * Math.sqrt(ax + __cmHypot(ax, ay / 8.0))
+  }
+  val d = ay / (2.0 * s)
+  return z.re >= 0.0 ? Complex(s, __cmCopySign(d, z.im)) : Complex(d, __cmCopySign(s, z.im))
+}
+
+fun __cmathLog(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) { return __cmSpecial(__cmLogTable, z) }
+  val ax = Math.abs(z.re)
+  val ay = Math.abs(z.im)
+  var real = 0.0
+  if (ax > __cmLarge or ay > __cmLarge) {
+    real = Math.ln(__cmHypot(ax / 2.0, ay / 2.0)) + __cmLn2
+  } else if (ax < __cmDblMin and ay < __cmDblMin) {
+    if (ax > 0.0 or ay > 0.0) {
+      // Its size subnormal: scaled up by 2^53 first.
+      real = Math.ln(__cmHypot(Math.ldexp(ax, 53), Math.ldexp(ay, 53))) - 53.0 * __cmLn2
+    } else {
+      real = -__cmInf
+    }
+  } else {
+    val h = __cmHypot(ax, ay)
+    if (0.71 <= h and h <= 1.73) {
+      // Near a size of 1, from log1p, where ln loses the digits that matter.
+      val am = ax > ay ? ax : ay
+      val an = ax > ay ? ay : ax
+      real = __cmLog1p((am - 1.0) * (am + 1.0) + an * an) / 2.0
+    } else {
+      real = Math.ln(h)
+    }
+  }
+  return Complex(real, Math.atan2(z.im, z.re))
+}
+
+// log1p, its zeros kept (CPython's _Py_log1p).
+fun __cmLog1p(x : float) : float => x == 0.0 ? x : Math.log1p(x)
+
+// sqrt(x^2 + y^2) as the C library's hypot gives it on Linux (glibc's), which cmath and CPython's
+// abs() of a complex call: Borges's corrected way ("An Improved Algorithm for hypot(a,b)", 2019,
+// without fused steps): the square root of x^2 + y^2 rounded, then less (h^2 - x^2 - y^2) / 2h,
+// that worked out from h's distance to the larger or the smaller part so nothing cancels. Scaled
+// by 2^600 either way where the parts' squares would overflow or underflow. Bit for bit glibc's on
+// a million pairs (tools/complex/glibc_hypot.py; tests/cmath_python.ww tries 20,000 through abs()).
+val __cm2m54 = Math.ldexp(1.0, -54)
+val __cm2p511 = Math.ldexp(1.0, 511)
+val __cm2m500 = Math.ldexp(1.0, -500)
+val __cm2p600 = Math.ldexp(1.0, 600)
+val __cm2m600 = Math.ldexp(1.0, -600)
+fun __cmHypot(a : float, b : float) : float {
+  var x = Math.abs(a)
+  var y = Math.abs(b)
+  if (x.isInfinite() or y.isInfinite()) { return __cmInf }
+  if (x.isNaN() or y.isNaN()) { return x + y }
+  if (x < y) {
+    val t = x
+    x = y
+    y = t
+  }
+  if (y <= x * __cm2m54) { return x + y }
+  if (x > __cm2p511) { return __cmHypotKernel(x * __cm2m600, y * __cm2m600) * __cm2p600 }
+  if (y < __cm2m500) { return __cmHypotKernel(x * __cm2p600, y * __cm2p600) * __cm2m600 }
+  return __cmHypotKernel(x, y)
+}
+
+fun __cmHypotKernel(x : float, y : float) : float {
+  val h = Math.sqrt(x * x + y * y)
+  var t1 = 0.0
+  var t2 = 0.0
+  if (h <= 2.0 * y) {
+    val d = h - y
+    t1 = x * (2.0 * d - x)
+    t2 = (d - 2.0 * (x - y)) * d
+  } else {
+    val d = h - x
+    t1 = 2.0 * d * (x - 2.0 * y)
+    t2 = (4.0 * d - y) * y + d * d
+  }
+  return h - (t1 + t2) / (2.0 * h)
+}
+
+fun __cmathExp(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) {
+    if (z.re.isInfinite() and z.im.isFinite() and z.im != 0.0) {
+      if (z.re > 0.0) { return Complex(__cmCopySign(__cmInf, Math.cos(z.im)), __cmCopySign(__cmInf, Math.sin(z.im))) }
+      return Complex(__cmCopySign(0.0, Math.cos(z.im)), __cmCopySign(0.0, Math.sin(z.im)))
+    }
+    return __cmSpecial(__cmExpTable, z)
+  }
+  if (z.re > __cmLogLarge) {
+    val l = Math.exp(z.re - 1.0)
+    return Complex(l * Math.cos(z.im) * __cmE, l * Math.sin(z.im) * __cmE)
+  }
+  val l = Math.exp(z.re)
+  return Complex(l * Math.cos(z.im), l * Math.sin(z.im))
+}
+
+fun __cmathCosh(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) {
+    if (z.re.isInfinite() and z.im.isFinite() and z.im != 0.0) {
+      val re = __cmCopySign(__cmInf, Math.cos(z.im))
+      val im = __cmCopySign(__cmInf, Math.sin(z.im))
+      return z.re > 0.0 ? Complex(re, im) : Complex(re, -im)
+    }
+    return __cmSpecial(__cmCoshTable, z)
+  }
+  if (Math.abs(z.re) > __cmLogLarge) {
+    // cosh(x) past the largest float, cosh(z) perhaps not.
+    val x1 = z.re - __cmCopySign(1.0, z.re)
+    return Complex(Math.cos(z.im) * Math.cosh(x1) * __cmE, Math.sin(z.im) * Math.sinh(x1) * __cmE)
+  }
+  return Complex(Math.cos(z.im) * Math.cosh(z.re), Math.sin(z.im) * Math.sinh(z.re))
+}
+
+fun __cmathSinh(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) {
+    if (z.re.isInfinite() and z.im.isFinite() and z.im != 0.0) {
+      val re = __cmCopySign(__cmInf, Math.cos(z.im))
+      val im = __cmCopySign(__cmInf, Math.sin(z.im))
+      return z.re > 0.0 ? Complex(re, im) : Complex(-re, im)
+    }
+    return __cmSpecial(__cmSinhTable, z)
+  }
+  if (Math.abs(z.re) > __cmLogLarge) {
+    val x1 = z.re - __cmCopySign(1.0, z.re)
+    return Complex(Math.cos(z.im) * Math.sinh(x1) * __cmE, Math.sin(z.im) * Math.cosh(x1) * __cmE)
+  }
+  return Complex(Math.cos(z.im) * Math.sinh(z.re), Math.sin(z.im) * Math.cosh(z.re))
+}
+
+fun __cmathTanh(z : Complex) : Complex {
+  // (tanh(x)(1 + tan(y)^2) + i tan(y)(1 - tanh(x)^2)) / (1 + tan(y)^2 tanh(x)^2), 1 - tanh(x)^2 as
+  // 1 / cosh(x)^2, and as 4 e^-2|x| where cosh(x) would overflow.
+  if (!z.re.isFinite() or !z.im.isFinite()) {
+    if (z.re.isInfinite() and z.im.isFinite() and z.im != 0.0) {
+      return Complex(z.re > 0.0 ? 1.0 : -1.0, __cmCopySign(0.0, 2.0 * Math.sin(z.im) * Math.cos(z.im)))
+    }
+    return __cmSpecial(__cmTanhTable, z)
+  }
+  if (Math.abs(z.re) > __cmLogLarge) {
+    return Complex(__cmCopySign(1.0, z.re), 4.0 * Math.sin(z.im) * Math.cos(z.im) * Math.exp(-2.0 * Math.abs(z.re)))
+  }
+  val tx = Math.tanh(z.re)
+  val ty = Math.tan(z.im)
+  val cx = 1.0 / Math.cosh(z.re)
+  val txty = tx * ty
+  val denom = 1.0 + txty * txty
+  return Complex(tx * (1.0 + ty * ty) / denom, ((ty / denom) * cx) * cx)
+}
+
+fun __cmathAsinh(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) { return __cmSpecial(__cmAsinhTable, z) }
+  if (Math.abs(z.re) > __cmLarge or Math.abs(z.im) > __cmLarge) {
+    val l = Math.ln(__cmHypot(z.re / 2.0, z.im / 2.0)) + __cmLn2 * 2.0
+    val re = z.im >= 0.0 ? __cmCopySign(l, z.re) : -__cmCopySign(l, -z.re)
+    return Complex(re, Math.atan2(z.im, Math.abs(z.re)))
+  }
+  val s1 = __cmathSqrt(Complex(1.0 + z.im, -z.re))
+  val s2 = __cmathSqrt(Complex(1.0 - z.im, z.re))
+  return Complex(Math.asinh(s1.re * s2.im - s2.re * s1.im), Math.atan2(z.im, s1.re * s2.re - s1.im * s2.im))
+}
+
+fun __cmathAcos(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) { return __cmSpecial(__cmAcosTable, z) }
+  if (Math.abs(z.re) > __cmLarge or Math.abs(z.im) > __cmLarge) {
+    val l = Math.ln(__cmHypot(z.re / 2.0, z.im / 2.0)) + __cmLn2 * 2.0
+    return Complex(Math.atan2(Math.abs(z.im), z.re), -__cmCopySign(l, z.im))
+  }
+  val s1 = __cmathSqrt(Complex(1.0 - z.re, -z.im))
+  val s2 = __cmathSqrt(Complex(1.0 + z.re, z.im))
+  return Complex(2.0 * Math.atan2(s1.re, s2.re), Math.asinh(s2.re * s1.im - s2.im * s1.re))
+}
+
+fun __cmathAcosh(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) { return __cmSpecial(__cmAcoshTable, z) }
+  if (Math.abs(z.re) > __cmLarge or Math.abs(z.im) > __cmLarge) {
+    return Complex(Math.ln(__cmHypot(z.re / 2.0, z.im / 2.0)) + __cmLn2 * 2.0, Math.atan2(z.im, z.re))
+  }
+  val s1 = __cmathSqrt(Complex(z.re - 1.0, z.im))
+  val s2 = __cmathSqrt(Complex(z.re + 1.0, z.im))
+  return Complex(Math.asinh(s1.re * s2.re + s1.im * s2.im), 2.0 * Math.atan2(s1.im, s2.re))
+}
+
+fun __cmathAtanh(z : Complex) : Complex {
+  if (!z.re.isFinite() or !z.im.isFinite()) { return __cmSpecial(__cmAtanhTable, z) }
+  // Odd: worked out for a real part of 0 or more.
+  if (z.re < 0.0) {
+    val r = __cmathAtanh(Complex(-z.re, -z.im))
+    return Complex(-r.re, -r.im)
+  }
+  val ay = Math.abs(z.im)
+  if (z.re > __cmSqrtLarge or ay > __cmSqrtLarge) {
+    // Large: 1 / z + or - i pi / 2.
+    val h = __cmHypot(z.re / 2.0, z.im / 2.0)
+    return Complex(z.re / 4.0 / h / h, __cmCopySign(Math.pi / 2.0, z.im))
+  }
+  if (z.re == 1.0 and ay < __cmSqrtDblMin) {
+    if (ay == 0.0) { return Complex(__cmInf, z.im) }
+    return Complex(-Math.ln(Math.sqrt(ay) / Math.sqrt(__cmHypot(ay, 2.0))), __cmCopySign(Math.atan2(2.0, -ay) / 2.0, z.im))
+  }
+  return Complex(__cmLog1p(4.0 * z.re / ((1.0 - z.re) * (1.0 - z.re) + ay * ay)) / 4.0,
+                 -Math.atan2(-2.0 * z.im, (1.0 - z.re) * (1.0 + z.re) - ay * ay) / 2.0)
+}
+
+// CPython's tables of special values (C99's Annex G): an infinity or NaN in the number. NaN
+// where CPython's table has its "unlikely value" (a place no number reaches).
+val __cmAcosTable = [
+  __cmP34, __cmInf, __cmP, __cmInf, __cmP, __cmInf, __cmP, -__cmInf, __cmP, -__cmInf, __cmP34, -__cmInf, __cmNaN, __cmInf,
+  __cmP12, __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmP12, -__cmInf, __cmNaN, __cmNaN,
+  __cmP12, __cmInf, __cmNaN, __cmNaN, __cmP12, 0.0, __cmP12, -0.0, __cmNaN, __cmNaN, __cmP12, -__cmInf, __cmP12, __cmNaN,
+  __cmP12, __cmInf, __cmNaN, __cmNaN, __cmP12, 0.0, __cmP12, -0.0, __cmNaN, __cmNaN, __cmP12, -__cmInf, __cmP12, __cmNaN,
+  __cmP12, __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmP12, -__cmInf, __cmNaN, __cmNaN,
+  __cmP14, __cmInf, 0.0, __cmInf, 0.0, __cmInf, 0.0, -__cmInf, 0.0, -__cmInf, __cmP14, -__cmInf, __cmNaN, __cmInf,
+  __cmNaN, __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -__cmInf, __cmNaN, __cmNaN]
+val __cmAcoshTable = [
+  __cmInf, -__cmP34, __cmInf, -__cmP, __cmInf, -__cmP, __cmInf, __cmP, __cmInf, __cmP, __cmInf, __cmP34, __cmInf, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, 0.0, -__cmP12, 0.0, __cmP12, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmP12,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, 0.0, -__cmP12, 0.0, __cmP12, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmP12,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP14, __cmInf, -0.0, __cmInf, -0.0, __cmInf, 0.0, __cmInf, 0.0, __cmInf, __cmP14, __cmInf, __cmNaN,
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmNaN, __cmNaN]
+val __cmAsinhTable = [
+  -__cmInf, -__cmP14, -__cmInf, -0.0, -__cmInf, -0.0, -__cmInf, 0.0, -__cmInf, 0.0, -__cmInf, __cmP14, -__cmInf, __cmNaN,
+  -__cmInf, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -__cmInf, __cmP12, __cmNaN, __cmNaN,
+  -__cmInf, -__cmP12, __cmNaN, __cmNaN, -0.0, -0.0, -0.0, 0.0, __cmNaN, __cmNaN, -__cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP14, __cmInf, -0.0, __cmInf, -0.0, __cmInf, 0.0, __cmInf, 0.0, __cmInf, __cmP14, __cmInf, __cmNaN,
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -0.0, __cmNaN, 0.0, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmNaN, __cmNaN]
+val __cmAtanhTable = [
+  -0.0, -__cmP12, -0.0, -__cmP12, -0.0, -__cmP12, -0.0, __cmP12, -0.0, __cmP12, -0.0, __cmP12, -0.0, __cmNaN,
+  -0.0, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -0.0, __cmP12, __cmNaN, __cmNaN,
+  -0.0, -__cmP12, __cmNaN, __cmNaN, -0.0, -0.0, -0.0, 0.0, __cmNaN, __cmNaN, -0.0, __cmP12, -0.0, __cmNaN,
+  0.0, -__cmP12, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, 0.0, __cmP12, 0.0, __cmNaN,
+  0.0, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, 0.0, __cmP12, __cmNaN, __cmNaN,
+  0.0, -__cmP12, 0.0, -__cmP12, 0.0, -__cmP12, 0.0, __cmP12, 0.0, __cmP12, 0.0, __cmP12, 0.0, __cmNaN,
+  0.0, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, 0.0, __cmP12, __cmNaN, __cmNaN]
+val __cmCoshTable = [
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmInf, 0.0, __cmInf, -0.0, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmInf, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmNaN, 0.0, __cmNaN, __cmNaN, 1.0, 0.0, 1.0, -0.0, __cmNaN, __cmNaN, __cmNaN, 0.0, __cmNaN, 0.0,
+  __cmNaN, 0.0, __cmNaN, __cmNaN, 1.0, -0.0, 1.0, 0.0, __cmNaN, __cmNaN, __cmNaN, 0.0, __cmNaN, 0.0,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmInf, -0.0, __cmInf, 0.0, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmInf, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, 0.0, __cmNaN, 0.0, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN]
+val __cmExpTable = [
+  0.0, 0.0, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, 0.0, 0.0, 0.0, 0.0,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, 1.0, -0.0, 1.0, 0.0, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, 1.0, -0.0, 1.0, 0.0, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmInf, -0.0, __cmInf, 0.0, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmInf, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -0.0, __cmNaN, 0.0, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN]
+val __cmLogTable = [
+  __cmInf, -__cmP34, __cmInf, -__cmP, __cmInf, -__cmP, __cmInf, __cmP, __cmInf, __cmP, __cmInf, __cmP34, __cmInf, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, -__cmInf, -__cmP, -__cmInf, __cmP, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, -__cmInf, -0.0, -__cmInf, 0.0, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP12, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmP12, __cmNaN, __cmNaN,
+  __cmInf, -__cmP14, __cmInf, -0.0, __cmInf, -0.0, __cmInf, 0.0, __cmInf, 0.0, __cmInf, __cmP14, __cmInf, __cmNaN,
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmNaN, __cmNaN]
+val __cmSinhTable = [
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, -__cmInf, -0.0, -__cmInf, 0.0, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmInf, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  0.0, __cmNaN, __cmNaN, __cmNaN, -0.0, -0.0, -0.0, 0.0, __cmNaN, __cmNaN, 0.0, __cmNaN, 0.0, __cmNaN,
+  0.0, __cmNaN, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, 0.0, __cmNaN, 0.0, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  __cmInf, __cmNaN, __cmNaN, __cmNaN, __cmInf, -0.0, __cmInf, 0.0, __cmNaN, __cmNaN, __cmInf, __cmNaN, __cmInf, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -0.0, __cmNaN, 0.0, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN]
+val __cmSqrtTable = [
+  __cmInf, -__cmInf, 0.0, -__cmInf, 0.0, -__cmInf, 0.0, __cmInf, 0.0, __cmInf, __cmInf, __cmInf, __cmNaN, __cmInf,
+  __cmInf, -__cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmInf, __cmNaN, __cmNaN,
+  __cmInf, -__cmInf, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, __cmInf, __cmInf, __cmNaN, __cmNaN,
+  __cmInf, -__cmInf, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, __cmInf, __cmInf, __cmNaN, __cmNaN,
+  __cmInf, -__cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmInf, __cmNaN, __cmNaN,
+  __cmInf, -__cmInf, __cmInf, -0.0, __cmInf, -0.0, __cmInf, 0.0, __cmInf, 0.0, __cmInf, __cmInf, __cmInf, __cmNaN,
+  __cmInf, -__cmInf, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmInf, __cmInf, __cmNaN, __cmNaN]
+val __cmTanhTable = [
+  -1.0, 0.0, __cmNaN, __cmNaN, -1.0, -0.0, -1.0, 0.0, __cmNaN, __cmNaN, -1.0, 0.0, -1.0, 0.0,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  -0.0, __cmNaN, __cmNaN, __cmNaN, -0.0, -0.0, -0.0, 0.0, __cmNaN, __cmNaN, -0.0, __cmNaN, -0.0, __cmNaN,
+  0.0, __cmNaN, __cmNaN, __cmNaN, 0.0, -0.0, 0.0, 0.0, __cmNaN, __cmNaN, 0.0, __cmNaN, 0.0, __cmNaN,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN,
+  1.0, 0.0, __cmNaN, __cmNaN, 1.0, -0.0, 1.0, 0.0, __cmNaN, __cmNaN, 1.0, 0.0, 1.0, 0.0,
+  __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, -0.0, __cmNaN, 0.0, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN, __cmNaN]

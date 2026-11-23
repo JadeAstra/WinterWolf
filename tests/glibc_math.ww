@@ -1,0 +1,55 @@
+// ww's exp, expm1, ln(1 + x), sinh, cosh and tanh are glibc's, bit for bit (src/fmath_glibc.inc,
+// W6 of docs/snippy-ww-checklist.html): over many inputs through every branch, each folded into
+// one number as tools/fmath/glibc_digest.py folds what CPython 3.14 gives on Linux. Where CPython
+// raises (a finite input whose answer is past the largest float, or ln(1 + x) at x <= -1), ww's
+// answer is the infinity or NaN (ln(1 + x) at -inf too); that is folded as CPython's error.
+
+val m = 1000000007
+val g = 0.6180339887498949
+val n = 3000
+val inf = 1.0 / 0.0
+val nan = 0.0 / 0.0
+fun part(x : float) : int => x.isNaN() ? 1 : x.toBits().mod(m)
+fun frac(i : int) : float => (i.toFloat() * g) % 1.0
+fun spread(lo : float, hi : float) : List<float> => List<float>(n) { i -> lo + (hi - lo) * frac(i) }
+fun logspread(e0 : int, e1 : int, s : float) : List<float> =>
+  List<float>(n) { i -> s * Math.ldexp(0.5 + frac(i), e0 + (i * 7919) % (e1 - e0)) }
+
+val special = [0.0, -0.0, inf, -inf, nan, 1e-320, -1e-320, 5e-324, 1e-300, 1e-17, -1e-17, 0.5, -0.5,
+  1.0, -1.0, 22.0, -22.0, 709.78, 709.79, -745.13, -745.14, 710.5, 711.0, -708.0, 0.34657359027997264,
+  1.0397207708399179, -1.0, -0.9999999999999999, 1e300, 1.7976931348623157e308]
+val names = ["exp", "expm1", "log1p", "sinh", "cosh", "tanh"]
+val sets = [
+  spread(-745.5, 710.0) + spread(-1.0, 1.0) + logspread(-60, 0, 1.0) + logspread(-60, 0, -1.0) + spread(-745.5, -700.0) + spread(700.0, 709.8),
+  spread(-40.0, 710.0) + spread(-1.1, 1.1) + logspread(-60, 0, 1.0) + logspread(-60, 0, -1.0) + spread(-0.6, 0.6) + spread(-38.0, -1.0),
+  spread(-0.999999, 1.0) + logspread(-60, 0, 1.0) + logspread(-60, -1, -1.0) + logspread(0, 1023, 1.0) + spread(-0.3, 0.42),
+  spread(-30.0, 30.0) + spread(-1.0, 1.0) + logspread(-60, 0, 1.0) + spread(-711.0, 711.0) + spread(709.0, 711.0),
+  spread(-30.0, 30.0) + spread(-0.4, 0.4) + logspread(-60, 0, 1.0) + spread(-711.0, 711.0) + spread(709.0, 711.0),
+  spread(-25.0, 25.0) + spread(-1.2, 1.2) + logspread(-60, 0, 1.0) + logspread(-60, 0, -1.0)]
+fun apply(k : int, x : float) : float {
+  if (k == 0) { return Math.exp(x) }
+  if (k == 1) { return Math.expm1(x) }
+  if (k == 2) { return Math.log1p(x) }
+  if (k == 3) { return Math.sinh(x) }
+  if (k == 4) { return Math.cosh(x) }
+  return Math.tanh(x)
+}
+val expected = [918915595, 204935051, 897201307, 98082280, 461315305, 885227339]
+var inputs = 0
+val same = List<bool>(6) { false }
+for (k in 0..<6) {
+  var h = 0
+  for (x in sets[k] + special) {
+    inputs = (inputs * 1000003 + part(x) + 1) % m
+    val y = apply(k, x)
+    val raises = (k == 2 and x <= -1.0) or (!x.isNaN() and !x.isInfinite() and (y.isNaN() or y.isInfinite()))
+    val v = raises ? 2 : part(y)
+    h = (h * 1000003 + v + 1) % m
+  }
+  same[k] = h == expected[k]
+}
+print(inputs == 899163591, same)   // expect: true [true, true, true, true, true, true]
+
+// A few by themselves, as CPython gives them on Linux.
+print(Math.exp(1.0), Math.exp(-745.1), Math.expm1(1e-05), Math.log1p(-0.3), Math.sinh(0.3), Math.cosh(710.0), Math.tanh(0.6))
+// expect: 2.718281828459045 5e-324 1.0000050000166668e-05 -0.35667494393873234 0.3045202934471426 1.1169973830808557e+308 0.5370495669980353

@@ -21,13 +21,13 @@ print(z.pow(0.5), z.pow(Complex.of(1, 1)), Complex.zero.pow(Complex.of(2)), Comp
 
 // ---- Functions ----
 print(z.sqrt(), z.exp(), z.log())   // expect: 2.0+1.0i -13.128783081462158-15.200784463067954i 1.6094379124341003+0.9272952180016122i
-print(z.sin(), z.tan(), z.atanh())   // expect: 3.853738037919377-27.016813258003936i -0.00018734620462947845+0.9993559873814731i 0.11750090731143388+1.4099210495965755i
+print(z.sin(), z.tan(), z.atanh())   // expect: 3.853738037919377-27.016813258003932i -0.0001873462046294784+0.999355987381473i 0.1175009073114339+1.4099210495965755i
 // The cuts: the sign of a zero imaginary part says which side.
 print(Complex.of(-4).sqrt(), Complex(-4.0, -0.0).sqrt(), Complex.of(-1).log(), Complex(-1.0, -0.0).log())   // expect: 0.0+2.0i 0.0-2.0i 0.0+3.141592653589793i 0.0-3.141592653589793i
 print(Complex.of(2).asin(), Complex(2.0, -0.0).asin(), Complex.of(2).acos())   // expect: 1.5707963267948966+1.3169578969248166i 1.5707963267948966-1.3169578969248166i 0.0-1.3169578969248166i
-// Digits kept where the plain formulas lose them: tanh far out, log near 1. (Where these and
-// a line above differ from cmath's, it is in the last digit: cmath works them a different way.)
-print(Complex.of(30, 1).tanh(), Complex.of(-500, 2).tanh(), Complex.of(1 + 1.0e-12).log())   // expect: 1.0+1.592454540898267e-26i -1.0-0.0i 1.0000889005818408e-12+0.0i
+// Digits kept where the plain formulas lose them: tanh far out, log near 1. All as CPython's cmath
+// gives them, to the last digit (tests/cmath_python.ww tries many more).
+print(Complex.of(30, 1).tanh(), Complex.of(-500, 2).tanh(), Complex.of(1 + 1.0e-12).log())   // expect: 1.0+1.5924545408982664e-26i -1.0-0.0i 1.0000889005818408e-12+0.0i
 // Each function undone by its inverse, at points inside every inverse's principal range.
 var off = 0.0
 for (w in [Complex.of(0.3, 0.2), Complex.of(0.6, -0.4), Complex.of(1.1, 0.5)]) {

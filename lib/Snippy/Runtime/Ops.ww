@@ -236,7 +236,7 @@ internal fun __pyComplexPowRaw(a : Complex, b : Complex) : Complex {
     if (b.im != 0.0 or b.re < 0.0) { throw pyZeroDivisionError("zero to a negative or complex power") }
     return Complex(0.0, 0.0)
   }
-  val vabs = Math.hypot(a.re, a.im)
+  val vabs = a.abs()  // the C library's hypot, as CPython's _Py_c_pow
   var len = vabs.pow(b.re)
   val at = Math.atan2(a.im, a.re)
   var phase = at * b.re
@@ -754,13 +754,21 @@ fun pyInvert(x : any?) : any? {
   }
 }
 
+// abs() of a complex: ww's Complex.abs(), the C library's hypot as CPython's; OverflowError where
+// finite parts give an infinity.
+internal fun __pyComplexAbs(z : Complex) : float {
+  val r = z.abs()
+  if (r.isInfinite() and z.re.isFinite() and z.im.isFinite()) { throw pyOverflowError("absolute value too large") }
+  return r
+}
+
 fun pyAbs(x : any?) : any? {
   return when (x) {
     is int -> (x as int) < 0 ? pyNeg(x) : x
     is float -> Math.abs(x as float)
     is bool -> (x as bool) ? 1 : 0
     is BigInt -> pyNorm((x as BigInt).abs())
-    is Complex -> Math.hypot((x as Complex).re, (x as Complex).im)
+    is Complex -> __pyComplexAbs(x as Complex)
     else -> __pyUnary(x, "__abs__", "abs()")
   }
 }

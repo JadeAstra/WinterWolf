@@ -8,7 +8,9 @@
 // the true value, almost always the nearest double (tools/fmath/check.py measures them against
 // Python's decimal). Special values (NaN, infinities, zeros and their signs) as C's Annex F
 // asks. Built of nothing but +, -, *, / and sqrt, with no multiply and add fused into one step
-// (src/fmath.cpp turns that off), so x86-64 and ARM64 give the same.
+// (src/fmath.cpp turns that off), so x86-64 and ARM64 give the same. exp, expm1, log1p, sinh,
+// cosh and tanh are glibc's instead (bit for bit what CPython gives on Linux), with glibc's
+// fused steps as explicit fma, which rounds once everywhere: the same bits on every system too.
 namespace ww::fmath {
 
 double sin(double x);

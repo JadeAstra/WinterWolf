@@ -17,6 +17,11 @@
 // arguments 2/pi's bits as Payne and Hanek do) and their series; atan by atan(j/64) from a
 // table and the series of what is left; the rest from these. The tables and constants are
 // made exactly by tools/fmath/tables.py (src/fmath_tables.inc).
+//
+// Six are not ww's own: exp, expm1, log1p, sinh, cosh and tanh are glibc's (src/fmath_glibc.inc:
+// Arm's exp and Sun's fdlibm, with their notices), so that they give the bits CPython gives on
+// Linux. glibc fuses some of their multiplies and adds; those are written there as std::fma,
+// which rounds once on every processor, so they too are the same bits everywhere.
 #include "fmath.h"
 
 #include <bit>
@@ -184,30 +189,6 @@ DD expCore(double zh, double zl, int& m) {
     const DD p = quickTwoSum(x, r.lo + q);  // e^r - 1
     const DD t = kExp2Table[j];
     return add(t, mul(t, p));
-}
-
-// e^x - 1 as two doubles, for -38 <= x <= 88.
-DD expm1DD(double x) {
-    if (absOf(x) < 0x1p-8) {
-        // Its series at once: 1 + it and 1 taken away again would lose its last bits.
-        const double x2 = x * x;
-        const double q = x2 * ((kInvFactorial[2] + x * kInvFactorial[3]) +
-                               x2 * ((kInvFactorial[4] + x * kInvFactorial[5]) + x2 * (kInvFactorial[6] + x * kInvFactorial[7])));
-        return quickTwoSum(x, q);
-    }
-    int m;
-    const DD v = expCore(x, 0.0, m);
-    const DD w = {scale2(v.hi, m), scale2(v.lo, m)};  // exact: no overflow or underflow here
-    DD r = twoSum(w.hi, -1.0);
-    r.lo += w.lo;
-    return quickTwoSum(r.hi, r.lo);
-}
-
-// e^x as two doubles, for |x| <= 700.
-DD expDD(double x) {
-    int m;
-    const DD v = expCore(x, 0.0, m);
-    return {scale2(v.hi, m), scale2(v.lo, m)};
 }
 
 // ---- ln x ----
@@ -511,32 +492,15 @@ bool isOddInteger(double y) {
     return static_cast<double>(i) == y && (i & 1) != 0;
 }
 
+#include "fmath_glibc.inc"
+
 }  // namespace
 
 // ---- The functions ----
 
-double exp(double x) {
-    if (isNaN(x)) return x + x;
-    if (x > 709.8) return kInf;
-    if (x < -745.2) return 0.0;
-    if (absOf(x) < 0x1p-54) return 1.0 + x;
-    int m;
-    const DD v = expCore(x, 0.0, m);
-    return scale2(v.hi, m);
-}
+double exp(double x) { return glibcExp(x); }
 
-double expm1(double x) {
-    if (isNaN(x)) return x + x;
-    if (x > 709.8) return kInf;
-    if (x < -38.0) return -1.0;
-    if (absOf(x) < 0x1p-54) return x;
-    if (x > 60.0) {
-        int m;
-        const DD v = expCore(x, 0.0, m);
-        return scale2(v.hi, m);
-    }
-    return expm1DD(x).hi;
-}
+double expm1(double x) { return glibcExpm1(x); }
 
 double log(double x) {
     if (isNaN(x)) return x + x;
@@ -562,14 +526,7 @@ double log10(double x) {
     return mul(logCore(x), kInvLn10).hi;
 }
 
-double log1p(double x) {
-    if (isNaN(x)) return x + x;
-    if (x < -1.0) return kNaN;
-    if (x == -1.0) return -kInf;
-    if (x == kInf) return x;
-    if (absOf(x) < 0x1p-54) return x;
-    return log1pDD({x, 0.0}).hi;
-}
+double log1p(double x) { return glibcLog1p(x); }
 
 double logBase(double x, double base) {
     if (isNaN(x) || isNaN(base)) return x + base;
@@ -676,52 +633,11 @@ double acos(double x) {
     return r.hi;
 }
 
-double sinh(double x) {
-    if (isNaN(x) || isInf(x)) return x;
-    const double ax = absOf(x);
-    if (ax < 0x1p-27) return x;
-    double r;
-    if (ax < 1.0) {
-        // (E + E / (E + 1)) / 2, E = e^x - 1: nothing cancels.
-        const DD e = expm1DD(ax);
-        r = add(e, div(e, addD(e, 1.0))).hi * 0.5;
-    } else if (ax < 22.0) {
-        const DD e = expDD(ax);
-        r = add(e, neg(div({1.0, 0.0}, e))).hi * 0.5;
-    } else if (ax <= 746.0) {
-        int m;
-        const DD v = expCore(ax, 0.0, m);
-        r = scale2(v.hi, m - 1);
-    } else {
-        r = kInf;
-    }
-    return withSign(r, x);
-}
+double sinh(double x) { return glibcSinh(x); }
 
-double cosh(double x) {
-    if (isNaN(x)) return x + x;
-    const double ax = absOf(x);
-    if (isInf(x)) return kInf;
-    if (ax < 0x1p-27) return 1.0;
-    if (ax < 22.0) {
-        const DD e = expDD(ax);
-        return add(e, div({1.0, 0.0}, e)).hi * 0.5;
-    }
-    if (ax > 746.0) return kInf;
-    int m;
-    const DD v = expCore(ax, 0.0, m);
-    return scale2(v.hi, m - 1);
-}
+double cosh(double x) { return glibcCosh(x); }
 
-double tanh(double x) {
-    if (isNaN(x)) return x + x;
-    const double ax = absOf(x);
-    if (ax < 0x1p-27) return x;
-    if (ax > 22.0) return withSign(1.0, x);
-    // E / (E + 2), E = e^2x - 1: nothing cancels.
-    const DD e = expm1DD(2.0 * ax);
-    return withSign(div(e, addD(e, 2.0)).hi, x);
-}
+double tanh(double x) { return glibcTanh(x); }
 
 double asinh(double x) {
     if (isNaN(x) || isInf(x)) return x;
