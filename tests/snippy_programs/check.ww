@@ -1,0 +1,79 @@
+// What the tests snippy_lib*.ww and snippy_run*.ww share: each runs part of a folder of Snippy
+// programs (a .py or .snippy file; one whose name starts with _ is a module the others import) by
+// `ww <file>`, and checks that each gives what CPython 3.14 gave: its output (<file>.out), and in
+// <file>.err its exit code, each traceback frame's line and function, and the last line it wrote to
+// standard error. Those were made by tools/snippy/expect.sh in WSL; tools/snippy/check.sh compares
+// the same by hand.
+//
+// The programs are split among the tests, program i to part (i / 3) % parts, so that the runner
+// runs the parts side by side and each stays well inside its time limit under GC stress (2026-11-23:
+// one test for all took 490 s of its 600 alone, past 600 for the 5.2 programs, and failed under the
+// suite's load). Under GC stress, quick (WW_TEST_QUICK=1, each program's ww stressed too), a part
+// runs only its programs with i % 3 == 0: the same third as before, the same ones each time.
+
+// What a run's standard error tells of it, as expect.sh writes it: the exit code, then
+// "line N, in name" for each frame of a traceback, then the last line.
+fun summary(code : int, error : string) : string {
+  val lines = error.replace("\r\n", "\n").split("\n").filter { it.isNotEmpty() }
+  val out : open List<string> = ["$code"]
+  for line in lines {
+    if (line.startsWith("  File \"") and line.contains("\", line ")) {
+      val at = line.indexOf("\", line ")
+      out.add("line " + line[(at + 8)..])
+    }
+  }
+  if (lines.isNotEmpty()) { out.add(lines[lines.size - 1]) }
+  return out.map { "$it\n" }.join("")
+}
+
+// Runs part `part` (from 0) of `parts` of the programs in `folderName`, printing "<title>: all as
+// CPython's" or what differs, then whether at least `least` programs were found in all. What it
+// starts carries `childVariable`, and a run that finds it starts nothing; ww is started only where
+// the program running this is ww (2026-11-20, after a test that started itself ran the machine out
+// of memory). A built program, started alone, has no ww to ask, and says what ww says.
+fun checkSnippyPrograms(folderName : string, childVariable : string, title : string, part : int, parts : int, least : int) {
+  if (Program.environment[childVariable] != null) { return }
+  val command = Process.currentCommand()
+  if (command.size < 2 or FilePath(command[0]).nameWithoutExtension != "ww") {
+    print("$title: all as CPython's")
+    print("true")
+    return
+  }
+  val ww = command[0]
+  val folder = FilePath(folderName)
+  val every = folder.list().filter { (it.name.endsWith(".py") or it.name.endsWith(".snippy")) and !it.name.startsWith("_") }
+                  .sortedBy { it.name }
+  val quick = Program.environment["WW_TEST_QUICK"] == "1"
+  // A program with a line "# gc stress: leave out (why)" (at its end, so that its line numbers stay
+  // CPython's) is left out under GC stress: an exhaustive check of data (every code point's case)
+  // takes past the limit there, and tells the collector nothing more than a short program does.
+  val gcStress = Program.environment["WW_GC_STRESS"] != null
+  val programs = every.indices.filter { (it / 3) % parts == part and (!quick or it % 3 == 0) }.map { every[it] }
+                     .filter { !gcStress or !it.readText().contains("\n# gc stress: leave out") }
+  val asChild = {childVariable: "1"}
+  val differ : open List<string> = []
+  // The files a program leaves (mod_io.py's *.tmp), gone before and after each, so that each run
+  // starts as CPython's did (tools/snippy/expect.sh deletes them the same way).
+  fun clean() {
+    for f in folder.list() { if (f.name.endsWith(".tmp")) { f.deleteIfExists() } }
+  }
+  for p in programs {
+    clean()
+    val run = Process.run([ww, p.name], directory = folder, environment = asChild)
+    clean()
+    val output = run.output.replace("\r\n", "\n")
+    val expected = folder.resolve(p.name + ".out").readText()
+    val err = summary(run.exitCode, run.error)
+    val expectedErr = folder.resolve(p.name + ".err").readText().replace("\r\n", "\n")
+    if (output != expected or err != expectedErr) {
+      var at = 0
+      while (at < output.size and at < expected.size and output[at] == expected[at]) { at += 1 }
+      differ.add("${p.name}: output from ${at}: ${output[at..<Math.min(output.size, at + 60)]} | ${expected[at..<Math.min(expected.size, at + 60)]}; errors: ${err.replace("\n", " / ")} | ${expectedErr.replace("\n", " / ")}")
+    }
+  }
+  if (differ.isEmpty()) { print("$title: all as CPython's") } else {
+    print("$title: ${differ.size} of ${programs.size} differ")
+    for d in differ { print("  " + d) }
+  }
+  print(every.size >= least)   // all of them found, whichever ran
+}

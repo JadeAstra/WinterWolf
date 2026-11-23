@@ -1,0 +1,8 @@
+// Snippy's builtins and modules (the Snippy plan, part 5.3's gate) against what CPython 3.14 gives: part 2 of 3 of
+// tests/snippy_programs/lib, run as snippy_programs/check.ww says (the parts run side by side, each
+// well inside the runner's time limit under GC stress).
+import snippy_programs.check.*
+
+checkSnippyPrograms("snippy_programs/lib", "WW_SNIPPY_LIB_CHILD", "snippy builtins and modules", 1, 3, 24)
+// expect: snippy builtins and modules: all as CPython's
+// expect: true

@@ -86,3 +86,4 @@ for k in range(3000):
         kinds["overflow"] += 1
         check = (check * 1000003 + 7) % (2**61 - 1)
 print(check, kinds, repr(math.fsum([-0.0])), repr(math.fsum([])), repr(math.fsum([0.1] * 10)))
+# gc stress: leave out (every seventh code point's classes, and 3000 sums of random floats: past the limit under GC stress, and nothing more for the collector than a short program)

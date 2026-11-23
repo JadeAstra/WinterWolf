@@ -1,0 +1,8 @@
+// Snippy's test programs (the Snippy plan, part 5.2's gate) against what CPython 3.14 gives: part 2 of 3 of
+// tests/snippy_programs/run, run as snippy_programs/check.ww says (the parts run side by side, each
+// well inside the runner's time limit under GC stress).
+import snippy_programs.check.*
+
+checkSnippyPrograms("snippy_programs/run", "WW_SNIPPY_RUN_CHILD", "snippy programs", 1, 3, 60)
+// expect: snippy programs: all as CPython's
+// expect: true

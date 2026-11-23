@@ -1,69 +1,8 @@
-// Snippy's builtins and modules against what CPython 3.14 gives for them (the Snippy plan, part 5.3's gate): each program of
-// snippy_programs/lib (a .py or .snippy file; one whose name starts with _ is a module the others import),
-// run by `ww <file>`, gives what CPython gave: its output (<file>.out), and in <file>.err its exit
-// code, each traceback frame's line and function, and the last line it wrote to standard error.
-// Those were made by tools/snippy/expect.sh in WSL; tools/snippy/check.sh compares the same by hand.
-// Run by ww itself; a built program, started alone, has no ww to ask, and says what ww says.
+// Snippy's builtins and modules (the Snippy plan, part 5.3's gate) against what CPython 3.14 gives: part 1 of 3 of
+// tests/snippy_programs/lib, run as snippy_programs/check.ww says (the parts run side by side, each
+// well inside the runner's time limit under GC stress).
+import snippy_programs.check.*
 
-// What a run's standard error tells of it, as expect.sh writes it: the exit code, then
-// "line N, in name" for each frame of a traceback, then the last line.
-fun summary(code : int, error : string) : string {
-  val lines = error.replace("\r\n", "\n").split("\n").filter { it.isNotEmpty() }
-  val out : open List<string> = ["$code"]
-  for line in lines {
-    if (line.startsWith("  File \"") and line.contains("\", line ")) {
-      val at = line.indexOf("\", line ")
-      out.add("line " + line[(at + 8)..])
-    }
-  }
-  if (lines.isNotEmpty()) { out.add(lines[lines.size - 1]) }
-  return out.map { "$it\n" }.join("")
-}
-
-val command = Process.currentCommand()
-// What this test starts carries WW_SNIPPY_LIB_CHILD, and a run that finds it starts nothing; and ww is started
-// only where the program running this is ww (2026-11-20, after a test that started itself ran the
-// machine out of memory).
-val asChild = {"WW_SNIPPY_LIB_CHILD": "1"}
-if (Program.environment["WW_SNIPPY_LIB_CHILD"] != null) {
-} else if (command.size < 2 or FilePath(command[0]).nameWithoutExtension != "ww") {
-  print("snippy builtins and modules: all as CPython's")
-  print("true")
-} else {
-  val ww = command[0]
-  val folder = FilePath("snippy_programs/lib")
-  val every = folder.list().filter { (it.name.endsWith(".py") or it.name.endsWith(".snippy")) and !it.name.startsWith("_") }
-                  .sortedBy { it.name }
-  // Quick (WW_TEST_QUICK=1, under GC stress, where each program's ww is stressed too): every
-  // third program, the same ones each time; all of them otherwise. All 61 under GC stress take
-  // some 590 s alone, at the 600 s limit (2026-11-20).
-  val quick = Program.environment["WW_TEST_QUICK"] == "1"
-  val programs = quick ? every.indices.filter { it % 3 == 0 }.map { every[it] } : every
-  val differ : open List<string> = []
-  // The files a program leaves (mod_io.py's *.tmp), gone before and after each, so that each run
-  // starts as CPython's did (tools/snippy/expect.sh deletes them the same way).
-  fun clean() {
-    for f in folder.list() { if (f.name.endsWith(".tmp")) { f.deleteIfExists() } }
-  }
-  for p in programs {
-    clean()
-    val run = Process.run([ww, p.name], directory = folder, environment = asChild)
-    clean()
-    val output = run.output.replace("\r\n", "\n")
-    val expected = folder.resolve(p.name + ".out").readText()
-    val err = summary(run.exitCode, run.error)
-    val expectedErr = folder.resolve(p.name + ".err").readText().replace("\r\n", "\n")
-    if (output != expected or err != expectedErr) {
-      var at = 0
-      while (at < output.size and at < expected.size and output[at] == expected[at]) { at += 1 }
-      differ.add("${p.name}: output from ${at}: ${output[at..<Math.min(output.size, at + 60)]} | ${expected[at..<Math.min(expected.size, at + 60)]}; errors: ${err.replace("\n", " / ")} | ${expectedErr.replace("\n", " / ")}")
-    }
-  }
-  if (differ.isEmpty()) { print("snippy builtins and modules: all as CPython's") } else {
-    print("snippy builtins and modules: ${differ.size} of ${programs.size} differ")
-    for d in differ { print("  " + d) }
-  }
-  print(every.size >= 24)   // all of them found, whichever ran
-}
+checkSnippyPrograms("snippy_programs/lib", "WW_SNIPPY_LIB_CHILD", "snippy builtins and modules", 0, 3, 24)
 // expect: snippy builtins and modules: all as CPython's
 // expect: true

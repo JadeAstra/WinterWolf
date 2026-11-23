@@ -54,3 +54,4 @@ for c in cased:
             back = fold(back, "1" if m else "0")
 print(pairs, back)
 print([re.findall("(?i)ı", "Iiıİ"), re.findall("(?i)s", "SsſẞßΣ"), re.findall("(?i)k", "KkK"), re.findall("(?i)[ᲀ]", "вВᲀ"), re.findall("(?i)ﬅ", "ﬅﬆst")])
+# gc stress: leave out (every character with another case, each way it can be asked: past the limit under GC stress, and nothing more for the collector than a short program)
